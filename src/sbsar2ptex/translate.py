@@ -69,6 +69,8 @@ class _Context:
     """Material Maker parameters for the next shader node made."""
     exposed: dict[str, list[str]] = field(default_factory=dict)
     """Parameter name -> the MM nodes declaring it (for the remote node)."""
+    sampled: list[str] | None = None
+    """A pixel processor's input names by index, while translating it."""
     count: int = 0
 
 
@@ -208,13 +210,50 @@ def _param_for(uid: int) -> str:
     return f"{'ivec' if gi.type >= IN_INT2 else 'vec'}{width}({', '.join(parts)})"
 
 
+def _sample(kind: str, index: int, pos: str, filtering: int) -> str:
+    """Return GLSL sampling a pixel processor's input ``index`` at ``pos``.
+
+    Filtering 0 is bilinear (the inputs are buffered with filtering);
+    otherwise the nearest texel. Positions wrap.
+    """
+    if _CTX.sampled is None or index >= len(_CTX.sampled):
+        msg = f"sample of input {index} outside a pixel processor"
+        raise UnsupportedError(msg)
+    n = num(float(1 << _CTX.size))
+    at = f"fract({pos})"
+    if filtering:
+        at = f"(floor(fract({pos}) * {n}) + 0.5) / {n}"
+    value = f"${_CTX.sampled[index]}({at})"
+    # samplelum is the mean of R, G and B (a grayscale input's value).
+    return f"dot({value}.rgb, vec3(1.0 / 3.0))" if kind == "lum" else value
+
+
+def _rand(a: str, k: int) -> str:
+    """Return GLSL for Substance's rand(a): uniform in [0, a).
+
+    An approximation: Substance's generator is its own (not identified), so
+    the noise has the same distribution, not the same values. It varies
+    per pixel in a pixel processor, as Substance's does, and with the
+    node's Material Maker seed ($seed), as Substance's with its random seed.
+    """
+    where = "uv * 1024.0" if _CTX.sampled is not None else "vec2(0.0)"
+    return (
+        f"({a} * fract(sin(dot(vec3({where}, $seed * 100.0 + {k}.0),"
+        " vec3(12.9898, 78.233, 37.719))) * 43758.5453))"
+    )
+
+
 def dynamic(node: Node, offset: int) -> GLExpr:
     """Return the value of the function block at file ``offset`` in ``node``."""
     block = decode(node.at(offset, (node.end - offset) // 4))
     _CTX.count += 1
     prefix = f"f{_CTX.count}"
     n = float(1 << _CTX.size)
-    builtin_glsl = {1: f"vec2({num(n)})", 3: f"vec2({num(float(_CTX.size))})"}
+    builtin_glsl = {
+        1: f"vec2({num(n)})",
+        3: f"vec2({num(float(_CTX.size))})",
+        8: "uv",  # $pos: the pixel, in a pixel processor
+    }
     builtin_vals = {1: [n, n], 3: [float(_CTX.size)] * 2}
 
     def builtins(ident: int, width: int) -> str:
@@ -225,15 +264,18 @@ def dynamic(node: Node, offset: int) -> GLExpr:
 
     try:
         lines, result = to_glsl(
-            block, prefix, lambda uid, *_: _param_for(uid), builtins
+            block, prefix, lambda uid, *_: _param_for(uid), builtins, _sample, _rand
         )
         values = {
             uid: [float(x) for x in gi.default] or [0.0]
             for uid, gi in _CTX.inputs.items()
         }
-        value = evaluate(block, values, builtin_vals)
     except FunctionError as e:
         raise UnsupportedError(str(e)) from e
+    try:
+        value = evaluate(block, values, builtin_vals)
+    except (FunctionError, KeyError):  # per-pixel: no single value
+        value = [0.0] * block.instrs[-1].width
     last = block.instrs[-1]
     t = glsl_type(last.type, last.width)
     body = "\n\t".join(lines)
@@ -987,6 +1029,24 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
     return buffered(made, ["input", "gradient"], {"gradient"}, size)
 
 
+def _pixelprocessor(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Pixel processor: its per-pixel function (the last code block) as GLSL.
+
+    $pos is the pixel (uv); samples read the inputs, buffered.
+    """
+    count = node.fields[0]
+    names = [f"input{n or ''}" for n in range(count)]
+    _CTX.sampled = names
+    try:
+        value = dynamic(node, node.code[-1])
+    finally:
+        _CTX.sampled = None
+    t = "rgba" if color else "f"
+    body = f"return {vec(value, 4)};" if color else f"return {num(value)};"
+    made = shader(name, [(nm, "rgba") for nm in names], t, body)
+    return buffered(made, names, set(names), size)
+
+
 TRANSLATORS = {
     0: _gradient,
     1: _gradient,
@@ -1012,6 +1072,8 @@ TRANSLATORS = {
     13: _uniform,
     29: _hsl,
     37: _normal,
+    40: _pixelprocessor,
+    41: _pixelprocessor,
     30: _levels,
     31: _levels,
     38: _dyngradient,

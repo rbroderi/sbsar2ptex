@@ -236,6 +236,58 @@ def function_cases() -> list[dict]:
             "floats": floats,
         }
     )
+    return out + pixel_cases()
+
+
+def pixel_cases() -> list[dict]:
+    """Return pixel processor cases: per-pixel functions that sample inputs."""
+    pos = get("$pos", FLOAT2)
+    pa = get("pa")
+
+    def at(dx: float, dy: float) -> tuple:
+        shift = fn("const_float2", FLOAT2, data=f'<constantValueFloat2 v="{dx} {dy}"/>')
+        return fn("add", FLOAT2, a=pos, b=shift)
+
+    def lum(where: tuple, index: int, filtering: int = 0) -> tuple:
+        data = f'<constantValueInt2 v="{index} {filtering}"/>'
+        return fn("samplelum", pos=where, data=data)
+
+    def col(where: tuple, index: int) -> tuple:
+        data = f'<constantValueInt2 v="{index} 0"/>'
+        return fn("samplecol", FLOAT4, pos=where, data=data)
+
+    def per(tree: tuple) -> tuple:
+        return (("perpixel", "dynamicValue", function_graph(tree)),)
+
+    gray = fn(
+        "add",
+        a=fn("mul", a=lum(at(0.013, -0.021), 0), b=pa),
+        b=fn("mul", a=lum(pos, 1), b=fn("sub", a=const(1.0), b=pa)),
+    )
+    color = fn("lerp", FLOAT4, a=col(pos, 0), b=col(at(0.05, 0.1), 1), x=pa)
+    scale = fn("const_float2", FLOAT2, data='<constantValueFloat2 v="0.37 0.37"/>')
+    nearest = lum(fn("mul", FLOAT2, a=pos, b=scale), 0, 1)
+    l4 = lum(pos, 0)
+    v2 = fn("vector2", FLOAT2, componentsin=l4, componentslast=l4)
+    v3 = fn("vector3", FLOAT3, componentsin=v2, componentslast=l4)
+    lum_of_color = fn("vector4", FLOAT4, componentsin=v3, componentslast=const(1.0))
+    floats = {"pa": 0.3}
+    out = []
+    for tag, kind, tree in (
+        ("pp_gray", GRAY, gray),
+        ("pp_color", COLOR, color),
+        ("pp_nearest", GRAY, nearest),
+        ("pp_lum_color", COLOR, lum_of_color),
+    ):
+        out.append(
+            {
+                "tag": tag,
+                "filter": "pixelprocessor",
+                "kind": kind,
+                "params": per(tree),
+                "floats": floats,
+            }
+        )
     return out
 
 

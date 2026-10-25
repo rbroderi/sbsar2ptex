@@ -25,6 +25,9 @@ Ops, from function graphs cooked by sbscooker (see sbsasm-probe):
     0x23 abs  0x24 floor  0x25 ceil  0x26 cos  0x27 sin  0x28 sqrt
     0x29 log  0x2a exp  0x2b pow2  0x2c tan  0x2d atan2  0x2e cartesian
     0x2f lerp  0x30 min  0x31 max  0x32 rand  0x35 log2  0x36 pow
+    0x33 samplelum, 0x34 samplecol (position, input index[, filtering])
+
+Built-ins: 1 $size, 3 $sizelog2, 8 $pos (a pixel processor's pixel).
 """
 
 import math
@@ -46,9 +49,9 @@ OP_NAMES = {
     0x23: "abs", 0x24: "floor", 0x25: "ceil", 0x26: "cos", 0x27: "sin",
     0x28: "sqrt", 0x29: "log", 0x2A: "exp", 0x2B: "pow2", 0x2C: "tan",
     0x2D: "atan2", 0x2E: "cartesian", 0x2F: "lerp", 0x30: "min", 0x31: "max",
-    0x32: "rand", 0x35: "log2", 0x36: "pow",
+    0x32: "rand", 0x33: "samplelum", 0x34: "samplecol", 0x35: "log2", 0x36: "pow",
 }  # fmt: skip
-BUILTINS = {1: "$size", 3: "$sizelog2"}
+BUILTINS = {1: "$size", 3: "$sizelog2", 8: "$pos"}
 """Built-in values by id (more to come: $pos, $time...)."""
 
 
@@ -286,13 +289,17 @@ def to_glsl(
     prefix: str,
     inputs: Callable[[int, int, int], str],
     builtins: Callable[[int, int], str],
+    samples: Callable[[str, int, str, int], str] | None = None,
+    rand: Callable[[str, int], str] | None = None,
 ) -> tuple[list[str], str]:
     """Return GLSL statements computing ``block`` and the name of its value.
 
     Values are named ``{prefix}_{k}``; ``inputs(uid, type, width)`` and
     ``builtins(id, width)`` give GLSL expressions for graph inputs and
     built-ins (a Material Maker parameter such as ``$p_amount``, a
-    constant...).
+    constant...); ``samples(kind, input index, position, filtering)``, kind
+    "lum" or "col", gives a pixel processor's input sampled; ``rand(a,
+    k)`` a random value in [0, a) for instruction k.
     """
     lines: list[str] = []
     names: list[str] = []
@@ -336,6 +343,12 @@ def to_glsl(
             expr = f"vec2({r} * cos({th}), {r} * sin({th}))"
         elif ins.op == 0x2F:  # noqa: PLR2004
             expr = f"mix({v(ops[0])}, {v(ops[1])}, {v(ops[2])})"
+        elif ins.op == 0x32 and rand is not None:  # noqa: PLR2004
+            expr = rand(v(ops[0]), k)
+        elif ins.op in (0x33, 0x34) and samples is not None:
+            kind = "lum" if ins.op == 0x33 else "col"  # noqa: PLR2004
+            filtering = ops[2] if len(ops) > 2 else 0  # noqa: PLR2004
+            expr = samples(kind, ops[1], v(ops[0]), filtering)
         elif ins.op in _GLSL_BINARY:
             expr = _GLSL_BINARY[ins.op].format(a=v(ops[0]), b=v(ops[1]))
         elif ins.op in _GLSL_UNARY:
