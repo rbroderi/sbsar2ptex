@@ -1,0 +1,65 @@
+[project]
+name = "sbsar2ptex"
+version = "0.1.0"
+description = "Convert Substance archives (.sbsar) to Material Maker graphs (.ptex), and decompile their compiled graphs (.sbsasm)"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "rbroderi" }]
+requires-python = ">=3.12"
+dependencies = [
+    "defusedxml>=0.7.1",
+    "py7zr>=1.0.0",
+]
+keywords = ["substance", "sbsar", "material-maker", "ptex", "textures"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+
+[project.urls]
+Repository = "https://github.com/rbroderi/sbsar2ptex"
+
+[project.scripts]
+sbsar2ptex = "sbsar2ptex.convert:main"
+sbsasm-dump = "sbsar2ptex.sbsasm:main"
+sbsasm-probe = "sbsar2ptex.probe:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.12",
+]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "ANN",
+    "CPY001",
+    "D203",
+    "D213",
+    "T201",
+    "COM812",
+    # Format decoders and CLI mains are long by nature.
+    "C901",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR0917",
+]
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D101", "D102", "D103", "PLR2004", "S101", "SLF001", "INP001"]
