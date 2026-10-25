@@ -18,6 +18,8 @@ from pathlib import Path
 
 from sbsar2ptex.archive import read_archive
 
+GRAY_INPUTS = {"opacity", "inputgradient", "inputintensity", "intensity", "gradient"}
+"""Filter inputs that take a grayscale image whatever the filter's own type."""
 COOKER = Path("C:/Program Files/Adobe/Adobe Substance 3D Designer/sbscooker.exe")
 NODE_MARK = 0x88
 GRAY, COLOR = 2, 1
@@ -88,11 +90,18 @@ BRIDGE_PARAMETERS = "".join(
 )
 
 
-def sbs(filt: str, kind: int, *, chain: bool = False) -> str:
+def sbs(
+    filt: str,
+    kind: int,
+    *,
+    chain: bool = False,
+    params: tuple[tuple[str, str, str], ...] | None = None,
+) -> str:
     """Return a package: graph inputs -> ``filt`` -> output, of image ``kind``.
 
     With ``chain``, input A reaches the filter through a blur, so the filter's
     first input is not node 0 (which reads the same as a zero flag word).
+    ``params`` ((name, value kind, value) each) replaces PARAMETERS[filt].
     """
     inputs = FILTERS[filt]
     first = 150 if chain else 100
@@ -117,18 +126,26 @@ def sbs(filt: str, kind: int, *, chain: bool = False) -> str:
     parameters = "".join(
         f'<parameter><name v="{name}"/><relativeTo v="0"/><paramValue>'
         f'<{vkind} v="{value}"/></paramValue></parameter>'
-        for name, vkind, value in PARAMETERS.get(filt, ())
+        for name, vkind, value in (
+            PARAMETERS.get(filt, ()) if params is None else params
+        )
     )
-    default = (
-        '<constantValueFloat4 v="0 0 0 0"/>'
-        if kind == COLOR
-        else '<constantValueFloat1 v="0"/>'
-    )
+    # Graph input k feeds the filter's k-th input: grayscale where that
+    # input always is, else the probe's image type.
+    kinds = [
+        GRAY if k < len(inputs) and inputs[k] in GRAY_INPUTS else kind for k in range(3)
+    ]
 
     def paraminput(ident: str, uid: int) -> str:
+        k = kinds[uid - 10]
+        default = (
+            '<constantValueFloat4 v="0 0 0 0"/>'
+            if k == COLOR
+            else '<constantValueFloat1 v="0"/>'
+        )
         return (
             f'<paraminput><identifier v="{ident}"/><uid v="{uid}"/>'
-            f'<isConnectable v="1"/><type v="{kind}"/>'
+            f'<isConnectable v="1"/><type v="{k}"/>'
             f"<defaultValue>{default}</defaultValue>"
             '<defaultWidget><name v=""/><options/></defaultWidget></paraminput>'
         )
@@ -136,7 +153,8 @@ def sbs(filt: str, kind: int, *, chain: bool = False) -> str:
     def bridge(uid: int, entry: int) -> str:
         return (
             f'<compNode><uid v="{uid}"/><compOutputs><compOutput><uid v="{uid + 1}"/>'
-            f'<comptype v="{kind}"/></compOutput></compOutputs><compImplementation>'
+            f'<comptype v="{kinds[entry - 10]}"/></compOutput></compOutputs>'
+            "<compImplementation>"
             f'<compInputBridge><entry v="{entry}"/><parameters>{BRIDGE_PARAMETERS}'
             "</parameters></compInputBridge></compImplementation></compNode>"
         )

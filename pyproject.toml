@@ -27,6 +27,8 @@ sbsasm-probe = "sbsar2ptex.probe:main"
 
 [dependency-groups]
 dev = [
+    "numpy>=2.5.4",
+    "pillow>=13.0.0",
     "pytest>=8",
     "ruff>=0.12",
 ]
@@ -62,4 +64,5 @@ ignore = [
 force-single-line = true
 
 [tool.ruff.lint.per-file-ignores]
+"scripts/**/*.py" = ["INP001", "E501", "FBT001", "S603", "PLR2004"]
 "tests/**/*.py" = ["D101", "D102", "D103", "PLR2004", "S101", "SLF001", "INP001"]

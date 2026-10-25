@@ -77,6 +77,17 @@ Not decoded yet: what the function bytecode computes (parameters driven by funct
 are listed as "reads", not evaluated), value processors' links to the nodes that use
 their values, and the meaning of most flag bits.
 
+## Translate to Material Maker nodes (in progress)
+
+`sbsar2ptex.translate` turns decompiled nodes into Material Maker shader nodes
+whose GLSL reproduces each Substance filter, wired as the compiled graph is.
+Done so far: uniform color, levels, transformation and all twelve blend modes,
+grayscale and color, each within 2/255 of `sbsrender` (99th percentile) by
+`scripts/check_filters.py`. Still to come: the remaining filters (blurs and
+warps need Material Maker buffers), FX-Maps, pixel processors, the function
+bytecode (for parameters driven by functions), and exposing the material's
+parameters on the translated graph.
+
 ## Develop
 
 ```bash

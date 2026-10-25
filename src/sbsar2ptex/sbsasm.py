@@ -133,6 +133,25 @@ TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
 """Bytes a graph input of each type takes in the defaults block."""
 
 
+def field_count(op: int, rest: list[int], is_offset) -> int | None:
+    """Return how many fields precede ``op``'s code offsets, if known.
+
+    ``rest`` is the node's words after its node word. Fields can hold values
+    that look like code offsets (a flag word of 0x40), so where the layout
+    is known it decides, not the look of the words.
+    """
+    if op in (40, 41):
+        return 1 + rest[0] if rest else 0
+    if op not in LAYOUTS:
+        return None
+    n = len(LAYOUTS[op])
+    if op in (42, 43) and rest and not rest[0] & 1:
+        n -= 1  # distance without a source
+    if op in (14, 15) and len(rest) > n and not is_offset(rest[n]):
+        n += 1  # a warp's optional leading flag word: three fields
+    return min(n, len(rest))
+
+
 @dataclass
 class Node:
     """One node: its op, inputs and what else is read from it."""
@@ -245,9 +264,11 @@ class Asm:
         def is_offset(w: int) -> bool:
             return start < w + BASE <= end and w % 4 == 0
 
-        k = 0
-        while k < len(rest) and not is_offset(rest[k]):
-            k += 1
+        k = field_count(node.op, rest, is_offset)
+        if k is None:  # unknown layout: up to the first code offset
+            k = 0
+            while k < len(rest) and not is_offset(rest[k]):
+                k += 1
         node.fields = rest[:k]
         while k < len(rest) and is_offset(rest[k]):
             node.code.append(rest[k] + BASE)
