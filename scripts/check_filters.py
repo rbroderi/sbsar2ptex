@@ -293,6 +293,7 @@ def fxmap_cases() -> list[dict]:
         ("fx_pats1_g", GRAY, quad4((2, 3, 4, 5)), flat),
         ("fx_pats2_g", GRAY, quad4((6, 7, 8, 9), "0.3"), flat),
         ("fx_pats3_g", GRAY, quad4((10, 12, 15, 16), "0.4"), flat),
+        ("fx_pats4_g", GRAY, quad4((13, 14, 17, 18), "0.3"), flat),
         ("fx_wrap_g", GRAY, pat(8, ("patternsize", f2, "1.6 0.7"),
                                 ("frameoffset", f2, "0.4 0.1")), ()),
         ("fx_grid_g", GRAY, chain, ()),
@@ -634,6 +635,8 @@ def main() -> None:
 
     mm_out = out / "mm"
     mm_out.mkdir(exist_ok=True)
+    for tag, _ in made:  # an earlier run's image must not pass for this one's
+        (mm_out / f"{tag}_albedo.png").unlink(missing_ok=True)
     subprocess.run(
         [str(args.mm), "--export", "-o", mm_out.as_posix(),
          *(f"{(out / t).as_posix()}.ptex" for t, _ in made)],

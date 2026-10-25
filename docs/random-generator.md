@@ -215,21 +215,21 @@ call  state       unit value          u16
 
 ## 8. FX-Map `rand`
 
-FX-Map function graphs use the same LCG step and float conversion described in
-sections 4 and 5, but they do **not** use the Jenkins pixel-position hash.
-There is no pixel coordinate in an FX-Map random state.
+FX-Map function graphs use the float conversion described in section 5, but
+they use a different LCG step and do **not** use the Jenkins pixel-position
+hash. There is no pixel coordinate in an FX-Map random state.
 
-The LCG constants remain:
+The FX-Map call constants are:
 
 ```text
-LCG_M = 0x4937573B
-LCG_C = 0x0000C7C1
+FX_LCG_M = 0x3E1BD4C1
+FX_LCG_C = 0x0000C613
 ```
 
 Given an FX-Map function's starting state, every `rand(a)` call is therefore:
 
 ```text
-state = (state * LCG_M + LCG_C) & 0xFFFFFFFF
+state = (state * FX_LCG_M + FX_LCG_C) & 0xFFFFFFFF
 mantissa = (state >>> 1) & 0x007FFFFF
 unit_value = bitcast_float32(0x3F800000 OR mantissa) - 1.0f
 result = float32(unit_value * float32(a))
@@ -255,7 +255,7 @@ below. With no FX-Map override and no tree-node seed, the first `rand` starts
 directly from `$randomseed`.
 
 For example, a root Quadrant at graph seed zero starts at state zero. Its first
-call advances to `0x0000C7C1` and returns `0.003047943115234375`.
+call advances to `0x0000C613` and returns `0.003022313117980957`.
 
 ### 8.2 Effective tree-node state
 
@@ -499,9 +499,9 @@ The first three unit-amplitude calls in the leaf are:
 
 ```text
 call  state       unit value          u16
-1     0x26CA4EC3  0.7902642488479614  51790
-2     0x384A33B2  0.2898513078689575  18995
-3     0x0DEA2FC7  0.9147914648056030  59951
+1     0x45CCE379  0.8003458976745605  52451
+2     0x979B784C  0.6073043346405029  39800
+3     0x23D9675F  0.8492335081100464  55655
 ```
 
 ### 9.2 Iterate passes
@@ -524,30 +524,36 @@ pass 1 child effective = pass 1 incoming + 5
 The first unit-amplitude call in each pass is:
 
 ```text
-pass  state after rand  unit value          u16
-0     0x429E5F39        0.6186404228210449  40543
-1     0xCC349BD8        0.2055029869079590  13468
+pass  state after rand  unit value           u16
+0     0x79EF12FB        0.9338833093643188   61202
+1     0x2F2D8AA8        0.17789697647094727  11658
 ```
 
 Drawing both full-frame square patterns in additive mode produces:
 
 ```text
-round((0.6186404228210449 + 0.2055029869079590) * 65535)
-    = 54010
+round((0.9338833093643188 + 0.17789697647094727) * 65535)
+    = 72861
 ```
+
+An unsigned 16-bit output clamps this sum to `65535`.
 
 ### 9.3 Independent parameter functions
 
 At effective state zero:
 
 ```text
-first rand(1)  = 0.003047943115234375
-second rand(1) = 0.5328404903411865
+first rand(1)  = 0.003022313117980957
+second rand(1) = 0.6204589605331421
 ```
 
 Two calls inside one parameter function return those first and second values.
 The first call in a different parameter function returns
-`0.003047943115234375` again, because that function restarts from state zero.
+`0.003022313117980957` again, because that function restarts from state zero.
+
+A literal `rand(0)` is not a reliable way to skip a value in a compiled
+function: the compiler may constant-fold the call away, in which case it does
+not advance the runtime generator.
 
 ## 10. Additional FX-Map implementation errors
 

@@ -234,6 +234,158 @@ def evaluate(
     return vals[-1]
 
 
+# Interval bounds (for culling): each component's (low, high), or infinite.
+
+Interval = tuple[float, float]
+_ALL = (-math.inf, math.inf)
+
+
+def _imul(a: Interval, b: Interval) -> Interval:
+    products = [
+        x * y if not (x == 0 or y == 0) else 0.0
+        for x in a
+        for y in b
+    ]  # fmt: skip
+    return min(products), max(products)
+
+
+def _iunary(op: int, a: Interval) -> Interval:  # noqa: PLR0911
+    lo, hi = a
+    if op == 0x17:  # noqa: PLR2004
+        return -hi, -lo
+    if op == 0x23:  # noqa: PLR2004
+        if lo >= 0:
+            return a
+        return (0.0, max(-lo, hi)) if hi >= 0 else (-hi, -lo)
+    if op == 0x24:  # noqa: PLR2004
+        return math.floor(lo) if lo > -math.inf else lo, math.floor(
+            hi
+        ) if hi < math.inf else hi
+    if op == 0x25:  # noqa: PLR2004
+        return math.ceil(lo) if lo > -math.inf else lo, math.ceil(
+            hi
+        ) if hi < math.inf else hi
+    if op in (0x26, 0x27):
+        return -1.0, 1.0
+    if op == 0x28:  # noqa: PLR2004
+        return math.sqrt(max(lo, 0.0)), math.sqrt(max(hi, 0.0))
+    if op == 0x1C:  # noqa: PLR2004
+        return 0.0, 1.0
+    if op == 0x2A:  # noqa: PLR2004
+        return math.exp(min(lo, 700)), math.exp(min(hi, 700))
+    if op == 0x2B:  # noqa: PLR2004
+        return 2.0 ** min(lo, 1000), 2.0 ** min(hi, 1000)
+    return _ALL
+
+
+def bounds(
+    block: Block,
+    inputs: Callable[[int, int], list[Interval]],
+    builtins: dict[int, list[Interval]],
+) -> list[Interval]:
+    """Return bounds on the block's value, each component's (low, high).
+
+    ``inputs(uid, width)`` and ``builtins`` bound the graph inputs and built-ins;
+    rand(a) is within [0, a]. Ops without a simple bound give (-inf, inf).
+    """
+    vals: list[list[Interval]] = []
+    var: dict[int, list[Interval]] = {}
+    for ins in block.instrs:
+        ops = ins.operands
+
+        def arg(k: int, ops: list[int] = ops) -> list[Interval]:
+            return vals[ops[k]]
+
+        if ins.op == 0x00:
+            v = [(float(x), float(x)) for x in constant(ins)]
+        elif ins.op == 0x01:
+            v = builtins.get(ops[0], [_ALL] * ins.width)
+        elif ins.op == 0x02:  # noqa: PLR2004
+            v = inputs(ins.u32s()[0], ins.width)
+        elif ins.op == 0x04:  # noqa: PLR2004
+            v = var.get(ops[0], [_ALL] * ins.width)
+        elif ins.op == 0x07:  # noqa: PLR2004
+            var[ops[1]] = v = arg(0)
+        elif ins.op == 0x09:  # noqa: PLR2004
+            a, b = _bcast(arg(1), arg(2))
+            v = [(min(p[0], q[0]), max(p[1], q[1])) for p, q in zip(a, b, strict=True)]
+        elif ins.op == 0x0C:  # noqa: PLR2004
+            v = arg(1)
+        elif ins.op in (0x0D, 0x0E, 0x0F):
+            v = [x for o in ops for x in vals[o]]
+        elif ins.op == 0x10:  # noqa: PLR2004
+            src, sel = arg(0), ops[1]
+            v = [src[sel >> (2 * k) & 3] for k in range(ins.width)]
+        elif ins.op == 0x11:  # noqa: PLR2004
+            v = [_iunary(0x24, x) if ins.type != FLOAT else x for x in arg(0)]
+            if ins.type != FLOAT:  # truncation toward zero: widen by one
+                v = [(lo - 1, hi + 1) for lo, hi in v]
+        elif ins.op in (0x12, 0x13, 0x14, 0x30, 0x31):
+            a, b = _bcast(arg(0), arg(1))
+            v = []
+            for p, q in zip(a, b, strict=True):
+                if ins.op == 0x12:  # noqa: PLR2004
+                    v.append((p[0] + q[0], p[1] + q[1]))
+                elif ins.op == 0x13:  # noqa: PLR2004
+                    v.append((p[0] - q[1], p[1] - q[0]))
+                elif ins.op == 0x14:  # noqa: PLR2004
+                    v.append(_imul(p, q))
+                elif ins.op == 0x30:  # noqa: PLR2004
+                    v.append((min(p[0], q[0]), min(p[1], q[1])))
+                else:
+                    v.append((max(p[0], q[0]), max(p[1], q[1])))
+        elif ins.op == 0x15:  # noqa: PLR2004
+            a, b = _bcast(arg(0), arg(1))
+            v = [
+                _imul(p, (1 / q[1], 1 / q[0])) if q[0] > 0 or q[1] < 0 else _ALL
+                for p, q in zip(a, b, strict=True)
+            ]
+        elif ins.op == 0x16:  # noqa: PLR2004
+            a, b = _bcast(arg(0), arg(1))
+            v = [
+                (min(0.0, q[0]), max(0.0, q[1])) if q[0] > 0 or q[1] < 0 else _ALL
+                for _, q in zip(a, b, strict=True)
+            ]
+        elif ins.op in (0x1A, 0x1B, 0x1C) or 0x1D <= ins.op <= 0x22:  # noqa: PLR2004
+            v = [(0.0, 1.0)] * ins.width
+        elif ins.op == 0x18:  # noqa: PLR2004
+            terms = [_imul(p, q) for p, q in zip(arg(0), arg(1), strict=True)]
+            v = [(sum(t[0] for t in terms), sum(t[1] for t in terms))]
+        elif ins.op == 0x2D:  # noqa: PLR2004
+            v = [(-math.pi, math.pi)]
+        elif ins.op == 0x2E:  # noqa: PLR2004
+            r = max(abs(arg(0)[0][0]), abs(arg(0)[0][1]))
+            v = [(-r, r), (-r, r)]
+        elif ins.op == 0x2F:  # noqa: PLR2004
+            a, b = _bcast(arg(0), arg(1))
+            t = arg(2) * (len(a) if len(arg(2)) == 1 else 1)
+            v = []
+            for p, q, x in zip(a, b, t, strict=True):
+                d = (q[0] - p[1], q[1] - p[0])
+                m = _imul(d, x)
+                v.append((p[0] + m[0], p[1] + m[1]))
+        elif ins.op == 0x32:  # noqa: PLR2004
+            lo, hi = arg(0)[0]
+            v = [(min(0.0, lo), max(0.0, hi))]
+        elif ins.op in (0x33, 0x34):
+            v = [(0.0, 1.0)] * ins.width
+        elif ins.op in _UNARY:
+            v = [_iunary(ins.op, x) for x in arg(0)]
+        else:
+            v = [_ALL] * ins.width
+        # inf - inf and the like: no bound.
+        vals.append(
+            [
+                (
+                    -math.inf if math.isnan(lo) else lo,
+                    math.inf if math.isnan(hi) else hi,
+                )
+                for lo, hi in v
+            ]
+        )
+    return vals[-1]
+
+
 # GLSL translation.
 
 

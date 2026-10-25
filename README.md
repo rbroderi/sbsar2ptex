@@ -99,11 +99,15 @@ Iterate and Switch tree becomes GLSL functions, and the patterns, placement,
 depth weighting (hurst), blending, image patterns and function-driven
 parameters ($pos, $number, $depth) match `sbsrender` within 2/255 in the
 harness. Their `rand` follows the FX-Map part of the specification
-(sections 8–9, `sbsar2ptex.fxrng`). Renders match its first call from the
-root state, but not its second call within a function or its Quadrant-slot
-and Iterate-pass states yet, so random FX-Maps have the right distribution,
-not the same values. Every pattern is visited for every pixel, so large
-trees are slow. The ridged bell and crescent patterns are drawn as a bell.
+(sections 8–9, `sbsar2ptex.fxrng`), including its distinct call LCG and the
+Quadrant-slot and Iterate-pass state transforms; random Iterate cases match
+pixel for pixel, but random pattern sizes in a Quadrant grid do not yet.
+
+Each tree node is skipped for pixels it cannot reach (interval bounds on its
+offsets and sizes, `rand(a)` within [0, a]); what depends on graph inputs is
+never skipped, since they can change. Scattering maps, whose random offsets
+reach far beyond their cells, still visit thousands of patterns per pixel and
+are slow in Material Maker.
 
 `rand` in value functions is still approximated by a hash with the same
 distribution, not the same values. Gradient maps with

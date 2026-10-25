@@ -1,19 +1,22 @@
 """The FX-Map random generator, as docs/random-generator.md sections 8-9 specify.
 
-FX-Map functions use the pixel processor's LCG step and float conversion, but
-no pixel-position hash: each dynamic function starts a private generator from
-the effective state of the tree node it belongs to. Tree nodes derive their
-children's incoming states by affine transforms: Quadrant slots by a transform
-chosen by the child depth modulo 16, Iterate passes by a single Iterate step.
+FX-Map functions use their own LCG step and the pixel processor's float
+conversion, but no pixel-position hash: each dynamic function starts a private
+generator from the effective state of the tree node it belongs to. Tree nodes
+derive their children's incoming states by affine transforms: Quadrant slots by
+a transform chosen by the child depth modulo 16, Iterate passes by a single
+Iterate step.
 
 ``FX_RNG_GLSL`` is the same transforms and generator as GLSL helpers for
 Material Maker.
 """
 
 from sbsar2ptex.rng import UINT32_MASK
-from sbsar2ptex.rng import advance
 from sbsar2ptex.rng import float32
 from sbsar2ptex.rng import unit_value
+
+FX_LCG_M = 0x3E1BD4C1
+FX_LCG_C = 0x0000C613
 
 # Quadrant child-slot transforms, indexed by child depth modulo 16.
 DEPTH_M = (
@@ -94,7 +97,7 @@ class FxRng:
 
     def rand(self, amplitude: float) -> float:
         """Advance the state and return a value in [0, amplitude), in binary32."""
-        self.state = advance(self.state)
+        self.state = (self.state * FX_LCG_M + FX_LCG_C) & UINT32_MASK
         return float32(unit_value(self.state) * float32(amplitude))
 
 
@@ -124,7 +127,7 @@ uint fx_iter_step(uint s) {{
 }}
 
 float fx_rng_next(inout uint s, float a) {{
-    s = s * 0x4937573Bu + 0x0000C7C1u;
+    s = s * 0x{FX_LCG_M:08X}u + 0x{FX_LCG_C:08X}u;
     uint mantissa = (s >> 1u) & 0x007FFFFFu;
     return (uintBitsToFloat(0x3F800000u | mantissa) - 1.0) * a;
 }}

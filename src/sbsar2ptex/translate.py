@@ -29,6 +29,7 @@ from typing import Any
 from sbsar2ptex import fxmap
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
 from sbsar2ptex.function import FunctionError
+from sbsar2ptex.function import bounds
 from sbsar2ptex.function import decode
 from sbsar2ptex.function import evaluate
 from sbsar2ptex.function import glsl_type
@@ -1173,10 +1174,11 @@ FX_ARGS = "vec2 pos, float number, float depth, uint rs"
 """What an FX-Map function reads: $pos, $number, $depth and its node's
 random state (docs/random-generator.md section 8)."""
 
-FX_DRAW_GLSL = """vec4 fxdraw_$(name)(
-\tvec2 uv, vec2 c, vec2 hs, float a, int id, float s, bool mx
-) {
-\tvec2 d0 = uv - c;
+# The signature stays on one GLSL line: Material Maker rewrites it line by line.
+FX_DRAW_GLSL = (
+    "vec4 fxdraw_$(name)(vec2 uv, vec2 c, vec2 hs, float a, int id, float s,"
+    " bool mx) {\n"
+    """\tvec2 d0 = uv - c;
 \td0 -= round(d0) * $(tile);
 \tvec2 h = max(abs(hs), vec2(1e-8));
 \tfloat ext = length(h);
@@ -1201,7 +1203,16 @@ FX_DRAW_GLSL = """vec4 fxdraw_$(name)(
 \treturn v;
 }
 """
+)
 """A pattern (id >= 0) or image (-1 - index) drawn at c, wrapping."""
+
+FX_NEAR_GLSL = """bool fxnear_$(name)(vec2 uv, vec2 p, float r) {
+\tvec2 d = uv - p;
+\td -= round(d) * $(tile);
+\treturn dot(d, d) <= r * r;
+}
+"""
+"""Whether the pixel is within r of p (wrapping as the FX-Map tiles)."""
 
 _FX_CHILD = ((-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25))
 """Each Quadrant output's cell center, in parent cells from the parent's."""
@@ -1265,12 +1276,105 @@ def _fx_param(node: Node, param: Any, default: list[float]) -> str:
     return vec(value, width)
 
 
+Reach = tuple[float, float]
+"""How far a tree node can draw from its $pos: a + b * its cell size."""
+
+
+def _fx_reach(node: Node, tree: fxmap.Tree | None, size: int) -> dict[int, Reach]:
+    """Return each tree node's reach (by id), for those with a finite one.
+
+    Interval bounds on its parameters (sbsar2ptex.function.bounds), rand(a)
+    within [0, a]; graph inputs, which can change, and $pos are unbounded,
+    so what depends on them is never culled. A node used in several places
+    takes the largest reach.
+    """
+    n = float(1 << size)
+    out: dict[int, Reach] = {}
+    inf = float("inf")
+    memo: dict[tuple, Reach | None] = {}
+
+    def span(param: Any, default: list[float], fixed: dict[int, list]) -> list:
+        if param is None:
+            return [(v, v) for v in default]
+        if param.state != fxmap.CODE:
+            vals = param.value * len(default) if len(param.value) == 1 else param.value
+            return [(v, v) for v in vals]
+        block = decode(node.at(param.code, (node.end - param.code) // 4))
+        got = bounds(block, lambda _uid, width: [(-inf, inf)] * width, fixed)
+        return got * len(default) if len(got) == 1 else got
+
+    def length(iv: list) -> float:
+        return math.sqrt(sum(max(abs(lo), abs(hi)) ** 2 for lo, hi in iv))
+
+    def reach(t: fxmap.Tree | None, number: tuple, depth: tuple) -> Reach | None:
+        if t is None:
+            return (-inf, -inf)
+        key = (id(t), number, depth)
+        if key in memo:
+            return memo[key]
+        memo[key] = None  # (a cycle cannot happen; this guards recursion)
+        fixed = {
+            0: [(0.0, 0.0)],
+            1: [(n, n)] * 2,
+            3: [(float(size), float(size))] * 2,
+            8: [(-inf, inf)] * 2,
+            10: [number],
+            12: [depth],
+        }
+        got: Reach | None
+        if isinstance(t, fxmap.Quadrant):
+            p = t.params
+            bo = length(span(p.get("branchoffset"), [0.0, 0.0], fixed))
+            fo = length(span(p.get("frameoffset"), [0.0, 0.0], fixed))
+            sz = length(span(p.get("patternsize"), [1.0, 1.0], fixed)) / 2
+            a, b = -inf, -inf
+            if t.pattern is not None or t.image is not None:
+                a, b = bo + fo, sz
+            deeper = (depth[0] + 1, depth[1] + 1)
+            for kid in {id(k): k for k in t.children if k is not None}.values():
+                r = reach(kid, number, deeper)
+                if r is None:
+                    a = inf
+                    continue
+                a, b = max(a, bo + r[0]), max(b, math.sqrt(2) / 4 + r[1] / 2)
+            got = (a, b)
+        elif isinstance(t, fxmap.Iterate):
+            count = t.count if isinstance(t.count, int) else None
+            passes = (0.0, float(count - 1)) if count else (0.0, inf)
+            r0, r1 = reach(t.first, number, depth), reach(t.repeated, passes, depth)
+            got = (
+                None
+                if r0 is None or r1 is None
+                else (max(r0[0], r1[0]), max(r0[1], r1[1]))
+            )
+        else:
+            r0 = reach(t.if_false, number, depth)
+            r1 = reach(t.if_true, number, depth)
+            got = (
+                None
+                if r0 is None or r1 is None
+                else (max(r0[0], r1[0]), max(r0[1], r1[1]))
+            )
+        if got is not None and not all(math.isfinite(x) or x == -inf for x in got):
+            got = None
+        memo[key] = got
+        old = out.get(id(t), (-inf, -inf))
+        out[id(t)] = (
+            (inf, inf) if got is None else (max(old[0], got[0]), max(old[1], got[1]))
+        )
+        return got
+
+    reach(tree, (0.0, 0.0), (0.0, 0.0))
+    return {k: v for k, v in out.items() if math.isfinite(v[0]) or v[0] == -inf}
+
+
 def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """FX-Map: its tree evaluated per pixel (see sbsar2ptex.fxmap).
 
     Each tree node is a GLSL function adding what it draws over the pixel
     to ``acc`` (premultiplied rgba; gray in x), its children's functions
-    defined first. Every pattern is visited for every pixel.
+    defined first. A node returns at once when nothing it draws can reach
+    the pixel (_fx_reach); otherwise every pattern is visited.
     """
     tree = fxmap.read_tree(node, color=color)
     st = fxmap.read_settings(node, color=color)
@@ -1287,6 +1391,7 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     images = [f"pattern{n}" for n in range(len(st.patterns))]
     t = "rgba" if color else "f"
     names: dict[int, str] = {}
+    reaches = _fx_reach(node, tree, size)
 
     def emit(tree: fxmap.Tree | None) -> str | None:
         if tree is None:
@@ -1295,6 +1400,12 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
             return names[id(tree)]
         lines: list[str] = []
         args = "uv, {pos}, {cell}, {depth}, {number}, {st}, acc"
+        reach = reaches.get(id(tree))
+        if reach is not None:  # nothing it draws can reach this pixel: skip
+            a, b = (max(x, 0.0) for x in reach)
+            lines.append(
+                f"if (!fxnear_$(name)(uv, pos, {num(a)} + {num(b)} * cell)) return;"
+            )
         # The node's random state: its incoming state plus its own seed.
         lines.append(f"uint e = st + {tree.seed or 0}u;")
         if isinstance(tree, fxmap.Quadrant):
@@ -1448,6 +1559,7 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     )
     tile = f"vec2({1.0 if st.tile_x else 0.0}, {1.0 if st.tile_y else 0.0})"
     _CTX.helpers.append(FX_DRAW_GLSL.replace("$(tile)", tile))
+    _CTX.helpers.append(FX_NEAR_GLSL.replace("$(tile)", tile))
     _CTX.sampled = images  # functions may sample the pattern inputs
     try:
         root = emit(tree)

@@ -4,6 +4,8 @@ import pytest
 
 from sbsar2ptex.fxrng import DEPTH_C
 from sbsar2ptex.fxrng import DEPTH_M
+from sbsar2ptex.fxrng import FX_LCG_C
+from sbsar2ptex.fxrng import FX_LCG_M
 from sbsar2ptex.fxrng import FX_RNG_GLSL
 from sbsar2ptex.fxrng import FxRng
 from sbsar2ptex.fxrng import depth_step
@@ -15,23 +17,50 @@ from sbsar2ptex.rng import float32
 
 # First three unit-amplitude leaf calls of section 9.1: (state, unit, u16).
 LEAF_CALLS = [
-    (0x26CA4EC3, 0.7902642488479614, 51790),
-    (0x384A33B2, 0.2898513078689575, 18995),
-    (0x0DEA2FC7, 0.9147914648056030, 59951),
+    (0x45CCE379, 0.8003458976745605, 52451),
+    (0x979B784C, 0.6073043346405029, 39800),
+    (0x23D9675F, 0.8492335081100464, 55655),
 ]
 
 # Section 9.2: (child effective, state after first rand, unit, u16) per pass.
 PASSES = [
-    (0xE51EFEE8, 0x429E5F39, 0.6186404228210449, 40543),
-    (0xFB74C0D5, 0xCC349BD8, 0.2055029869079590, 13468),
+    (0xE51EFEE8, 0x79EF12FB, 0.9338833093643188, 61202),
+    (0xFB74C0D5, 0x2F2D8AA8, 0.17789697647094727, 11658),
 ]
 
 
 def test_root_state_zero_first_call():
     rng = FxRng(effective_state(0, 0))
     value = rng.rand(1.0)
-    assert rng.state == 0x0000C7C1
-    assert value == 0.003047943115234375
+    assert rng.state == 0x0000C613
+    assert value == 0.003022313117980957
+
+
+def test_rendered_consecutive_calls_from_zero():
+    rng = FxRng(0)
+    assert [rng.rand(1.0) for _ in range(3)] == [
+        0.003022313117980957,
+        0.6204589605331421,
+        0.0581202507019043,
+    ]
+
+
+def test_rendered_iterate_pass_offsets():
+    offsets = [
+        FxRng(state).rand(0.8) - float32(0.4) for state in iterate_pass_states(0, 5)
+    ]
+    assert offsets == pytest.approx(
+        [0.36785391, -0.01405391, -0.10554609, 0.19917861, -0.06880969],
+        abs=1e-8,
+    )
+
+
+def test_rendered_quadrant_slot_offsets():
+    offsets = [FxRng(state).rand(0.25) for state in quadrant_child_states(0, 0)]
+    assert offsets == pytest.approx(
+        [0.08837089, 0.07705319, 0.16057569, 0.03403562],
+        abs=1e-8,
+    )
 
 
 def test_table_shape():
@@ -91,7 +120,7 @@ def test_iterate_passes():
         assert value == pytest.approx(unit, abs=1e-15)
         assert round(value * 65535) == u16
         total += value
-    assert round(total * 65535) == 54010
+    assert round(total * 65535) == 72861
 
 
 def test_not_inherited_keeps_own_seed():
@@ -101,17 +130,17 @@ def test_not_inherited_keeps_own_seed():
 
 def test_independent_parameter_functions():
     opacity = FxRng(0)
-    assert opacity.rand(1.0) == 0.003047943115234375
-    assert opacity.rand(1.0) == pytest.approx(0.5328404903411865, abs=1e-15)
+    assert opacity.rand(1.0) == 0.003022313117980957
+    assert opacity.rand(1.0) == pytest.approx(0.6204589605331421, abs=1e-15)
     offset = FxRng(0)
-    assert offset.rand(1.0) == 0.003047943115234375
+    assert offset.rand(1.0) == 0.003022313117980957
 
 
 def test_zero_amplitude_still_advances():
     rng = FxRng(0)
     assert rng.rand(0.0) == 0.0
-    assert rng.state == 0x0000C7C1
-    assert rng.rand(1.0) == pytest.approx(0.5328404903411865, abs=1e-15)
+    assert rng.state == 0x0000C613
+    assert rng.rand(1.0) == pytest.approx(0.6204589605331421, abs=1e-15)
 
 
 def test_glsl_helpers_declared():
@@ -120,6 +149,7 @@ def test_glsl_helpers_declared():
     assert "float fx_rng_next(inout uint s, float a)" in FX_RNG_GLSL
     assert "int(depth) & 15" in FX_RNG_GLSL
     assert "uintBitsToFloat" in FX_RNG_GLSL
+    assert f"0x{FX_LCG_M:08X}u + 0x{FX_LCG_C:08X}u" in FX_RNG_GLSL
     for m, c in zip(DEPTH_M, DEPTH_C, strict=True):
         assert f"0x{m:08X}u + 0x{c:08X}u" in FX_RNG_GLSL
     assert "0x598232B9u + 0x000038C5u" in FX_RNG_GLSL

@@ -66,9 +66,6 @@ PATTERNS = {
 }  # fmt: skip
 """Pattern names by compiled id (the .sbs pattern type less 2)."""
 
-APPROXIMATE = {11, 12}
-"""Patterns not fitted yet (drawn as a bell)."""
-
 PATTERN_GLSL = """float fxss_$(name)(float e, float x) {
 \tfloat t = clamp(x / max(e, 1e-6), 0.0, 1.0);
 \treturn t * t * (3.0 - 2.0 * t);
@@ -94,12 +91,18 @@ float fxpat_$(name)(int id, vec2 q, float s) {
 \t\treturn max(1.0 - r2, 0.0) * (0.5 + 0.5 * cos(f * q.x));
 \t}
 \tif (id == 10) return q.x > 0.0 ? bell * (1.0 - fxss_$(name)(1.0 - s, q.x)) : bell;
+\tif (id == 11) return bell * (1.0 - abs(q.x)) * (1.0 - abs(q.x));
+\tif (id == 12) {
+\t\tfloat ring = r <= 1.0 ? 6.75 * r2 * (1.0 - r2) * (1.0 - r2) : 0.0;
+\t\treturn ring * (1.0 - fxss_$(name)(2.0 - 2.0 * s, q.x + 1.0));
+\t}
 \tif (id == 13) {
 \t\tfloat d = max(abs(q.x) - 0.77 * s, 0.0);
 \t\treturn max(1.0 - 20.0 * (d * d + q.y * q.y), 0.0);
 \t}
 \tif (id == 14) return max(1.0 - r, 0.0);
-\treturn bell;
+\tif (id == 15) return (q.x + 1.0) * 0.5 + s;
+\treturn r <= 1.0 ? sqrt(1.0 - r2) + s : 0.0;
 }
 """
 """Each pattern's value at q in [-1, 1]^2 (x right, y down), supplement s."""
