@@ -38,6 +38,7 @@ SBSRENDER = Path("C:/Program Files/Adobe/Adobe Substance 3D Designer/sbsrender.e
 SIZE = 11
 """log2 pixels; Material Maker's export is 2048 px."""
 F4 = "constantValueFloat4"
+F1 = "constantValueFloat1"
 
 
 def cases() -> list[tuple]:
@@ -128,6 +129,56 @@ def cases() -> list[tuple]:
             ("coordinate", "constantValueFloat1", "0.3"), ("uvselector", i32, "1"),
         )),
     ]  # fmt: skip
+    hi = ("highlightcolor", F4, "0.9 0.7 0.5 1")
+    lo = ("shadowcolor", F4, "0.2 0.3 0.1 1")
+    for kind, k in ((GRAY, "g"), (COLOR, "c")):
+        out += [
+            (
+                f"blur_{k}",
+                "blur",
+                kind,
+                (("intensity", F1, "1.7" if k == "c" else "3"),),
+                "",
+                True,
+            ),
+            (
+                f"dmblur_{k}",
+                "dirmotionblur",
+                kind,
+                (("intensity", F1, "4"), ("mblurangle", F1, "0.1")),
+                "",
+                True,
+            ),
+            (f"sharpen_{k}", "sharpen", kind, (("intensity", F1, "0.7"),), "", True),
+            (f"warp_{k}", "warp", kind, (("intensity", F1, "2"),), "", True),
+            (
+                f"dwarp_{k}",
+                "directionalwarp",
+                kind,
+                (("intensity", F1, "4"), ("warpangle", F1, "0.1")),
+                "",
+                True,
+            ),
+            (
+                f"emboss_{k}",
+                "emboss",
+                kind,
+                (("intensity", F1, "4"), ("lightangle", F1, "0.1"), hi, lo),
+                "",
+                True,
+            ),
+        ]
+    out += [
+        ("normal_g", "normal", GRAY, (("intensity", F1, "3"),), "", True),
+        (
+            "normal_inv_g",
+            "normal",
+            GRAY,
+            (("intensity", F1, "3"), ("inversedy", "constantValueBool", "1")),
+            "",
+            True,
+        ),
+    ]
     return out
 
 
@@ -153,7 +204,10 @@ def test_images(out: Path) -> dict[str, Path]:
     paths = {}
     for k, v in gray.items():
         paths[k] = out / f"in_gray_{k}.png"
-        Image.fromarray((v.clip(0, 1) * 65535).round().astype(np.uint16)).save(paths[k])
+        # 8-bit: Material Maker reads images at 8 bits, so Substance must too.
+        Image.fromarray((v.clip(0, 1) * 255).round().astype(np.uint8), "L").save(
+            paths[k]
+        )
     for k, v in color.items():
         paths[k] = out / f"in_color_{k}.png"
         Image.fromarray((v.clip(0, 1) * 255).round().astype(np.uint8), "RGBA").save(
@@ -231,7 +285,11 @@ def main() -> None:
     for tag, filt, kind, params, *rest in todo:
         src = out / f"{tag}.sbs"
         arrays = rest[0] if rest else ""
-        src.write_text(sbs(filt, kind, params=params, arrays=arrays), encoding="utf-8")
+        format16 = bool(rest[1]) if len(rest) > 1 else False
+        src.write_text(
+            sbs(filt, kind, params=params, arrays=arrays, format16=format16),
+            encoding="utf-8",
+        )
         if cook(COOKER, src, out) is None:
             print(f"{tag:14} cook failed")
             continue

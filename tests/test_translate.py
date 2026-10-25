@@ -63,5 +63,17 @@ def test_blend_ports_and_opacity() -> None:
 
 
 def test_unsupported_op() -> None:
-    with pytest.raises(UnsupportedError, match="op 20"):
-        translated("warp_gray_chain")  # its chained blur isn't translated yet
+    with pytest.raises(UnsupportedError, match="op 42"):
+        translated("distance_gray_chain")  # distance isn't translated yet
+
+
+def test_neighborhood_filters_sample_buffers() -> None:
+    nodes, wires, outs = translated("warp_gray_chain")
+    types = {n["name"]: n["type"] for n in nodes}
+    warp = outs["output"][0]
+    into_warp = {w["from"] for w in wires if w["to"] == warp}
+    assert {types[n] for n in into_warp} == {"buffer"}  # input and gradient
+    blur_passes = [
+        n for n in nodes if n["type"] == "shader" and n["name"].endswith("_x")
+    ]
+    assert len(blur_passes) == 1  # the chained blur: x pass, then y

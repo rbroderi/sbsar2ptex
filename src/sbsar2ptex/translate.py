@@ -19,6 +19,7 @@ Parameters driven by function bytecode ("dynamic") are not translated yet.
 """
 
 import itertools
+import math
 import struct
 from dataclasses import dataclass
 from dataclasses import field
@@ -47,17 +48,18 @@ class Params:
 def flag_params(
     flags: int,
     inline: list[int],
-    spec: list[tuple[str, int, Any]],
+    spec: list[tuple],
     width: int,
 ) -> dict[str, Any]:
     """Read parameters stored two flag bits each: 1 inline, 2 dynamic.
 
-    ``spec`` lists (name, bit position, default); each inline parameter takes
-    ``width`` floats, in spec order.
+    ``spec`` lists (name, bit position, default[, width]); each inline
+    parameter takes its width (else ``width``) floats, in spec order.
     """
     out: dict[str, Any] = {}
     at = 0
-    for name, bit, default in spec:
+    for name, bit, default, *own in spec:
+        width = own[0] if own else width
         state = (flags >> bit) & 3
         if state == 0:
             out[name] = default
@@ -156,7 +158,102 @@ def shader(
     }
 
 
-Made = tuple[dict[str, Any], list[str]]
+@dataclass
+class Sub:
+    """A node translated to several Material Maker nodes.
+
+    ``ports`` wires the Substance node's inputs: (input name, MM node, port);
+    ``output`` is the MM node whose port 0 is the result.
+    """
+
+    nodes: list[dict[str, Any]]
+    wires: list[dict[str, Any]]
+    ports: list[tuple[str, str, int]]
+    output: str
+
+
+def buffer(name: str, size: int) -> dict[str, Any]:
+    """Return a Material Maker buffer node: its input rendered to a texture.
+
+    Filters that read neighboring pixels sample buffers, so their input's
+    graph is computed once, not once per tap. 32-bit, linear filtering.
+    """
+    return {
+        "name": name,
+        "type": "buffer",
+        "node_position": {"x": 0, "y": 0},
+        "parameters": {"size": size, "f32": True, "filter": True, "mipmap": False},
+        "seed_int": 0,
+    }
+
+
+def wire(src: str, dst: str, port: int = 0) -> dict[str, Any]:
+    """Return a connection from ``src``'s port 0 to ``dst``'s ``port``."""
+    return {"from": src, "from_port": 0, "to": dst, "to_port": port}
+
+
+def buffered(
+    made: dict[str, Any], names: list[str], sampled: set[str], size: int
+) -> Sub:
+    """Return ``made`` (a shader node) with buffers before its ``sampled`` inputs."""
+    nodes, wires, ports = [made], [], []
+    for port, inp in enumerate(names):
+        if inp in sampled:
+            buf = f"{made['name']}_{inp}_buf"
+            nodes.append(buffer(buf, size))
+            wires.append(wire(buf, made["name"], port))
+            ports.append((inp, buf, 0))
+        else:
+            ports.append((inp, made["name"], port))
+    return Sub(nodes, wires, ports, made["name"])
+
+
+def box_taps(radius: float) -> list[tuple[float, float]]:
+    """Return (offset, weight) taps of Substance's box blur of half-width ``radius``.
+
+    The exact integral over [-radius, radius] of the linearly interpolated
+    signal, normalized: interior taps 1, the end taps by the trapezoid.
+    """
+    radius = max(radius, 1e-6)
+    n = int(radius)
+    t = radius - n
+    taps = [(float(k), 1.0) for k in range(-n + 1, n)]
+    if n == 0:
+        taps = [(0.0, 2 * t - t * t)]
+    else:
+        end = 0.5 + t - t * t / 2
+        taps += [(float(-n), end), (float(n), end)]
+    if t > 0:
+        taps += [(float(-n - 1), t * t / 2), (float(n + 1), t * t / 2)]
+    total = sum(w for _, w in taps)
+    return [(k, w / total) for k, w in taps]
+
+
+def box_glsl(t: str, direction: tuple[float, float], radius: float, size: int) -> str:
+    """Return a GLSL body summing ``$input`` along ``direction`` (texels) as a box."""
+    n = float(1 << size)
+    g = "vec4" if t == "rgba" else "float"
+    taps = box_taps(radius)
+    lines = [
+        f"{g} acc = {g}(0.0);",
+        f"vec2 d = vec2({num(direction[0] / n)}, {num(direction[1] / n)});",
+    ]
+    inner = [w for k, w in taps if abs(k) < int(max(radius, 1e-6))]
+    if len(inner) > 8:  # noqa: PLR2004 (a loop for the even interior)
+        m = int(radius)
+        lines += [
+            f"for (int i = {-m + 1}; i < {m}; i++) {{",
+            "\tacc += $input(fract(uv + float(i) * d));",
+            "}",
+            f"acc *= {num(inner[0])};",
+        ]
+        taps = [(k, w) for k, w in taps if abs(k) >= int(radius)]
+    lines += [f"acc += {num(w)} * $input(fract(uv + {num(k)} * d));" for k, w in taps]
+    lines.append("return acc;")
+    return "\n".join(lines)
+
+
+Made = tuple[dict[str, Any], list[str]] | Sub
 """A translated node: its Material Maker node and its input names by port."""
 
 
@@ -490,6 +587,153 @@ def _dyngradient(node: Node, name: str, *, color: bool, size: int) -> Made:
     return shader(name, inputs, t, body), ["input", "gradient"]
 
 
+def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Blur: a separable box, half-width intensity / 256 of the image."""
+    t = "rgba" if color else "f"
+    p = word_params(node, [("intensity", 4, 10.0)], {})
+    radius = p["intensity"] * (1 << size) / 256
+    x = shader(f"{name}_x", [("input", t)], t, box_glsl(t, (1, 0), radius, size))
+    y = shader(name, [("input", t)], t, box_glsl(t, (0, 1), radius, size))
+    bx, by = f"{name}_buf_x", f"{name}_buf_y"
+    return Sub(
+        [buffer(bx, size), x, buffer(by, size), y],
+        [wire(bx, x["name"]), wire(x["name"], by), wire(by, name)],
+        [("input", bx, 0)],
+        name,
+    )
+
+
+def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Directional motion blur: the box along (cos, sin) of the angle (turns)."""
+    t = "rgba" if color else "f"
+    p = flag_params(
+        node.fields[0], node.inline, [("intensity", 0, 10.0), ("angle", 2, 0.0)], 1
+    )
+    radius = p["intensity"] * (1 << size) / 256
+    a = 2 * math.pi * p["angle"]
+    made = shader(
+        name, [("input", t)], t, box_glsl(t, (math.cos(a), math.sin(a)), radius, size)
+    )
+    return buffered(made, ["input"], {"input"}, size)
+
+
+def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Sharpen: x + k (4 x - its four neighbors), k the intensity."""
+    t = "rgba" if color else "f"
+    k = word_params(node, [("intensity", 4, 1.0)], {})["intensity"]
+    e = num(1 / (1 << size))
+    lines = [
+        f"vec2 e = vec2({e}, 0.0);",
+        "vec4 c = vec4($input(uv));",
+        (
+            "vec4 s = vec4($input(fract(uv + e))) + vec4($input(fract(uv - e)))"
+            " + vec4($input(fract(uv + e.yx))) + vec4($input(fract(uv - e.yx)));"
+        ),
+        f"vec4 r = clamp(c + {num(k)} * (4.0 * c - s), 0.0, 1.0);",
+        "return r;" if color else "return r.x;",
+    ]
+    return buffered(
+        shader(name, [("input", t)], t, "\n".join(lines)), ["input"], {"input"}, size
+    )
+
+
+def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Warp: sample at uv + intensity / 256 times the gradient's slope.
+
+    The slope is a backward difference over one texel, per UV unit.
+    """
+    t = "rgba" if color else "f"
+    k = word_params(node, [("intensity", 5, 1.0)], {})["intensity"]
+    n = 1 << size
+    lines = [
+        f"vec2 e = vec2({num(1 / n)}, 0.0);",
+        "float h = $gradient(uv);",
+        "vec2 g = vec2(h - $gradient(fract(uv - e)), h - $gradient(fract(uv - e.yx)));",
+        f"return $input(fract(uv + {num(k * n / 256)} * g));",
+    ]
+    made = shader(name, [("input", t), ("gradient", "f")], t, "\n".join(lines))
+    return buffered(made, ["input", "gradient"], {"input", "gradient"}, size)
+
+
+def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Directional warp: sample at uv + intensity / 256 map(uv) (cos, sin)."""
+    t = "rgba" if color else "f"
+    flags = node.fields[0]
+    p = flag_params(flags, node.inline, [("intensity", 1, 10.0), ("angle", 3, 0.0)], 1)
+    a = 2 * math.pi * p["angle"]
+    d = (p["intensity"] / 256 * math.cos(a), p["intensity"] / 256 * math.sin(a))
+    body = f"return $input(fract(uv + $intensity(uv) * {vec(list(d), 2)}));"
+    made = shader(name, [("input", t), ("intensity", "f")], t, body)
+    return buffered(made, ["input", "intensity"], {"input"}, size)
+
+
+def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Translate normal: normalize(-k dx, -k dy, 1) / 2 + 1/2, backward differences.
+
+    k is the intensity times N / 256 (N the image width); flag 0x4 flips y
+    (inverse dy); alpha is the height.
+    """
+    flags = node.fields[0]
+    k = flag_params(flags & 3, node.inline, [("intensity", 0, 1.0)], 1)["intensity"]
+    k *= (1 << size) / 256  # per texel at 256 px: resolution independent
+    sy = 1.0 if flags & 4 else -1.0
+    lines = [
+        f"vec2 e = vec2({num(1 / (1 << size))}, 0.0);",
+        "float h = $input(uv);",
+        "vec2 g = vec2(h - $input(fract(uv - e)), h - $input(fract(uv - e.yx)));",
+        f"vec3 n = normalize(vec3({num(-k)} * g.x, {num(sy * k)} * g.y, 1.0));",
+        "return vec4(n * 0.5 + 0.5, h);",
+    ]
+    made = shader(name, [("input", "f")], "rgba", "\n".join(lines))
+    return buffered(made, ["input"], {"input"}, size)
+
+
+def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Emboss: light the input by the gradient image's slope.
+
+    s = intensity N / 256 times the backward-difference slope along (cos,
+    sin) of the light angle; out = in + max(s, 0) highlight - max(-s, 0) (1 - shadow).
+    """
+    t = "rgba" if color else "f"
+    n = 4 if color else 1  # colors: four floats, or one (grayscale)
+    p = flag_params(
+        node.fields[0],
+        node.inline,
+        [
+            ("intensity", 1, 5.0),
+            ("angle", 3, 0.0),
+            ("highlight", 5, [1.0] * n if color else 1.0, n),
+            ("shadow", 7, [0.0] * n if color else 0.0, n),
+        ],
+        1,
+    )
+    a = 2 * math.pi * p["angle"]
+    hi, sh = p["highlight"], p["shadow"]
+    lines = [
+        f"vec2 e = vec2({num(1 / (1 << size))}, 0.0);",
+        "float h = $gradient(uv);",
+        "vec2 g = vec2(h - $gradient(fract(uv - e)), h - $gradient(fract(uv - e.yx)));",
+        f"vec2 light = {vec([math.cos(a), math.sin(a)], 2)};",
+        f"float s = {num(p['intensity'] * (1 << size) / 256)} * dot(g, light);",
+    ]
+    if color:
+        lines += [
+            "vec4 c = $input(uv);",
+            (
+                f"vec3 rgb = c.rgb + max(s, 0.0) * {vec(hi[:3], 3)}"
+                f" - max(-s, 0.0) * (vec3(1.0) - {vec(sh[:3], 3)});"
+            ),
+            "return vec4(clamp(rgb, 0.0, 1.0), c.a);",
+        ]
+    else:
+        lines.append(
+            f"return clamp($input(uv) + max(s, 0.0) * {num(hi)}"
+            f" - max(-s, 0.0) * (1.0 - {num(sh)}), 0.0, 1.0);"
+        )
+    made = shader(name, [("input", t), ("gradient", "f")], t, "\n".join(lines))
+    return buffered(made, ["input", "gradient"], {"gradient"}, size)
+
+
 TRANSLATORS = {
     0: _gradient,
     1: _gradient,
@@ -500,8 +744,21 @@ TRANSLATORS = {
     6: _grayscale,
     7: _shuffle,
     12: _uniform,
+    14: _warp,
+    15: _warp,
+    16: _emboss,
+    17: _emboss,
+    20: _blur,
+    21: _blur,
+    22: _dirmotionblur,
+    23: _dirmotionblur,
+    24: _directionalwarp,
+    25: _directionalwarp,
+    26: _sharpen,
+    27: _sharpen,
     13: _uniform,
     29: _hsl,
+    37: _normal,
     30: _levels,
     31: _levels,
     38: _dyngradient,
@@ -541,6 +798,7 @@ def translate_graph(
             todo += nodes[k].inputs.values()
     mm: list[dict[str, Any]] = []
     wires: list[dict[str, Any]] = []
+    out_of: dict[int, str] = {}
     for k in sorted(need):
         node = nodes[k]
         name = f"n{k}"
@@ -557,18 +815,20 @@ def translate_graph(
                     "seed_int": 0,
                 }
             )
+            out_of[k] = name
             continue
-        made, ports = node_shader(node, name, size)
-        mm.append(made)
-        for port, inp in enumerate(ports):
-            wires.append(
-                {
-                    "from": f"n{node.inputs[inp]}",
-                    "from_port": 0,
-                    "to": name,
-                    "to_port": port,
-                }
+        made = node_shader(node, name, size)
+        if not isinstance(made, Sub):
+            shader_node, names = made
+            made = Sub(
+                [shader_node], [], [(n, name, i) for i, n in enumerate(names)], name
             )
+        mm += made.nodes
+        wires += made.wires
+        wires += [
+            wire(out_of[node.inputs[inp]], to, port) for inp, to, port in made.ports
+        ]
+        out_of[k] = made.output
     for row, made in enumerate(mm):
         made["node_position"] = {"x": 220 * (row % 12), "y": 180 * (row // 12)}
-    return mm, wires, {o: (f"n{k}", 0) for o, k in outputs.items()}
+    return mm, wires, {o: (out_of[k], 0) for o, k in outputs.items()}

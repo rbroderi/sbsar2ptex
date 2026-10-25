@@ -169,6 +169,7 @@ def sbs(
     chain: bool = False,
     params: tuple[tuple[str, str, str], ...] | None = None,
     arrays: str = "",
+    format16: bool = False,
 ) -> str:
     """Return a package: graph inputs -> ``filt`` -> output, of image ``kind``.
 
@@ -176,7 +177,8 @@ def sbs(
     first input is not node 0 (which reads the same as a zero flag word).
     ``params`` ((name, value kind, value) each) replaces PARAMETERS[filt];
     ``arrays`` is the filter's <paramsArrays> content (gradient keys, curve
-    points), as .sbs XML.
+    points), as .sbs XML. ``format16`` makes the graph 16-bit throughout (its
+    inputs are 8-bit otherwise, which slope-based filters amplify).
     """
     inputs = FILTERS[filt]
     first = 150 if chain else 100
@@ -231,13 +233,13 @@ def sbs(
         )
 
     output_kind = GRAY if filt == "grayscaleconversion" else kind
-    if filt in ("gradient", "shuffle", "hsl"):
+    if filt in ("gradient", "shuffle", "hsl", "normal"):
         output_kind = COLOR
     if filt == "gradient" and any(
         name == "colorswitch" and value == "0" for name, _, value in params or ()
     ):
         output_kind = GRAY  # a grayscale gradient map
-    return (
+    xml = (
         '<?xml version="1.0" encoding="UTF-8"?><package><identifier v="probe"/>'
         '<formatVersion v="1.1.0.202401"/><updaterVersion v="1.1.0.202401"/>'
         '<fileUID v="{00000000-0000-0000-0000-000000000001}"/><versionUID v="0"/>'
@@ -269,6 +271,20 @@ def sbs(
         '<output v="20"/><format v="0"/><usertag v=""/></rootOutput></rootOutputs>'
         "</root></graph></content></package>"
     )
+    if format16:
+        xml = xml.replace(
+            '<name v="format"/><relativeTo v="1"/><paramValue>'
+            '<constantValueInt1 v="0"/>',
+            '<name v="format"/><relativeTo v="0"/><paramValue>'
+            '<constantValueInt1 v="1"/>',
+        ).replace(
+            "<parameters>" + parameters + "</parameters>",
+            "<parameters>"
+            + parameters
+            + '<parameter><name v="format"/><relativeTo v="0"/><paramValue>'
+            '<constantValueInt32 v="1"/></paramValue></parameter></parameters>',
+        )
+    return xml
 
 
 def node_words(sbsasm: bytes) -> list[tuple[int, int]]:
