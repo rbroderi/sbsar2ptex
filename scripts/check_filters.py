@@ -236,7 +236,18 @@ def function_cases() -> list[dict]:
             "floats": floats,
         }
     )
-    return out + pixel_cases()
+    return out + pixel_cases() + distance_cases()
+
+
+def distance_cases() -> list[dict]:
+    """Return distance cases: mask A (> 0.5) and source B, or the mask alone."""
+    reach = (("distance", F1, "12"),)
+    return [
+        {"tag": "distance_g", "filter": "distance", "kind": GRAY, "params": reach},
+        {"tag": "distance_mask_g", "filter": "distance", "kind": GRAY, "params": reach,
+         "connect": 1},
+        {"tag": "distance_c", "filter": "distance", "kind": COLOR, "params": reach},
+    ]  # fmt: skip
 
 
 def pixel_cases() -> list[dict]:
@@ -425,6 +436,7 @@ def main() -> None:
                 arrays=c["arrays"],
                 format16=c["format16"],
                 floats=c["floats"],
+                connect=c.get("connect"),
             ),
             encoding="utf-8",
         )

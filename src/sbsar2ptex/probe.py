@@ -18,7 +18,14 @@ from pathlib import Path
 
 from sbsar2ptex.archive import read_archive
 
-GRAY_INPUTS = {"opacity", "inputgradient", "inputintensity", "intensity", "gradient"}
+GRAY_INPUTS = {
+    "opacity",
+    "inputgradient",
+    "inputintensity",
+    "intensity",
+    "gradient",
+    "mask",
+}
 """Filter inputs that take a grayscale image whatever the filter's own type."""
 COOKER = Path("C:/Program Files/Adobe/Adobe Substance 3D Designer/sbscooker.exe")
 NODE_MARK = 0x88
@@ -231,6 +238,7 @@ def sbs(
     arrays: str = "",
     format16: bool = False,
     floats: dict[str, float] | None = None,
+    connect: int | None = None,
 ) -> str:
     """Return a package: graph inputs -> ``filt`` -> output, of image ``kind``.
 
@@ -241,7 +249,7 @@ def sbs(
     points), as .sbs XML. ``format16`` makes the graph 16-bit throughout (its
     inputs are 8-bit otherwise, which slope-based filters amplify).
     """
-    inputs = FILTERS[filt]
+    inputs = FILTERS[filt][:connect]
     first = 150 if chain else 100
     connections = "".join(
         f'<connection><identifier v="{name}"/>'

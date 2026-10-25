@@ -455,17 +455,18 @@ class Sub:
     output: str
 
 
-def buffer(name: str, size: int) -> dict[str, Any]:
+def buffer(name: str, size: int, *, filtering: bool = True) -> dict[str, Any]:
     """Return a Material Maker buffer node: its input rendered to a texture.
 
     Filters that read neighboring pixels sample buffers, so their input's
-    graph is computed once, not once per tap. 32-bit, linear filtering.
+    graph is computed once, not once per tap. 32-bit; linear filtering
+    unless not ``filtering`` (for buffers of positions).
     """
     return {
         "name": name,
         "type": "buffer",
         "node_position": {"x": 0, "y": 0},
-        "parameters": {"size": size, "f32": True, "filter": True, "mipmap": False},
+        "parameters": {"size": size, "f32": True, "filter": filtering, "mipmap": False},
         "seed_int": 0,
     }
 
@@ -1047,6 +1048,101 @@ def _pixelprocessor(node: Node, name: str, *, color: bool, size: int) -> Sub:
     return buffered(made, names, set(names), size)
 
 
+TORUS_GLSL = """float tdist_$(name)(vec2 a, vec2 b) {
+\tvec2 d = abs(a - b);
+\treturn length(min(d, vec2(1.0) - d));
+}
+"""
+
+
+def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Translate distance: a falloff from the nearest mask pixel.
+
+    1 - d / D from the nearest mask pixel (mask > 0.5), d the Euclidean
+    distance (tiling) and D the distance parameter (/ 256 of the image);
+    with a source, that times the source at the nearest mask pixel (for
+    color, the source's alpha only: RGB is the source's). The
+    nearest mask pixel is found by jump flooding: buffers of seed
+    positions (nearest sampling), steps halving from the largest power of
+    two that covers D down to one texel, then one more one-texel pass.
+    """
+    t = "rgba" if color else "f"
+    flags = node.fields[0]
+    has_source = bool(flags & 1)
+    reach = flag_params(flags, node.inline, [("distance", 2, 10.0)], 1, node)[
+        "distance"
+    ]
+    n = 1 << size
+    reach_px = static(reach) * n / 256
+    steps = []
+    s = 1
+    while s < min(reach_px, n / 2):
+        s *= 2
+    while s >= 1:
+        steps.append(s)
+        s //= 2
+    steps.append(1)
+    nodes: list[dict[str, Any]] = []
+    wires: list[dict[str, Any]] = []
+    init = shader(
+        f"{name}_seed",
+        [("mask", "f")],
+        "rgba",
+        "return $mask(uv) > 0.5 ? vec4(uv, 1.0, 1.0) : vec4(0.0);",
+    )
+    nodes.append(init)
+    last = init["name"]
+    for k, step in enumerate(steps):
+        buf = buffer(f"{name}_jfa{k}", size, filtering=False)
+        body = "\n".join(
+            [
+                "vec4 best = $input(uv);",
+                "float bd = best.z > 0.5 ? tdist_$(name)(uv, best.xy) : 1e9;",
+                "for (int y = -1; y <= 1; y++) {",
+                "\tfor (int x = -1; x <= 1; x++) {",
+                "\t\tvec2 o = vec2(float(x), float(y));",
+                f"\t\tvec4 c = $input(fract(uv + o * {num(step / n)}));",
+                "\t\tfloat d = tdist_$(name)(uv, c.xy);",
+                "\t\tif (c.z > 0.5 && d < bd) { best = c; bd = d; }",
+                "\t}",
+                "}",
+                "return best;",
+            ]
+        )
+        jfa = shader(f"{name}_pass{k}", [("input", "rgba")], "rgba", body)
+        jfa["shader_model"]["instance"] = TORUS_GLSL + jfa["shader_model"]["instance"]
+        nodes += [buf, jfa]
+        wires += [wire(last, buf["name"]), wire(buf["name"], jfa["name"])]
+        last = jfa["name"]
+    final_buf = buffer(f"{name}_near", size, filtering=False)
+    lines = [
+        "vec4 c = $input(uv);",
+        f"float r = max({num(reach)} * {num(n / 256)}, 1e-6);",
+        f"float d = tdist_$(name)(uv, c.xy) * {num(float(n))};",
+        "float f = c.z > 0.5 ? clamp(1.0 - d / r, 0.0, 1.0) : 0.0;",
+    ]
+    inputs = [("input", "rgba")]
+    if has_source:
+        inputs.append(("source", t))
+        if color:  # the falloff goes into alpha only
+            lines += ["vec4 s = $source(c.xy);", "return vec4(s.rgb, s.a * f);"]
+        else:
+            lines.append("return f * $source(c.xy);")
+    else:
+        lines.append("return vec4(vec3(1.0), f);" if color else "return f;")
+    final = shader(name, inputs, t, "\n".join(lines))
+    final["shader_model"]["instance"] = TORUS_GLSL + final["shader_model"]["instance"]
+    nodes += [final_buf, final]
+    wires += [wire(last, final_buf["name"]), wire(final_buf["name"], name, 0)]
+    ports = [("mask", init["name"], 0)]
+    if has_source:
+        source_buf = buffer(f"{name}_source_buf", size)
+        nodes.append(source_buf)
+        wires.append(wire(source_buf["name"], name, 1))
+        ports.append(("source", source_buf["name"], 0))
+    return Sub(nodes, wires, ports, name)
+
+
 TRANSLATORS = {
     0: _gradient,
     1: _gradient,
@@ -1074,6 +1170,8 @@ TRANSLATORS = {
     37: _normal,
     40: _pixelprocessor,
     41: _pixelprocessor,
+    42: _distance,
+    43: _distance,
     30: _levels,
     31: _levels,
     38: _dyngradient,

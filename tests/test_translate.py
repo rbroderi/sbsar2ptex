@@ -12,6 +12,7 @@ import pytest
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.sbsasm import Asm
+from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import translate_graph
 
@@ -63,8 +64,18 @@ def test_blend_ports_and_opacity() -> None:
 
 
 def test_unsupported_op() -> None:
-    with pytest.raises(UnsupportedError, match="op 42"):
-        translated("distance_gray_chain")  # distance isn't translated yet
+    fxmap = Node(index=0, start=0, end=4, op=8, words=[8])
+    with pytest.raises(UnsupportedError, match="op 8"):
+        translate_graph([fxmap], {"output": 0}, {})
+
+
+def test_distance_jump_floods() -> None:
+    nodes, _, outs = translated("distance_gray_chain")
+    passes = [n for n in nodes if "_pass" in n["name"]]
+    assert len(passes) >= 2  # halving steps, then one texel
+    seeds = [n for n in nodes if n["type"] == "buffer" and "_jfa" in n["name"]]
+    assert all(not b["parameters"]["filter"] for b in seeds)
+    assert outs["output"][0] in {n["name"] for n in nodes}
 
 
 def test_neighborhood_filters_sample_buffers() -> None:
