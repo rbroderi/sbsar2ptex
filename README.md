@@ -94,8 +94,19 @@ Pixel processors use Substance's own random generator (`rand`), implemented
 clean-room from a behavioral specification ([docs/random-generator.md](docs/random-generator.md))
 and identical to it bit for bit on every test render.
 
-Not yet: FX-Maps. `rand` outside pixel processors (in value functions) is still
-approximated by a hash with the same distribution, not the same values. Gradient maps with
+FX-Maps (`sbsar2ptex.fxmap`) are evaluated per pixel: the compiled Quadrant,
+Iterate and Switch tree becomes GLSL functions, and the patterns, placement,
+depth weighting (hurst), blending, image patterns and function-driven
+parameters ($pos, $number, $depth) match `sbsrender` within 2/255 in the
+harness. Their `rand` follows the FX-Map part of the specification
+(sections 8–9, `sbsar2ptex.fxrng`). Renders match its first call from the
+root state, but not its second call within a function or its Quadrant-slot
+and Iterate-pass states yet, so random FX-Maps have the right distribution,
+not the same values. Every pattern is visited for every pixel, so large
+trees are slow. The ridged bell and crescent patterns are drawn as a bell.
+
+`rand` in value functions is still approximated by a hash with the same
+distribution, not the same values. Gradient maps with
 midpoint interpolation, and RGB beyond a color distance's range (where alpha
 is 0), are not reproduced.
 
