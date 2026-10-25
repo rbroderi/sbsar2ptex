@@ -41,6 +41,7 @@ from sbsar2ptex.probe import sbs
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import graph_inputs
+from sbsar2ptex.translate import param_name
 from sbsar2ptex.translate import shader
 from sbsar2ptex.translate import translate_graph
 
@@ -651,14 +652,14 @@ def main() -> None:
             print(f"{tag:14} unsupported: {e}")
             continue
         for k, v in c["set"].items():  # the same input values in Material Maker
-            k = "".join(ch if ch.isalnum() else "_" for ch in k)  # noqa: PLW2901
+            k = param_name(k)  # noqa: PLW2901
             for n in mm_nodes:
-                if n["type"] == "shader" and f"p_{k}" in n["parameters"]:
-                    n["parameters"][f"p_{k}"] = float(v)
+                if n["type"] == "shader" and k in n["parameters"]:
+                    n["parameters"][k] = float(v)
             for n in mm_nodes:
                 if n["type"] == "remote":
                     for w in n["widgets"]:
-                        if w["linked_widgets"][0]["widget"] == f"p_{k}":
+                        if w["linked_widgets"][0]["widget"] == k:
                             n["parameters"][w["name"]] = float(v)
         source = next(n for n in mm_nodes if n["name"] == outs["output"][0])
         color = source["type"] == "image" or (

@@ -101,6 +101,12 @@ def test_table_shape():
     assert depth_step(1, 17) == (DEPTH_M[1] + DEPTH_C[1]) & 0xFFFFFFFF
 
 
+def test_control_parameter_lanes():
+    assert PARAM_LCG["imageindex"] == (0x0019660D, 0x3C6EF35F)
+    assert PARAM_LCG["iteratecount"] == (0x5690FB9D, 0x0000C59F)
+    assert PARAM_LCG["switch"] == (0x70DCB7DC, 0x0000C3BF)
+
+
 def _nested_quadrant_states():
     root = effective_state(11, 3)
     middle = effective_state(quadrant_child_states(root, 0)[2], 5)
@@ -188,6 +194,9 @@ def test_glsl_helpers_declared():
         "patternsize",
         "patternrotation",
         "patternsuppl",
+        "imageindex",
+        "iteratecount",
+        "switch",
     }
     for m, c in zip(DEPTH_M, DEPTH_C, strict=True):
         assert f"0x{m:08X}u + 0x{c:08X}u" in FX_RNG_GLSL

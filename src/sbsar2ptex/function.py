@@ -465,6 +465,8 @@ def to_glsl(
     lines: list[str] = []
     names: list[str] = []
     kinds: list[tuple[int, int]] = []
+    declared: dict[int, str] = {}
+    """Variables declared so far, with their GLSL types."""
     for k, ins in enumerate(block.instrs):
         ops = ins.operands
         name = f"{prefix}_{k}"
@@ -480,9 +482,20 @@ def to_glsl(
         elif ins.op == 0x02:  # noqa: PLR2004
             expr = inputs(ins.u32s()[0], ins.type, ins.width)
         elif ins.op == 0x04:  # noqa: PLR2004
+            # A variable this block never set (one an FX-Map node's
+            # ancestors set, it seems) reads as zero, as in evaluate.
+            if ops[0] not in declared:
+                declared[ops[0]] = t
+                lines.append(f"{t} {prefix}_var{ops[0]} = {t}(0);")
             expr = f"{prefix}_var{ops[0]}"
+            if declared[ops[0]] != t:
+                expr = f"{t}({expr})"
         elif ins.op == 0x07:  # noqa: PLR2004
-            lines.append(f"{t} {prefix}_var{ops[1]} = {v(ops[0])};")
+            if ops[1] in declared:
+                lines.append(f"{prefix}_var{ops[1]} = {declared[ops[1]]}({v(ops[0])});")
+            else:
+                declared[ops[1]] = t
+                lines.append(f"{t} {prefix}_var{ops[1]} = {v(ops[0])};")
             expr = v(ops[0])
         elif ins.op == 0x09:  # noqa: PLR2004
             expr = f"({v(ops[0])} ? {v(ops[1])} : {v(ops[2])})"

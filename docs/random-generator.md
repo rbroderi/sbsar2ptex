@@ -230,6 +230,14 @@ the node's effective state, but each parameter uses its own LCG pair:
 | pattern size | `0x4458B04D` | `0x0000C4EB` |
 | pattern rotation | `0x4A34F3F5` | `0x0000C3D3` |
 | pattern supplement | `0x5FBCF1A6` | `0x0000C5D7` |
+| dynamic image index | `0x0019660D` | `0x3C6EF35F` |
+| Iterate count | `0x5690FB9D` | `0x0000C59F` |
+| Switch value | `0x70DCB7DC` | `0x0000C3BF` |
+
+The Switch pair is directly confirmed from generated native code. The image
+index and Iterate-count assignments come from their positions immediately
+after the six directly mapped Quadrant lanes in the native constant table and
+evaluation order.
 
 Given an FX-Map function's starting state, every `rand(a)` call is therefore:
 
@@ -285,6 +293,11 @@ else:
 ```
 
 An absent inline node seed is zero.
+
+In the compiled tree word for Iterate and Switch, bit `0x08` stores
+`randominherited`: set means true and clear means false. This bit is independent
+of the node kind. Identify Iterate with `low_byte & 0x07 == 0x03` and Switch
+with `low_byte & 0x07 == 0x01`.
 
 The effective state is used by that node's dynamic functions and as the basis
 for deriving child states. A child's own inline seed is not added until the
@@ -410,6 +423,7 @@ order. This applies independently to:
 - pattern size;
 - rotation;
 - pattern supplement;
+- a dynamic image index;
 - an Iterate count function;
 - a Switch value function.
 
@@ -590,3 +604,92 @@ same node's random frame offset is otherwise pixel-exact.
 - Treating `randominherited=false` as also discarding the node's own seed.
 - Letting random calls in Iterate-count or Switch-value functions advance the
   selected child state.
+
+## 11. Ordinary-filter value-function `rand`
+
+This section covers function-driven parameters on ordinary atomic filters,
+such as a Blend opacity, Levels bound, Blur intensity, Directional Blur angle,
+or Warp intensity. These functions are evaluated once for a node, not once
+per output pixel.
+
+### 11.1 Starting state
+
+An ordinary filter resolves its base `randomseed` exactly like an FX-Map
+filter:
+
+```text
+no local override: initial_state = graph_randomseed
+absolute override: initial_state = node_randomseed
+relative override: initial_state = graph_randomseed + node_randomseed
+```
+
+Seed addition wraps modulo `2^32`. There is no coordinate hash and no mix
+based on the filter kind, parameter name, node UID, or graph position.
+Changing only a compiled node's UID leaves its random values unchanged.
+
+### 11.2 Generator
+
+All tested ordinary-filter parameter functions use one common LCG pair:
+
+```text
+VALUE_LCG_M = 0x7FF8A3ED
+VALUE_LCG_C = 0x2AA01D31
+
+state = (state * VALUE_LCG_M + VALUE_LCG_C) & 0xFFFFFFFF
+mantissa = (state >>> 1) & 0x007FFFFF
+unit_value = bitcast_float32(0x3F800000 OR mantissa) - 1.0f
+result = float32(unit_value * float32(amplitude))
+```
+
+The float conversion and scale operation are the same as sections 5 and 8.
+The common pair was verified directly for a Uniform `outputcolor` function
+and a Blend `opacitymult` function.
+
+### 11.3 Lifetime and call order
+
+Each dynamic parameter evaluation starts a new generator from the node's
+resolved seed. Two different parameters on the same node do not share state.
+For example, random Levels output-low and output-high functions both return
+the first value when evaluated on black and white inputs.
+
+Within one parameter function, all `rand` instructions share its generator
+and execute in compiled function-bytecode dependency order. Function graph
+operands are evaluated before the instruction that consumes them.
+
+The generator is not carried into downstream nodes. A downstream node starts
+from its own resolved seed; node identity and evaluation order do not add
+variation. Nodes that need different values must have different effective
+random seeds.
+
+### 11.4 Conformance vectors
+
+With effective seed zero:
+
+```text
+call  state       unit value          u16
+1     0x2AA01D31  0.6254453659057617  40989
+2     0x29E9568E  0.9114769697189331  59734
+3     0xD551A8A7  0.3189796209335327  20904
+```
+
+With effective seed five:
+
+```text
+call  state       unit value           u16
+1     0xAA7B50D2  0.48170197010040283  31568
+2     0xFCAFA59B  0.6861206293106079   44965
+3     0x42D61EB0  0.8364057540893555   54814
+```
+
+An absolute node seed of five produces the second sequence for every graph
+seed. A relative node seed of five produces it at graph seed zero and starts
+from six at graph seed one.
+
+### 11.5 Common implementation errors
+
+- Applying the pixel-position Jenkins hash.
+- Reusing the pixel-processor or any FX-Map parameter LCG pair.
+- Hashing the node UID, filter kind, parameter name, or evaluation index.
+- Sharing one generator across separate parameters or nodes.
+- Ignoring absolute versus relative node-seed resolution.
+- Evaluating `rand` once per output pixel instead of once per node parameter.

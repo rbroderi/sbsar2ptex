@@ -22,6 +22,9 @@ PARAM_LCG = {
     "patternsize": (0x4458B04D, 0x0000C4EB),
     "patternrotation": (0x4A34F3F5, 0x0000C3D3),
     "patternsuppl": (0x5FBCF1A6, 0x0000C5D7),
+    "imageindex": (0x0019660D, 0x3C6EF35F),
+    "iteratecount": (0x5690FB9D, 0x0000C59F),
+    "switch": (0x70DCB7DC, 0x0000C3BF),
 }
 FX_LCG_M, FX_LCG_C = PARAM_LCG["frameoffset"]
 

@@ -151,6 +151,7 @@ class Iterate:
 
     count: int | Param = 0
     seed: int | None = None
+    inherited: bool = True
     first: "Tree | None" = None
     repeated: "Tree | None" = None
 
@@ -161,6 +162,7 @@ class Switch:
 
     value: bool | Param = False
     seed: int | None = None
+    inherited: bool = True
     if_false: "Tree | None" = None
     if_true: "Tree | None" = None
 
@@ -280,8 +282,8 @@ def read_tree(node: Node, *, color: bool = False) -> Tree | None:
                 quad.children = [read(word(nxt + 4 * i)) for i in range(4)]
             elif kids == 2:  # noqa: PLR2004
                 quad.children = [read(word(nxt))] * 4
-        elif lo & 0x0F == 0x0B:  # noqa: PLR2004
-            it = Iterate()
+        elif lo & 0x07 == 0x03:  # noqa: PLR2004
+            it = Iterate(inherited=bool(w & 0x08))
             seen[off] = tree = it
             if not w & 0x80:
                 it.count = w >> 8
@@ -294,8 +296,8 @@ def read_tree(node: Node, *, color: bool = False) -> Tree | None:
             it.repeated = read(word(nxt))
             if w & 0x40:
                 it.first = read(word(nxt + 4))
-        elif lo & 0x0F == 0x09:  # noqa: PLR2004
-            sw = Switch(value=bool(w & 0x40))
+        elif lo & 0x07 == 0x01:
+            sw = Switch(value=bool(w & 0x40), inherited=bool(w & 0x08))
             seen[off] = tree = sw
             if w & 0x10:
                 sw.seed = word(nxt)

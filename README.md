@@ -115,10 +115,41 @@ and the shader draws only its cell's splats. Such a map no longer follows
 its parameters live. In BiomechZombieCircuits that is 16 of 102 FX-Maps, at
 about 150 splats per pixel at worst.
 
-`rand` in value functions is still approximated by a hash with the same
-distribution, not the same values. Gradient maps with
-midpoint interpolation, and RGB beyond a color distance's range (where alpha
-is 0), are not reproduced.
+`rand` in once-per-node value functions uses Substance's resolved node seed
+and value-function LCG.
+
+### Editable nodes
+
+A node's own settings are Material Maker parameters on that node, not
+constants in its GLSL: levels' five values, a blend's opacity and mode (a
+drop-down), a transformation's matrix and offset, uniform colors, HSL,
+grayscale weights, and the intensities and angles of blurs, warps, sharpen,
+normal and emboss. Blurs count their taps in the shader, so their intensity
+can change, and follow a function exactly too. Settings driven by functions
+stay functions. Graph inputs (`p_...`) are exposed together on the remote
+"parameters" node; a node's own settings stay on it.
+
+### Structure
+
+A compiled graph is flat: every library node the author placed is inlined
+into atomic nodes, thousands of them. `sbsar2ptex.structure.nest` folds a
+translated graph back into nested Material Maker subgraphs, closer to how it
+was built:
+
+- Library nodes are found by structure (`sbsar2ptex.recognize`): Designer's
+  own library, cooked, gives each library output's atomic DAG, matched
+  backwards from its output with its inputs as wildcards. Those not matched
+  exactly (other library versions, or pruned by their settings) but
+  repeated in the graph (the same node placed again) are grouped too, and
+  named after the template they resemble ("≈ Slope blur grayscale") or
+  "Unit A", "Unit B"...
+- The cooker writes a placed node's atomic nodes together, so the compiled
+  order is cut into parts and regions where the fewest values cross,
+  never inside one of those nodes; groups are named after what they hold.
+
+In BiomechZombieCircuits, the basecolor's 8,549 Material Maker nodes become
+six parts, at most three levels deep; nesting changes no pixel (a 382-node
+subgraph exports identically flat and nested).
 
 ## Develop
 

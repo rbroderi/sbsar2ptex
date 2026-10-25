@@ -131,7 +131,8 @@ def splats(
     ) -> None:
         if t is None:
             return
-        e = (incoming + (t.seed or 0)) & UINT32_MASK
+        inherited = not isinstance(t, (fxmap.Iterate, fxmap.Switch)) or t.inherited
+        e = ((incoming if inherited else 0) + (t.seed or 0)) & UINT32_MASK
         ctx = {
             0: [0.0],
             1: [n, n],
@@ -151,7 +152,7 @@ def splats(
             at = (pos[0] + bo[0], pos[1] + bo[1])
             pattern = t.pattern
             if t.image_index is not None:
-                pattern = -1 - int(run(t.image_index.code, e, "frameoffset", ctx)[0])
+                pattern = -1 - int(run(t.image_index.code, e, "imageindex", ctx)[0])
             elif t.image is not None and t.image < len(settings.patterns):
                 pattern = -1 - t.image
             if pattern is not None:
@@ -181,7 +182,7 @@ def splats(
                     enter(kid, spawn, child, cell / 2, depth + 1, number)
         elif isinstance(t, fxmap.Iterate):
             if isinstance(t.count, fxmap.Param):
-                count = int(run(t.count.code, e, "frameoffset", ctx)[0])
+                count = int(run(t.count.code, e, "iteratecount", ctx)[0])
             else:
                 count = t.count
             enter(t.first, e, pos, cell, depth, number)
@@ -191,7 +192,7 @@ def splats(
                 enter(t.repeated, passes, pos, cell, depth, float(i))
         else:
             if isinstance(t.value, fxmap.Param):
-                value = bool(run(t.value.code, e, "frameoffset", ctx)[0])
+                value = bool(run(t.value.code, e, "switch", ctx)[0])
             else:
                 value = t.value
             enter(t.if_true if value else t.if_false, e, pos, cell, depth, number)

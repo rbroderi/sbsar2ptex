@@ -15,7 +15,8 @@ single-filter graphs (see tests/test_translate.py and sbsasm-probe):
   wrapping (matrix22 "a b c d" is M = [[a, b], [c, d]]).
 - uniform: a constant (a grayscale one keeps the color's green).
 
-Parameters driven by function bytecode ("dynamic") are not translated yet.
+Parameters driven by function bytecode ("dynamic") are translated to helper
+functions, including Substance's context-specific random generators.
 """
 
 import itertools
@@ -24,6 +25,7 @@ import re
 import struct
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,7 @@ from sbsar2ptex.rng import RNG_GLSL
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.valuerng import VALUE_RNG_GLSL
 
 
 class UnsupportedError(Exception):
@@ -80,6 +83,8 @@ class _Context:
     """Parameter name -> the MM nodes declaring it (for the remote node)."""
     sampled: list[str] | None = None
     """A pixel processor's input names by index, while translating it."""
+    value_seed: str = "0"
+    """Resolved random seed of the ordinary filter currently being translated."""
     count: int = 0
     data_dir: Path | None = None
     """Where precomputed FX-Map textures go (none: FX-Maps stay live)."""
@@ -185,6 +190,65 @@ def _float_param(name: str, label: str, default: float, *, integer: bool) -> Non
     }
 
 
+GRAPH_PARAM = "p_"
+"""Graph inputs' parameter names start so; a node's own knobs do not."""
+
+
+def knob(
+    pname: str, label: str, value: Any, lo: float | None = None, hi: float | None = None
+) -> Any:
+    """Return a node setting as a Material Maker parameter of the next shader.
+
+    A constant becomes an editable parameter, named ``pname`` (a float, a
+    color for four values in [0, 1], else a float per component), returned
+    as a GLExpr reading it; a function-driven value (a GLExpr) stays as it
+    is. ``lo`` and ``hi`` bound the slider (default: 0 to 1, widened to
+    the value).
+    """
+    if isinstance(value, GLExpr):
+        return value
+    if isinstance(value, (list, tuple)):
+        vals = [float(v) for v in value]
+        if len(vals) == 4 and all(0.0 <= v <= 1.0 for v in vals):  # noqa: PLR2004
+            r, g, b, a = vals
+            _CTX.params[pname] = {
+                "name": pname,
+                "label": label,
+                "type": "color",
+                "default": {"r": r, "g": g, "b": b, "a": a},
+            }
+            return GLExpr(f"${pname}", 4, vals)
+        parts = []
+        for k, v in enumerate(vals):
+            part = f"{pname}_{'xyzw'[k]}"
+            knob(part, f"{label} {'xyzw'[k]}", v, lo, hi)
+            parts.append(f"${part}")
+        return GLExpr(f"vec{len(vals)}({', '.join(parts)})", len(vals), vals)
+    v = float(value)
+    low = min(0.0 if lo is None else lo, v)
+    high = max(1.0 if hi is None else hi, v)
+    _CTX.params[pname] = {
+        "name": pname,
+        "label": label,
+        "type": "float",
+        "default": v,
+        "min": low,
+        "max": high,
+        "step": 0.001,
+    }
+    return GLExpr(f"${pname}", 1, [v])
+
+
+def param_name(identifier: str) -> str:
+    """Return a graph input's Material Maker parameter name.
+
+    That is p_ and its word characters, with single underscores (GLSL
+    reserves double ones).
+    """
+    word = "".join(c if c.isalnum() else "_" for c in identifier)
+    return "p_" + "_".join(part for part in word.split("_") if part)
+
+
 def _param_for(uid: int) -> str:
     """Declare graph input ``uid`` as a parameter of the next shader; return GLSL.
 
@@ -195,7 +259,7 @@ def _param_for(uid: int) -> str:
     if gi is None:
         msg = f"function reads unknown input {uid:#x}"
         raise UnsupportedError(msg)
-    name = "p_" + "".join(c if c.isalnum() else "_" for c in gi.identifier)
+    name = param_name(gi.identifier)
     label = gi.label or gi.identifier
     integer = gi.type >= IN_INT
     if gi.type == IN_FLOAT4:
@@ -244,17 +308,12 @@ def _rand(a: str, k: int) -> str:
 
     In a pixel processor, Substance's own generator (docs/random-generator.md,
     sbsar2ptex.rng): a per-pixel state, ``rng``, advanced by each call. Its
-    behavior elsewhere (value functions) is not specified, so there an
-    approximation with the same distribution stands in, varying with the
-    node's Material Maker seed ($seed).
+    An ordinary value function instead uses its node's resolved random seed
+    and the once-per-node generator from docs/random-generator.md section 11.
     """
     if _CTX.sampled is not None:
         return f"sbs_rng_next(rng, float({a}))"
-    where = "uv * 1024.0" if _CTX.sampled is not None else "vec2(0.0)"
-    return (
-        f"({a} * fract(sin(dot(vec3({where}, $seed * 100.0 + {k}.0),"
-        " vec3(12.9898, 78.233, 37.719))) * 43758.5453))"
-    )
+    return f"sbs_value_rng_next(rng, float({a}))"
 
 
 RAND = 0x32
@@ -309,6 +368,10 @@ def dynamic(node: Node, offset: int) -> GLExpr:
         lines.insert(0, f"uint rng = sbs_rng_init(uint({_seed_glsl()}), uv);")
         if RNG_GLSL not in _CTX.globals:
             _CTX.globals.append(RNG_GLSL)
+    elif any(i.op == RAND for i in block.instrs):
+        lines.insert(0, f"uint rng = uint({_CTX.value_seed});")
+        if VALUE_RNG_GLSL not in _CTX.globals:
+            _CTX.globals.append(VALUE_RNG_GLSL)
     body = "\n\t".join(lines)
     # Material Maker appends seed arguments to instance functions, so they
     # need a parameter list of their own.
@@ -379,6 +442,11 @@ LEVELS = [
     ("out_low", 6, 0.0),
     ("out_high", 8, 1.0),
 ]
+BLEND_NAMES = {
+    0: "Copy", 1: "Add", 2: "Subtract", 3: "Multiply", 4: "Add sub", 5: "Max",
+    6: "Min", 7: "Switch", 8: "Divide", 9: "Overlay", 10: "Screen",
+    11: "Soft light",
+}  # fmt: skip
 BLEND_MODES = {
     0: "s",  # copy
     1: "d + s",  # add
@@ -444,8 +512,9 @@ def shader(
     helpers, params = "".join(_CTX.helpers), list(_CTX.params.values())
     shared = "".join(_CTX.globals)
     _CTX.helpers, _CTX.params, _CTX.globals = [], {}, []
-    for prm in params:
-        _CTX.exposed.setdefault(prm["name"], []).append(name)
+    for prm in params:  # graph inputs only: a node's knobs stay its own
+        if prm["name"].startswith(GRAPH_PARAM):
+            _CTX.exposed.setdefault(prm["name"], []).append(name)
     return {
         "name": name,
         "type": "shader",
@@ -545,28 +614,44 @@ def box_taps(radius: float) -> list[tuple[float, float]]:
     return [(k, w / total) for k, w in taps]
 
 
-def box_glsl(t: str, direction: tuple[float, float], radius: float, size: int) -> str:
-    """Return a GLSL body summing ``$input`` along ``direction`` (texels) as a box."""
-    n = float(1 << size)
+def box_glsl_live(t: str, direction: str, radius: str, size: int) -> str:
+    """Return a GLSL body: the box of box_taps, its radius (texels) a GLSL value.
+
+    ``direction`` is a GLSL vec2 in texels. The taps are counted in the
+    shader, so the radius can be a parameter or a function.
+    """
     g = "vec4" if t == "rgba" else "float"
-    taps = box_taps(radius)
-    lines = [
-        f"{g} acc = {g}(0.0);",
-        f"vec2 d = vec2({num(direction[0] / n)}, {num(direction[1] / n)});",
-    ]
-    inner = [w for k, w in taps if abs(k) < int(max(radius, 1e-6))]
-    if len(inner) > 8:  # noqa: PLR2004 (a loop for the even interior)
-        m = int(radius)
-        lines += [
-            f"for (int i = {-m + 1}; i < {m}; i++) {{",
+    n = num(float(1 << size))
+    return "\n".join(
+        [
+            f"{g} acc = {g}(0.0);",
+            f"float r = max({radius}, 1e-6);",
+            "int n = int(r);",
+            "float t = r - float(n);",
+            f"vec2 d = {direction} / {n};",
+            "for (int i = -n + 1; i < n; i++) {",
             "\tacc += $input(fract(uv + float(i) * d));",
             "}",
-            f"acc *= {num(inner[0])};",
+            "float total = float(max(2 * n - 1, 0));",
+            "if (n == 0) {",
+            "\tfloat w = 2.0 * t - t * t;",
+            "\tacc += w * $input(uv);",
+            "\ttotal += w;",
+            "} else {",
+            "\tfloat w = 0.5 + t - 0.5 * t * t;",
+            "\tvec2 o = float(n) * d;",
+            "\tacc += w * ($input(fract(uv - o)) + $input(fract(uv + o)));",
+            "\ttotal += 2.0 * w;",
+            "}",
+            "if (t > 0.0) {",
+            "\tfloat w = 0.5 * t * t;",
+            "\tvec2 o = float(n + 1) * d;",
+            "\tacc += w * ($input(fract(uv - o)) + $input(fract(uv + o)));",
+            "\ttotal += 2.0 * w;",
+            "}",
+            "return acc / total;",
         ]
-        taps = [(k, w) for k, w in taps if abs(k) >= int(radius)]
-    lines += [f"acc += {num(w)} * $input(fract(uv + {num(k)} * d));" for k, w in taps]
-    lines.append("return acc;")
-    return "\n".join(lines)
+    )
 
 
 Made = tuple[dict[str, Any], list[str]] | Sub
@@ -576,13 +661,18 @@ Made = tuple[dict[str, Any], list[str]] | Sub
 def _uniform(node: Node, name: str, *, color: bool, size: int) -> Made:
     vals = [f32(w) for w in node.inline]
     if color:
-        return shader(name, [], "rgba", f"return {vec(vals or [1, 1, 1, 1])};"), []
-    return shader(name, [], "f", f"return {num(vals[0]) if vals else '1.0'};"), []
+        c = knob("color", "Color", vals[:4] or [1.0, 1.0, 1.0, 1.0])
+        return shader(name, [], "rgba", f"return {vec(c)};"), []
+    v = knob("value", "Value", vals[0] if vals else 1.0)
+    return shader(name, [], "f", f"return {num(v)};"), []
 
 
 def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
     t, n = ("rgba", 4) if color else ("f", 1)
     p = flag_params(node.fields[0], node.inline, LEVELS, n, node)
+    labels = {"in_low": "Input low", "in_high": "Input high", "in_mid": "Midtones",
+              "out_low": "Output low", "out_high": "Output high"}  # fmt: skip
+    p = {k: knob(k, labels[k], v) for k, v in p.items()}
     g = "vec4" if color else "float"
     lines = [
         f"{g} x = $input(uv);",
@@ -618,8 +708,21 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
         opacity = dynamic(node, inline[0] + BASE)
     else:
         opacity = f32(inline[0]) if state == 1 else 1.0
+    opacity = knob("opacity_mult", "Opacity", opacity)
     o = num(opacity) + (" * $opacity(uv)" if has_input else "")
     expr = BLEND_MODES[mode]
+    if mode != 7:  # noqa: PLR2004 (switch mixes, it does not blend)
+        modes = [m for m in BLEND_MODES if m != 7]  # noqa: PLR2004
+        _CTX.params["mode"] = {
+            "name": "mode",
+            "label": "Blending mode",
+            "type": "enum",
+            "default": modes.index(mode),
+            "values": [
+                {"name": BLEND_NAMES[m], "value": f"({BLEND_MODES[m]})"} for m in modes
+            ],
+        }
+        expr = "$mode"
     inputs = [("source", t), ("destination", t)]
     if has_input:
         inputs.append(("opacity", "f"))
@@ -660,7 +763,9 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made:
         offset = [f32(w) for w in inline[:2]]
     elif state_o == 2:  # noqa: PLR2004
         offset = dynamic(node, inline[0] + BASE)
-    a, b, c, d = matrix
+    a, b, c, d = (knob(k, f"Matrix {k}", v, -2.0, 2.0) for k, v in zip(
+        ("m11", "m12", "m21", "m22"), matrix, strict=True))  # fmt: skip
+    offset = knob("offset", "Offset", offset, -1.0, 1.0)
     lines = [
         "vec2 p = uv - vec2(0.5);",
         (
@@ -698,9 +803,8 @@ def _gradient_keys(node: Node, *, color: bool) -> list[tuple[float, list[float]]
     """Return the gradient keys: (position, rgba or [gray]), by position.
 
     Color keys are two words, [u16 position | u8 r | u8 g][u8 b | u8 a | u16
-    midpoint]; grayscale keys three u16s, position, value, midpoint. A
-    midpoint other than 0x8000 means interpolation with midpoints, which is
-    not translated yet.
+    midpoint]; grayscale keys three u16s, position, value, midpoint. Substance
+    stores the midpoint words but does not use them during interpolation.
     """
     count = node.fields[1]
     data = node.at(node.code[0], 2 * count)  # the first offset points at the keys
@@ -708,22 +812,16 @@ def _gradient_keys(node: Node, *, color: bool) -> list[tuple[float, list[float]]
     if color:
         for k in range(count):
             w0, w1 = data[2 * k], data[2 * k + 1]
-            pos, mid = (w0 & 0xFFFF) / 0xFFFF, w1 >> 16
+            pos = (w0 & 0xFFFF) / 0xFFFF
             rgba = [(w0 >> 16 & 0xFF), (w0 >> 24), (w1 & 0xFF), (w1 >> 8 & 0xFF)]
             keys.append((pos, [c / 255 for c in rgba]))
-            if mid != 0x8000:  # noqa: PLR2004
-                msg = "gradient with midpoints"
-                raise UnsupportedError(msg)
     else:
         u16 = []
         for w in data:
             u16 += [w & 0xFFFF, w >> 16]
         for k in range(count):
-            pos, value, mid = u16[3 * k : 3 * k + 3]
+            pos, value, _mid = u16[3 * k : 3 * k + 3]
             keys.append((pos / 0xFFFF, [value / 0xFFFF]))
-            if mid != 0x8000:  # noqa: PLR2004
-                msg = "gradient with midpoints"
-                raise UnsupportedError(msg)
     return sorted(keys, key=lambda k: k[0])
 
 
@@ -785,6 +883,7 @@ def _hsl(node: Node, name: str, *, color: bool, size: int) -> Made:
     p = word_params(
         node, [("hue", 0, 0.5), ("saturation", 2, 0.5), ("luminosity", 4, 0.5)], {}
     )
+    p = {k: knob(k, k.capitalize(), v) for k, v in p.items()}
     lines = [
         "vec4 c = $input(uv);",
         "vec3 h = hsl_$(name)(c.rgb);",
@@ -804,6 +903,8 @@ def _grayscale(node: Node, name: str, *, color: bool, size: int) -> Made:
         [("weights", 0, [1 / 3, 1 / 3, 1 / 3, 0.0]), ("matte", 2, 0.0)],
         {"weights": 4},
     )
+    p["weights"] = knob("weights", "Channel weights", p["weights"], -1.0, 1.0)
+    p["matte"] = knob("matte", "Matte", p["matte"])
     alpha_mult = bool(node.flags >> 8 & 0x10)
     lines = ["vec4 c = $input(uv);", f"float g = dot(c, {vec(p['weights'])});"]
     lines.append(
@@ -911,11 +1012,19 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Blur: a separable box, half-width intensity / 256 of the image."""
     t = "rgba" if color else "f"
     p = word_params(node, [("intensity", 4, 10.0)], {})
-    # The tap count is fixed when translating: a function's value at the
-    # graph's defaults.
-    radius = static(p["intensity"]) * (1 << size) / 256
-    x = shader(f"{name}_x", [("input", t)], t, box_glsl(t, (1, 0), radius, size))
-    y = shader(name, [("input", t)], t, box_glsl(t, (0, 1), radius, size))
+    scale = num((1 << size) / 256)
+    k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
+    x = shader(
+        f"{name}_x", [("input", t)], t,
+        box_glsl_live(t, "vec2(1.0, 0.0)", f"{num(k)} * {scale}", size),
+    )  # fmt: skip
+    # Read again: a function's helper goes with the shader made next.
+    p = word_params(node, [("intensity", 4, 10.0)], {})
+    k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
+    y = shader(
+        name, [("input", t)], t,
+        box_glsl_live(t, "vec2(0.0, 1.0)", f"{num(k)} * {scale}", size),
+    )  # fmt: skip
     bx, by = f"{name}_buf_x", f"{name}_buf_y"
     return Sub(
         [buffer(bx, size), x, buffer(by, size), y],
@@ -935,11 +1044,16 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
         1,
         node,
     )
-    radius = static(p["intensity"]) * (1 << size) / 256
-    a = 2 * math.pi * static(p["angle"])
+    k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
+    turn = knob("angle", "Angle", p["angle"])
+    a = f"6.28318531 * {num(turn)}"
     made = shader(
-        name, [("input", t)], t, box_glsl(t, (math.cos(a), math.sin(a)), radius, size)
-    )
+        name, [("input", t)], t,
+        box_glsl_live(
+            t, f"vec2(cos({a}), sin({a}))", f"{num(k)} * {num((1 << size) / 256)}",
+            size,
+        ),
+    )  # fmt: skip
     return buffered(made, ["input"], {"input"}, size)
 
 
@@ -947,6 +1061,7 @@ def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Sharpen: x + k (4 x - its four neighbors), k the intensity."""
     t = "rgba" if color else "f"
     k = word_params(node, [("intensity", 4, 1.0)], {})["intensity"]
+    k = knob("intensity", "Intensity", k, 0.0, 4.0)
     e = num(1 / (1 << size))
     lines = [
         f"vec2 e = vec2({e}, 0.0);",
@@ -970,6 +1085,7 @@ def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """
     t = "rgba" if color else "f"
     k = word_params(node, [("intensity", 5, 1.0)], {})["intensity"]
+    k = knob("intensity", "Intensity", k, 0.0, 32.0)
     n = 1 << size
     lines = [
         f"vec2 e = vec2({num(1 / n)}, 0.0);",
@@ -988,9 +1104,11 @@ def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     p = flag_params(
         flags, node.inline, [("intensity", 1, 10.0), ("angle", 3, 0.0)], 1, node
     )
-    a = 2 * math.pi * static(p["angle"])
-    d = (p["intensity"] / 256 * math.cos(a), p["intensity"] / 256 * math.sin(a))
-    body = f"return $input(fract(uv + $intensity(uv) * {vec(list(d), 2)}));"
+    k = knob("warp_intensity", "Intensity", p["intensity"], 0.0, 64.0)
+    turn = knob("angle", "Angle", p["angle"])
+    a = f"6.28318531 * {num(turn)}"
+    d = f"{num(k)} / 256.0 * vec2(cos({a}), sin({a}))"
+    body = f"return $input(fract(uv + $intensity(uv) * {d}));"
     made = shader(name, [("input", t), ("intensity", "f")], t, body)
     return buffered(made, ["input", "intensity"], {"input"}, size)
 
@@ -1005,6 +1123,7 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
     k = flag_params(flags & 3, node.inline, [("intensity", 0, 1.0)], 1, node)[
         "intensity"
     ]
+    k = knob("intensity", "Intensity", k, 0.0, 8.0)
     k *= (1 << size) / 256  # per texel at 256 px: resolution independent
     sy = 1.0 if flags & 4 else -1.0
     lines = [
@@ -1038,13 +1157,16 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
         1,
         node,
     )
-    a = 2 * math.pi * static(p["angle"])
-    hi, sh = p["highlight"], p["shadow"]
+    turn = knob("angle", "Light angle", p["angle"])
+    p["intensity"] = knob("intensity", "Intensity", p["intensity"], 0.0, 16.0)
+    hi = knob("highlight", "Highlight", p["highlight"])
+    sh = knob("shadow", "Shadow", p["shadow"])
+    a = f"6.28318531 * {num(turn)}"
     lines = [
         f"vec2 e = vec2({num(1 / (1 << size))}, 0.0);",
         "float h = $gradient(uv);",
         "vec2 g = vec2(h - $gradient(fract(uv - e)), h - $gradient(fract(uv - e.yx)));",
-        f"vec2 light = {vec([math.cos(a), math.sin(a)], 2)};",
+        f"vec2 light = vec2(cos({a}), sin({a}));",
         f"float s = {num(p['intensity'] * (1 << size) / 256)} * dot(g, light);",
     ]
     if color:
@@ -1160,7 +1282,10 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
     if has_source:
         inputs.append(("source", t))
         if color:  # the falloff goes into alpha only
-            lines += ["vec4 s = $source(c.xy);", "return vec4(s.rgb, s.a * f);"]
+            lines += [
+                "vec4 s = $source(f > 0.0 ? c.xy : uv);",
+                "return vec4(s.rgb, s.a * f);",
+            ]
         else:
             lines.append("return f * $source(c.xy);")
     else:
@@ -1502,7 +1627,12 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
                 f"if (!fxnear_$(name)(uv, pos, {num(a)} + {num(b)} * cell)) return;"
             )
         # The node's random state: its incoming state plus its own seed.
-        lines.append(f"uint e = st + {tree.seed or 0}u;")
+        incoming = (
+            "st"
+            if not isinstance(tree, (fxmap.Iterate, fxmap.Switch)) or tree.inherited
+            else "0u"
+        )
+        lines.append(f"uint e = {incoming} + {tree.seed or 0}u;")
         if isinstance(tree, fxmap.Quadrant):
             kids = [emit(c) for c in tree.children]
             p = tree.params
@@ -1515,7 +1645,7 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
             lines.append(f"vec2 p = pos + {bo};")
             draw_id = tree.pattern if tree.pattern is not None else None
             if tree.image_index is not None:
-                index = _fx_function(node, tree.image_index.code)
+                index = _fx_function(node, tree.image_index.code, "imageindex")
                 draw_id = f"(-1 - int({index}))"
             elif tree.image is not None and tree.image < len(images):
                 draw_id = -1 - tree.image
@@ -1584,7 +1714,7 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
         elif isinstance(tree, fxmap.Iterate):
             first, repeated = emit(tree.first), emit(tree.repeated)
             if isinstance(tree.count, fxmap.Param):
-                count = f"int({_fx_function(node, tree.count.code)})"
+                count = f"int({_fx_function(node, tree.count.code, 'iteratecount')})"
             else:
                 count = str(tree.count)
             same = args.format(
@@ -1613,7 +1743,7 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
         else:
             if_false, if_true = emit(tree.if_false), emit(tree.if_true)
             if isinstance(tree.value, fxmap.Param):
-                cond = f"bool({_fx_function(node, tree.value.code)})"
+                cond = f"bool({_fx_function(node, tree.value.code, 'switch')})"
             else:
                 cond = "true" if tree.value else "false"
             same = args.format(
@@ -1749,7 +1879,27 @@ def node_shader(node: Node, name: str, size: int = 11) -> Made:
     if translate is None:
         msg = f"op {node.op}"
         raise UnsupportedError(msg)
-    return translate(node, name, color=node.op in COLOR_OPS, size=size)
+    # FX-Maps and pixel processors seed their own generators.
+    seed_state = 0 if node.op in (8, 9, 40, 41) else (node.flags >> 6) & 3
+    translated = node
+    if seed_state == 1:
+        _CTX.value_seed = str(node.inline[0])
+        translated = replace(node, inline=node.inline[1:])
+    elif seed_state == 2:  # noqa: PLR2004
+        _CTX.value_seed = "0"  # not the last node's, inside the seed's function
+        _CTX.value_seed = num(dynamic(node, node.code[-1]))
+    else:
+        _CTX.value_seed = "0"
+    if translated.inline:
+        target = translated.inline[0] + BASE
+        if translated.start < target < translated.end:
+            block = decode(translated.at(target, (translated.end - target) // 4))
+            last = block.instrs[-1]
+            if (  # dynamic output size
+                last.type != FUNC_FLOAT and last.width == 2  # noqa: PLR2004
+            ):
+                translated = replace(translated, inline=translated.inline[1:])
+    return translate(translated, name, color=translated.op in COLOR_OPS, size=size)
 
 
 def graph_inputs(asm: Any, xml: str) -> dict[int, GraphInput]:
@@ -1782,6 +1932,7 @@ def translate_graph(
     size: int = 11,
     inputs: dict[int, GraphInput] | None = None,
     data_dir: Path | None = None,
+    origins: dict[str, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -1789,7 +1940,8 @@ def translate_graph(
     ``inputs`` the graph's (non-image) inputs by uid, which functions read:
     they become parameters of the shaders that use them, exposed together on
     a "parameters" remote node. Only the nodes the outputs need are
-    translated.
+    translated. ``origins``, if given, is filled with each Material Maker
+    node's Substance node (by name).
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
     _CTX = _Context(size=size, inputs=dict(inputs or {}), data_dir=data_dir)
@@ -1820,6 +1972,8 @@ def translate_graph(
                 }
             )
             out_of[k] = name
+            if origins is not None:
+                origins[name] = k
             continue
         made = node_shader(node, name, size)
         if not isinstance(made, Sub):
@@ -1828,6 +1982,8 @@ def translate_graph(
                 [shader_node], [], [(n, name, i) for i, n in enumerate(names)], name
             )
         mm += made.nodes
+        if origins is not None:
+            origins.update((n["name"], k) for n in made.nodes)
         wires += made.wires
         wires += [
             wire(out_of[node.inputs[inp]], to, port) for inp, to, port in made.ports
