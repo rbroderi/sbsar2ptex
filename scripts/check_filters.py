@@ -25,6 +25,7 @@ from sbsar2ptex.probe import COLOR
 from sbsar2ptex.probe import COOKER
 from sbsar2ptex.probe import GRAY
 from sbsar2ptex.probe import cook
+from sbsar2ptex.probe import gradient_array
 from sbsar2ptex.probe import sbs
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.translate import UnsupportedError
@@ -37,8 +38,8 @@ SIZE = 11
 F4 = "constantValueFloat4"
 
 
-def cases() -> list[tuple[str, str, int, tuple[tuple[str, str, str], ...]]]:
-    """Return (tag, filter, image type, parameters) per case."""
+def cases() -> list[tuple]:
+    """Return (tag, filter, image type, parameters[, arrays]) per case."""
     out = []
     for kind, k in ((GRAY, "g"), (COLOR, "c")):
         out += [
@@ -82,6 +83,36 @@ def cases() -> list[tuple[str, str, int, tuple[tuple[str, str, str], ...]]]:
             )
             for m in range(12)
         ]
+    keys = gradient_array(
+        [
+            (0.0, (0.1, 0.2, 0.3, 0.4)),
+            (0.3, (0.5, 0.6, 0.7, 0.8)),
+            (1.0, (0.9, 0.8, 0.7, 0.6)),
+        ]
+    )
+    gray = (("colorswitch", "constantValueBool", "0"),)
+    i32 = "constantValueInt32"
+    out += [
+        ("gradient_c", "gradient", GRAY, (), keys),
+        ("gradient_g", "gradient", GRAY, gray, keys),
+        ("hsl_c", "hsl", COLOR, (
+            ("hue", "constantValueFloat1", "0.62"),
+            ("saturation", "constantValueFloat1", "0.4"),
+            ("luminosity", "constantValueFloat1", "0.45"),
+        )),
+        ("grayconv_c", "grayscaleconversion", COLOR, (
+            ("channelsweights", F4, "0.2 0.3 0.4 0.1"),
+        )),
+        ("grayconv_am_c", "grayscaleconversion", COLOR, (
+            ("channelsweights", F4, "0.2 0.3 0.4 0.1"),
+            ("alphamult", "constantValueBool", "1"),
+            ("mattelevel", "constantValueFloat1", "0.35"),
+        )),
+        ("shuffle_c", "shuffle", COLOR, (
+            ("channelred", i32, "6"), ("channelgreen", i32, "0"),
+            ("channelblue", i32, "3"), ("channelalpha", i32, "5"),
+        )),
+    ]  # fmt: skip
     return out
 
 
@@ -182,9 +213,10 @@ def main() -> None:
 
     todo = [c for c in cases() if not args.tags or c[0] in args.tags]
     made: list[tuple[str, int]] = []
-    for tag, filt, kind, params in todo:
+    for tag, filt, kind, params, *rest in todo:
         src = out / f"{tag}.sbs"
-        src.write_text(sbs(filt, kind, params=params), encoding="utf-8")
+        arrays = rest[0] if rest else ""
+        src.write_text(sbs(filt, kind, params=params, arrays=arrays), encoding="utf-8")
         if cook(COOKER, src, out) is None:
             print(f"{tag:14} cook failed")
             continue
@@ -194,7 +226,7 @@ def main() -> None:
                 str(SBSRENDER), "render", "--input", str(out / f"{tag}.sbsar"),
                 "--set-entry", f"input_a@{images[a]}", "--set-entry", f"input_b@{images[b]}",
                 "--set-entry", f"input_c@{images['c']}",
-                "--set-value", f"$outputsize@{SIZE},{SIZE}", "--engine", "sse2",
+                "--set-value", f"$outputsize@{SIZE},{SIZE}",
                 "--output-path", str(out), "--output-name", f"ref_{tag}",
                 "--output-bit-depth", "16", "--no-report",
             ],
@@ -216,7 +248,11 @@ def main() -> None:
         except UnsupportedError as e:
             print(f"{tag:14} unsupported: {e}")
             continue
-        graph = material_graph(mm_nodes, wires, outs["output"], kind == COLOR)
+        source = next(n for n in mm_nodes if n["name"] == outs["output"][0])
+        color = source["type"] == "image" or (
+            source["shader_model"]["outputs"][0]["type"] == "rgba"
+        )
+        graph = material_graph(mm_nodes, wires, outs["output"], color)
         (out / f"{tag}.ptex").write_text(json.dumps(graph, indent=1), encoding="utf-8")
         made.append((tag, kind))
 
@@ -232,14 +268,13 @@ def main() -> None:
     )  # fmt: skip
 
     worst = 0.0
-    for tag, kind in made:
+    for tag, _ in made:
         got_path = mm_out / f"{tag}_albedo.png"
         if not got_path.exists():
             print(f"{tag:14} Material Maker made no image")
             continue
         ref, got = load(out / f"ref_{tag}.png"), load(got_path)
-        if kind == GRAY:
-            ref = ref[..., 0] if ref.ndim == 3 else ref
+        if ref.ndim == 2:
             got = got[..., 0]
         diff = np.abs(ref - got[..., : ref.shape[-1]] if ref.ndim == 3 else ref - got)
         p99 = float(np.percentile(diff, 99)) * 255

@@ -90,18 +90,44 @@ BRIDGE_PARAMETERS = "".join(
 )
 
 
+def gradient_array(
+    keys: list[tuple[float, tuple[float, float, float, float]]],
+    *,
+    name: str = "gradientrgba",
+) -> str:
+    """Return a gradient's <paramsArray>: keys as (position, rgba)."""
+    cells = "".join(
+        f'<paramsArrayCell><uid v="{900 + i}"/><parameters>'
+        '<parameter><name v="position"/><paramValue>'
+        f'<constantValueFloat1 v="{pos}"/></paramValue></parameter>'
+        '<parameter><name v="midpoint"/><paramValue>'
+        '<constantValueFloat1 v="0.5"/></paramValue></parameter>'
+        '<parameter><name v="value"/><paramValue>'
+        f'<constantValueFloat4 v="{" ".join(map(str, rgba))}"/></paramValue>'
+        "</parameter></parameters></paramsArrayCell>"
+        for i, (pos, rgba) in enumerate(keys)
+    )
+    return (
+        f'<paramsArray><name v="{name}"/><uid v="899"/>'
+        f"<paramsArrayCells>{cells}</paramsArrayCells></paramsArray>"
+    )
+
+
 def sbs(
     filt: str,
     kind: int,
     *,
     chain: bool = False,
     params: tuple[tuple[str, str, str], ...] | None = None,
+    arrays: str = "",
 ) -> str:
     """Return a package: graph inputs -> ``filt`` -> output, of image ``kind``.
 
     With ``chain``, input A reaches the filter through a blur, so the filter's
     first input is not node 0 (which reads the same as a zero flag word).
-    ``params`` ((name, value kind, value) each) replaces PARAMETERS[filt].
+    ``params`` ((name, value kind, value) each) replaces PARAMETERS[filt];
+    ``arrays`` is the filter's <paramsArrays> content (gradient keys, curve
+    points), as .sbs XML.
     """
     inputs = FILTERS[filt]
     first = 150 if chain else 100
@@ -160,8 +186,12 @@ def sbs(
         )
 
     output_kind = GRAY if filt == "grayscaleconversion" else kind
-    if filt == "gradient":
+    if filt in ("gradient", "shuffle", "hsl"):
         output_kind = COLOR
+    if filt == "gradient" and any(
+        name == "colorswitch" and value == "0" for name, _, value in params or ()
+    ):
+        output_kind = GRAY  # a grayscale gradient map
     return (
         '<?xml version="1.0" encoding="UTF-8"?><package><identifier v="probe"/>'
         '<formatVersion v="1.1.0.202401"/><updaterVersion v="1.1.0.202401"/>'
@@ -181,6 +211,7 @@ def sbs(
         f'<comptype v="{output_kind}"/></compOutput></compOutputs>'
         f'<compImplementation><compFilter><filter v="{filt}"/>'
         f"<parameters>{parameters}</parameters>"
+        f"{f'<paramsArrays>{arrays}</paramsArrays>' if arrays else ''}"
         "</compFilter></compImplementation></compNode>"
         # The output.
         '<compNode><uid v="300"/><connections><connection>'

@@ -167,6 +167,13 @@ class Node:
     inputs: dict[str, int] = field(default_factory=dict)
     uid: int | None = None
     reads: list[int] = field(default_factory=list)
+    words: list[int] = field(default_factory=list)
+    """All the node's u32 words, from its node word on."""
+
+    def at(self, offset: int, count: int) -> list[int]:
+        """Return ``count`` words at file ``offset`` (inside this node)."""
+        k = (offset - self.start) // 4
+        return self.words[k : k + count]
 
     @property
     def name(self) -> str:
@@ -258,6 +265,7 @@ class Asm:
     def _node(self, index: int, start: int, end: int, known: set[int]) -> Node:
         node = Node(index, start, end)
         words = [self.u32(o) for o in range(start, end, 4)]
+        node.words = words
         word, rest = words[0], words[1:]
         node.op, node.flags = word & 0xFF, word >> 16
 
