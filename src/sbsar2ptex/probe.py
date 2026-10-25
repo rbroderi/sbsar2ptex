@@ -45,6 +45,7 @@ FILTERS: dict[str, tuple[str, ...]] = {
     "transformation": ("input1",),
     "uniform": (),
     "warp": ("input1", "inputgradient"),
+    "pixelprocessor": ("input", "input:1"),
 }
 
 PARAMETERS: dict[str, tuple[tuple[str, str, str], ...]] = {
@@ -162,6 +163,65 @@ def curve_array(
     )
 
 
+FLOAT1, FLOAT2, FLOAT3, FLOAT4, INT1, BOOL = 256, 512, 1024, 2048, 16, 4
+"""Function graph value types (.sbs type codes)."""
+
+
+def fn(
+    function: str,
+    vtype: int = FLOAT1,
+    data: str = "",
+    **inputs: tuple,
+) -> tuple:
+    """Return a function-graph node: (function, type, funcData XML, inputs).
+
+    ``data`` is the node's constant (a <constantValue...> element), if any;
+    ``inputs`` maps input identifiers to other such nodes.
+    """
+    return (function, vtype, data, inputs)
+
+
+def const(value: float) -> tuple:
+    """Return a const_float1 node."""
+    return fn("const_float1", data=f'<constantValueFloat1 v="{value}"/>')
+
+
+def get(name: str, vtype: int = FLOAT1) -> tuple:
+    """Return a node reading graph input ``name`` (get_float1, get_integer1...)."""
+    kind = {FLOAT1: "float1", FLOAT2: "float2", FLOAT3: "float3", FLOAT4: "float4",
+            INT1: "integer1", BOOL: "bool"}[vtype]  # fmt: skip
+    return fn(f"get_{kind}", vtype, f'<constantValueString v="{name}"/>')
+
+
+def function_graph(root: tuple) -> str:
+    """Return a dynamicValue's content for the function tree ``root``."""
+    nodes: list[str] = []
+
+    def emit(node: tuple) -> int:
+        function, vtype, data, inputs = node
+        refs = {name: emit(child) for name, child in inputs.items()}
+        uid = 5000 + len(nodes)
+        conns = "".join(
+            f'<connection><identifier v="{name}"/><connRef v="{ref}"/></connection>'
+            for name, ref in refs.items()
+        )
+        datas = (
+            f'<funcDatas><funcData><name v="{function}"/><constantValue>{data}'
+            "</constantValue></funcData></funcDatas>"
+            if data
+            else ""
+        )
+        nodes.append(
+            f'<paramNode><uid v="{uid}"/>'
+            f"{f'<connections>{conns}</connections>' if conns else ''}"
+            f'<function v="{function}"/><type v="{vtype}"/>{datas}</paramNode>'
+        )
+        return uid
+
+    top = emit(root)
+    return f'<rootnode v="{top}"/><paramNodes>{"".join(nodes)}</paramNodes>'
+
+
 def sbs(
     filt: str,
     kind: int,
@@ -170,6 +230,7 @@ def sbs(
     params: tuple[tuple[str, str, str], ...] | None = None,
     arrays: str = "",
     format16: bool = False,
+    floats: dict[str, float] | None = None,
 ) -> str:
     """Return a package: graph inputs -> ``filt`` -> output, of image ``kind``.
 
@@ -202,7 +263,12 @@ def sbs(
     )
     parameters = "".join(
         f'<parameter><name v="{name}"/><relativeTo v="0"/><paramValue>'
-        f'<{vkind} v="{value}"/></paramValue></parameter>'
+        + (
+            f"<{vkind}>{value}</{vkind}>"
+            if vkind == "dynamicValue"
+            else f'<{vkind} v="{value}"/>'
+        )
+        + "</paramValue></parameter>"
         for name, vkind, value in (
             PARAMETERS.get(filt, ()) if params is None else params
         )
@@ -239,6 +305,13 @@ def sbs(
         name == "colorswitch" and value == "0" for name, _, value in params or ()
     ):
         output_kind = GRAY  # a grayscale gradient map
+    float_inputs = "".join(
+        f'<paraminput><identifier v="{fname}"/><uid v="{30 + i}"/>'
+        '<type v="256"/><defaultValue>'
+        f'<constantValueFloat1 v="{default}"/></defaultValue>'
+        '<defaultWidget><name v="slider"/><options/></defaultWidget></paraminput>'
+        for i, (fname, default) in enumerate((floats or {}).items())
+    )
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?><package><identifier v="probe"/>'
         '<formatVersion v="1.1.0.202401"/><updaterVersion v="1.1.0.202401"/>'
@@ -246,7 +319,7 @@ def sbs(
         '<dependencies/><content><graph><identifier v="probe"/><uid v="1"/>'
         '<graphtype v="filter"/><paraminputs>'
         f"{paraminput('input_a', 10)}{paraminput('input_b', 11)}"
-        f"{paraminput('input_c', 12)}"
+        f"{paraminput('input_c', 12)}{float_inputs}"
         '</paraminputs><primaryInput v="10"/><graphOutputs><graphoutput>'
         f'<identifier v="output"/><uid v="20"/><channels v="{output_kind}"/>'
         "</graphoutput></graphOutputs><compNodes>"

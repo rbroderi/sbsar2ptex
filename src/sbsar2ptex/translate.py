@@ -20,11 +20,19 @@ Parameters driven by function bytecode ("dynamic") are not translated yet.
 
 import itertools
 import math
+import re
 import struct
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 
+from sbsar2ptex.function import FLOAT as FUNC_FLOAT
+from sbsar2ptex.function import FunctionError
+from sbsar2ptex.function import decode
+from sbsar2ptex.function import evaluate
+from sbsar2ptex.function import glsl_type
+from sbsar2ptex.function import to_glsl
+from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import Node
 
@@ -39,10 +47,223 @@ def f32(w: int) -> float:
 
 
 @dataclass
-class Params:
-    """A node's parameters read from its flag word and inline data."""
+class GraphInput:
+    """A Substance graph input: becomes a Material Maker parameter."""
 
-    values: dict[str, Any] = field(default_factory=dict)
+    identifier: str
+    type: int
+    """The .sbsasm type: 0 float, 1 float2, 2 float3, 3 float4, 4 int, ..."""
+    default: list[float | int]
+    label: str = ""
+
+
+@dataclass
+class _Context:
+    """What translating the current graph needs to know and collects."""
+
+    size: int = 11
+    inputs: dict[int, GraphInput] = field(default_factory=dict)
+    helpers: list[str] = field(default_factory=list)
+    """GLSL helper functions for the next shader node made."""
+    params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Material Maker parameters for the next shader node made."""
+    exposed: dict[str, list[str]] = field(default_factory=dict)
+    """Parameter name -> the MM nodes declaring it (for the remote node)."""
+    count: int = 0
+
+
+_CTX = _Context()
+
+
+class GLExpr:
+    """A GLSL expression for a value computed by function bytecode.
+
+    Arithmetic with numbers builds bigger expressions; ``static`` is the
+    value with the graph inputs at their defaults, for uses that need a
+    number when translating (a blur's tap count, say).
+    """
+
+    def __init__(self, text: str, width: int, static: list[float]) -> None:
+        """Wrap GLSL ``text`` of ``width`` components."""
+        self.text, self.width, self.static = text, width, static
+
+    def _op(self, other: Any, fmt: str) -> "GLExpr":
+        o = other.text if isinstance(other, GLExpr) else num(float(other))
+        ostatic = other.static if isinstance(other, GLExpr) else [float(other)]
+        a, b = self.static, ostatic
+        if len(a) != len(b):
+            a, b = (a * len(b), b) if len(a) == 1 else (a, b * len(a))
+        ops = {"+": float.__add__, "-": float.__sub__, "*": float.__mul__, "/": _div}
+        sym = fmt.split()[1]
+        if fmt.startswith("{o}"):
+            vals = [ops[sym](float(q), float(p)) for p, q in zip(a, b, strict=True)]
+        else:
+            vals = [ops[sym](float(p), float(q)) for p, q in zip(a, b, strict=True)]
+        return GLExpr(
+            "(" + fmt.format(s=self.text, o=o) + ")", max(self.width, len(b)), vals
+        )
+
+    def __add__(self, o: Any) -> "GLExpr":
+        return self._op(o, "{s} + {o}")
+
+    def __radd__(self, o: Any) -> "GLExpr":
+        return self._op(o, "{o} + {s}")
+
+    def __sub__(self, o: Any) -> "GLExpr":
+        return self._op(o, "{s} - {o}")
+
+    def __rsub__(self, o: Any) -> "GLExpr":
+        return self._op(o, "{o} - {s}")
+
+    def __mul__(self, o: Any) -> "GLExpr":
+        return self._op(o, "{s} * {o}")
+
+    def __rmul__(self, o: Any) -> "GLExpr":
+        return self._op(o, "{o} * {s}")
+
+    def __truediv__(self, o: Any) -> "GLExpr":
+        return self._op(o, "{s} / {o}")
+
+    def __neg__(self) -> "GLExpr":
+        return GLExpr(f"(-{self.text})", self.width, [-v for v in self.static])
+
+    def __getitem__(self, k: int) -> "GLExpr":
+        """Return component ``k``."""
+        return GLExpr(f"{self.text}.{'xyzw'[k]}", 1, [self.static[k]])
+
+    def __iter__(self):
+        """Iterate over the components."""
+        return (self[k] for k in range(self.width))
+
+    def __float__(self) -> float:
+        """Return the static value (a scalar's)."""
+        return float(self.static[0])
+
+
+def _div(a: float, b: float) -> float:
+    return a / b if b else math.inf
+
+
+def static(v: Any) -> Any:
+    """Return ``v`` as numbers: a GLExpr's value at the graph's defaults."""
+    if isinstance(v, GLExpr):
+        return v.static if v.width > 1 else v.static[0]
+    return v
+
+
+_INPUT_GLSL = {0: 1, 1: 2, 2: 3, 3: 4, 4: 1, 8: 2, 9: 3, 10: 4}
+"""Components of each graph input type."""
+
+
+IN_FLOAT, IN_FLOAT4, IN_INT, IN_INT2 = 0, 3, 4, 8
+"""Graph input types (.sbsasm) the parameters below distinguish."""
+
+
+def _float_param(name: str, label: str, default: float, *, integer: bool) -> None:
+    """Declare a float parameter for the next shader node."""
+    _CTX.params[name] = {
+        "name": name,
+        "label": label,
+        "type": "float",
+        "default": default,
+        "min": min(0.0, default),
+        "max": max(1.0, default),
+        "step": 1.0 if integer else 0.001,
+    }
+
+
+def _param_for(uid: int) -> str:
+    """Declare graph input ``uid`` as a parameter of the next shader; return GLSL.
+
+    Floats and ints become float parameters, float4s colors; other vectors a
+    float parameter per component.
+    """
+    gi = _CTX.inputs.get(uid)
+    if gi is None:
+        msg = f"function reads unknown input {uid:#x}"
+        raise UnsupportedError(msg)
+    name = "p_" + "".join(c if c.isalnum() else "_" for c in gi.identifier)
+    label = gi.label or gi.identifier
+    integer = gi.type >= IN_INT
+    if gi.type == IN_FLOAT4:
+        r, g, b, a = (list(gi.default) + [0.0] * 4)[:4]
+        _CTX.params[name] = {
+            "name": name,
+            "label": label,
+            "type": "color",
+            "default": {"r": r, "g": g, "b": b, "a": a},
+        }
+        return f"${name}"
+    if gi.type in (IN_FLOAT, IN_INT):
+        default = float(gi.default[0]) if gi.default else 0.0
+        _float_param(name, label, default, integer=integer)
+        return f"int(${name})" if integer else f"${name}"
+    width = _INPUT_GLSL.get(gi.type, 1)
+    parts = []
+    for k in range(width):
+        pname = f"{name}_{'xyzw'[k]}"
+        default = float(gi.default[k]) if k < len(gi.default) else 0.0
+        _float_param(pname, f"{label} {'xyzw'[k]}", default, integer=integer)
+        parts.append(f"int(${pname})" if integer else f"${pname}")
+    return f"{'ivec' if gi.type >= IN_INT2 else 'vec'}{width}({', '.join(parts)})"
+
+
+def dynamic(node: Node, offset: int) -> GLExpr:
+    """Return the value of the function block at file ``offset`` in ``node``."""
+    block = decode(node.at(offset, (node.end - offset) // 4))
+    _CTX.count += 1
+    prefix = f"f{_CTX.count}"
+    n = float(1 << _CTX.size)
+    builtin_glsl = {1: f"vec2({num(n)})", 3: f"vec2({num(float(_CTX.size))})"}
+    builtin_vals = {1: [n, n], 3: [float(_CTX.size)] * 2}
+
+    def builtins(ident: int, width: int) -> str:
+        if ident not in builtin_glsl:
+            msg = f"function reads built-in {ident}"
+            raise UnsupportedError(msg)
+        return builtin_glsl[ident]
+
+    try:
+        lines, result = to_glsl(
+            block, prefix, lambda uid, *_: _param_for(uid), builtins
+        )
+        values = {
+            uid: [float(x) for x in gi.default] or [0.0]
+            for uid, gi in _CTX.inputs.items()
+        }
+        value = evaluate(block, values, builtin_vals)
+    except FunctionError as e:
+        raise UnsupportedError(str(e)) from e
+    last = block.instrs[-1]
+    t = glsl_type(last.type, last.width)
+    body = "\n\t".join(lines)
+    # Material Maker appends seed arguments to instance functions, so they
+    # need a parameter list of their own.
+    _CTX.helpers.append(
+        f"{t} {prefix}_$(name)(vec2 uv) {{\n\t{body}\n\treturn {result};\n}}\n"
+    )
+    call = f"{prefix}_$(name)(uv)"
+    if last.type != FUNC_FLOAT:
+        call = f"float({call})" if last.width == 1 else f"vec{last.width}({call})"
+    return GLExpr(call, last.width, [float(x) for x in value])
+
+
+def _dynamic_offset(node: Node, inline: list[int], at: int) -> tuple[int, int]:
+    """Return a dynamic parameter's function block (file offset) and next inline index.
+
+    The parameter's inline word is the block's offset. Older cookers (2018)
+    put a neighborhood filter's function-driven intensity in its second
+    code block instead, with no inline word: then the word at ``at`` is not
+    an offset into the node, and it stays for the next parameter.
+    """
+    if at < len(inline):
+        target = inline[at] + BASE
+        if node.start < target < node.end and inline[at] % 4 == 0:
+            return target, at + 1
+    if len(node.code) > 1:
+        return node.code[-1], at
+    msg = "no function block for a dynamic parameter"
+    raise UnsupportedError(msg)
 
 
 def flag_params(
@@ -50,11 +271,13 @@ def flag_params(
     inline: list[int],
     spec: list[tuple],
     width: int,
+    node: Node | None = None,
 ) -> dict[str, Any]:
     """Read parameters stored two flag bits each: 1 inline, 2 dynamic.
 
     ``spec`` lists (name, bit position, default[, width]); each inline
-    parameter takes its width (else ``width``) floats, in spec order.
+    parameter takes its width (else ``width``) floats, in spec order; a
+    dynamic one, one word: the offset of its function block in ``node``.
     """
     out: dict[str, Any] = {}
     at = 0
@@ -68,8 +291,11 @@ def flag_params(
             at += width
             out[name] = vals if width > 1 else vals[0]
         else:
-            msg = f"parameter {name} is driven by a function"
-            raise UnsupportedError(msg)
+            if node is None:
+                msg = f"parameter {name} is driven by a function"
+                raise UnsupportedError(msg)
+            offset, at = _dynamic_offset(node, inline, at)
+            out[name] = dynamic(node, offset)
     return out
 
 
@@ -101,8 +327,13 @@ BLEND_MODES = {
 }
 
 
-def num(v: float) -> str:
-    """Return the shortest decimal that reads back as float32 ``v``."""
+def num(v: Any) -> str:
+    """Return the shortest decimal that reads back as float32 ``v``.
+
+    A GLExpr is its GLSL (a vector's green, as a grayscale node's constant).
+    """
+    if isinstance(v, GLExpr):
+        return v.text if v.width == 1 else f"{v.text}.y"
     target = struct.pack("<f", v)
     for digits in range(1, 10):
         text = f"{v:.{digits}g}"
@@ -114,8 +345,14 @@ def num(v: float) -> str:
     return text if any(c in text for c in ".en") else f"{text}.0"
 
 
-def vec(values: list[float] | float, n: int = 4) -> str:
-    """Return a GLSL vecN (or float) literal."""
+def vec(values: Any, n: int = 4) -> str:
+    """Return a GLSL vecN (or float) literal, or a GLExpr shaped to N."""
+    if isinstance(values, GLExpr):
+        if values.width == n:
+            return values.text
+        if values.width == 1:
+            return values.text if n == 1 else f"vec{n}({values.text})"
+        return f"{values.text}.y" if n == 1 else f"{values.text}.{'xyzw'[:n]}"
     if isinstance(values, (int, float)):
         values = [values] * n
     nums = ", ".join(num(v) for v in values[:n])
@@ -131,11 +368,15 @@ def shader(
     ``$name(uv)``, and the function returns vec4 (rgba) or float (f).
     """
     ret = "vec4" if out_type == "rgba" else "float"
+    helpers, params = "".join(_CTX.helpers), list(_CTX.params.values())
+    _CTX.helpers, _CTX.params = [], {}
+    for prm in params:
+        _CTX.exposed.setdefault(prm["name"], []).append(name)
     return {
         "name": name,
         "type": "shader",
         "node_position": {"x": 0, "y": 0},
-        "parameters": {},
+        "parameters": {prm["name"]: prm["default"] for prm in params},
         "seed_int": 0,
         "shader_model": {
             "name": name,
@@ -151,9 +392,9 @@ def shader(
                 }
                 for i, t in inputs
             ],
-            "instance": f"{ret} $(name)_fct(vec2 uv) {{\n{body}\n}}\n",
+            "instance": f"{helpers}{ret} $(name)_fct(vec2 uv) {{\n{body}\n}}\n",
             "outputs": [{"type": out_type, out_type: "$(name)_fct($uv)"}],
-            "parameters": [],
+            "parameters": params,
         },
     }
 
@@ -266,7 +507,7 @@ def _uniform(node: Node, name: str, *, color: bool, size: int) -> Made:
 
 def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
     t, n = ("rgba", 4) if color else ("f", 1)
-    p = flag_params(node.fields[0], node.inline, LEVELS, n)
+    p = flag_params(node.fields[0], node.inline, LEVELS, n, node)
     g = "vec4" if color else "float"
     lines = [
         f"{g} x = $input(uv);",
@@ -296,9 +537,9 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
         inline = inline[1:]
     state = (flags >> 9) & 3
     if state == 2:  # noqa: PLR2004
-        msg = "blend opacity is driven by a function"
-        raise UnsupportedError(msg)
-    opacity = f32(inline[0]) if state == 1 else 1.0
+        opacity = dynamic(node, inline[0] + BASE)
+    else:
+        opacity = f32(inline[0]) if state == 1 else 1.0
     o = num(opacity) + (" * $opacity(uv)" if has_input else "")
     expr = BLEND_MODES[mode]
     inputs = [("source", t), ("destination", t)]
@@ -333,13 +574,14 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made:
     inline = list(node.inline)
     state_m = (flags >> 6) & 3
     state_o = (flags >> 25) & 3
-    if 2 in (state_m, state_o):  # noqa: PLR2004
-        msg = "transformation driven by a function"
-        raise UnsupportedError(msg)
     if state_m == 1:
         matrix, inline = [f32(w) for w in inline[:4]], inline[4:]
+    elif state_m == 2:  # noqa: PLR2004
+        matrix, inline = list(dynamic(node, inline[0] + BASE)), inline[1:]
     if state_o == 1:
         offset = [f32(w) for w in inline[:2]]
+    elif state_o == 2:  # noqa: PLR2004
+        offset = dynamic(node, inline[0] + BASE)
     a, b, c, d = matrix
     lines = [
         "vec2 p = uv - vec2(0.5);",
@@ -369,8 +611,8 @@ def word_params(
             at += width
             out[pname] = vals if width > 1 else vals[0]
         else:
-            msg = f"parameter {pname} is driven by a function"
-            raise UnsupportedError(msg)
+            out[pname] = dynamic(node, node.inline[at] + BASE)
+            at += 1
     return out
 
 
@@ -591,7 +833,9 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Blur: a separable box, half-width intensity / 256 of the image."""
     t = "rgba" if color else "f"
     p = word_params(node, [("intensity", 4, 10.0)], {})
-    radius = p["intensity"] * (1 << size) / 256
+    # The tap count is fixed when translating: a function's value at the
+    # graph's defaults.
+    radius = static(p["intensity"]) * (1 << size) / 256
     x = shader(f"{name}_x", [("input", t)], t, box_glsl(t, (1, 0), radius, size))
     y = shader(name, [("input", t)], t, box_glsl(t, (0, 1), radius, size))
     bx, by = f"{name}_buf_x", f"{name}_buf_y"
@@ -607,10 +851,14 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Directional motion blur: the box along (cos, sin) of the angle (turns)."""
     t = "rgba" if color else "f"
     p = flag_params(
-        node.fields[0], node.inline, [("intensity", 0, 10.0), ("angle", 2, 0.0)], 1
+        node.fields[0],
+        node.inline,
+        [("intensity", 0, 10.0), ("angle", 2, 0.0)],
+        1,
+        node,
     )
-    radius = p["intensity"] * (1 << size) / 256
-    a = 2 * math.pi * p["angle"]
+    radius = static(p["intensity"]) * (1 << size) / 256
+    a = 2 * math.pi * static(p["angle"])
     made = shader(
         name, [("input", t)], t, box_glsl(t, (math.cos(a), math.sin(a)), radius, size)
     )
@@ -659,8 +907,10 @@ def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Directional warp: sample at uv + intensity / 256 map(uv) (cos, sin)."""
     t = "rgba" if color else "f"
     flags = node.fields[0]
-    p = flag_params(flags, node.inline, [("intensity", 1, 10.0), ("angle", 3, 0.0)], 1)
-    a = 2 * math.pi * p["angle"]
+    p = flag_params(
+        flags, node.inline, [("intensity", 1, 10.0), ("angle", 3, 0.0)], 1, node
+    )
+    a = 2 * math.pi * static(p["angle"])
     d = (p["intensity"] / 256 * math.cos(a), p["intensity"] / 256 * math.sin(a))
     body = f"return $input(fract(uv + $intensity(uv) * {vec(list(d), 2)}));"
     made = shader(name, [("input", t), ("intensity", "f")], t, body)
@@ -674,7 +924,9 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
     (inverse dy); alpha is the height.
     """
     flags = node.fields[0]
-    k = flag_params(flags & 3, node.inline, [("intensity", 0, 1.0)], 1)["intensity"]
+    k = flag_params(flags & 3, node.inline, [("intensity", 0, 1.0)], 1, node)[
+        "intensity"
+    ]
     k *= (1 << size) / 256  # per texel at 256 px: resolution independent
     sy = 1.0 if flags & 4 else -1.0
     lines = [
@@ -706,8 +958,9 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
             ("shadow", 7, [0.0] * n if color else 0.0, n),
         ],
         1,
+        node,
     )
-    a = 2 * math.pi * p["angle"]
+    a = 2 * math.pi * static(p["angle"])
     hi, sh = p["highlight"], p["shadow"]
     lines = [
         f"vec2 e = vec2({num(1 / (1 << size))}, 0.0);",
@@ -720,8 +973,8 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
         lines += [
             "vec4 c = $input(uv);",
             (
-                f"vec3 rgb = c.rgb + max(s, 0.0) * {vec(hi[:3], 3)}"
-                f" - max(-s, 0.0) * (vec3(1.0) - {vec(sh[:3], 3)});"
+                f"vec3 rgb = c.rgb + max(s, 0.0) * {vec(hi, 3)}"
+                f" - max(-s, 0.0) * (vec3(1.0) - {vec(sh, 3)});"
             ),
             "return vec4(clamp(rgb, 0.0, 1.0), c.a);",
         ]
@@ -778,17 +1031,46 @@ def node_shader(node: Node, name: str, size: int = 11) -> Made:
     return translate(node, name, color=node.op in COLOR_OPS, size=size)
 
 
+def graph_inputs(asm: Any, xml: str) -> dict[int, GraphInput]:
+    """Return a cooked graph's non-image inputs by uid: identifier, type, default.
+
+    ``asm`` is the sbsasm.Asm; ``xml`` the archive's description (names and
+    labels).
+    """
+    names = dict(re.findall(r'<input uid="(\d+)" identifier="([^"]*)"', xml))
+    labels = dict(
+        re.findall(r'<input uid="(\d+)"[^>]*>\s*<inputgui[^>]*label="([^"]*)"', xml)
+    )
+    out: dict[int, GraphInput] = {}
+    for uid, kind in asm.inputs:
+        if kind == 5 or str(uid) not in names:  # noqa: PLR2004 (images)
+            continue
+        out[uid] = GraphInput(
+            names[str(uid)],
+            kind,
+            list(asm.defaults.get(uid, [])),
+            labels.get(str(uid), ""),
+        )
+    return out
+
+
 def translate_graph(
     nodes: list[Node],
     outputs: dict[str, int],
     images: dict[int, str],
     size: int = 11,
+    inputs: dict[int, GraphInput] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
-    ``images`` gives each graph input's uid an image file for its image node.
-    Only the nodes the outputs need are translated.
+    ``images`` gives each graph input's uid an image file for its image node;
+    ``inputs`` the graph's (non-image) inputs by uid, which functions read:
+    they become parameters of the shaders that use them, exposed together on
+    a "parameters" remote node. Only the nodes the outputs need are
+    translated.
     """
+    global _CTX  # noqa: PLW0603 (one graph at a time)
+    _CTX = _Context(size=size, inputs=dict(inputs or {}))
     need: set[int] = set()
     todo = list(outputs.values())
     while todo:
@@ -831,4 +1113,36 @@ def translate_graph(
         out_of[k] = made.output
     for row, made in enumerate(mm):
         made["node_position"] = {"x": 220 * (row % 12), "y": 180 * (row // 12)}
+    if _CTX.exposed:
+        mm.append(remote(_CTX.exposed, mm))
     return mm, wires, {o: (out_of[k], 0) for o, k in outputs.items()}
+
+
+def remote(exposed: dict[str, list[str]], mm: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a remote node exposing each parameter across the nodes declaring it."""
+    declared = {
+        prm["name"]: prm
+        for node in mm
+        if node["type"] == "shader"
+        for prm in node["shader_model"]["parameters"]
+    }
+    widgets, values = [], {}
+    for k, (pname, users) in enumerate(sorted(exposed.items())):
+        prm = declared[pname]
+        widgets.append(
+            {
+                "name": f"param{k}",
+                "label": prm["label"],
+                "type": "linked_control",
+                "linked_widgets": [{"node": u, "widget": pname} for u in users],
+            }
+        )
+        values[f"param{k}"] = prm["default"]
+    return {
+        "name": "parameters",
+        "type": "remote",
+        "node_position": {"x": -400, "y": 0},
+        "parameters": values,
+        "seed_int": 0,
+        "widgets": widgets,
+    }

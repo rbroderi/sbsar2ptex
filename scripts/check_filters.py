@@ -23,14 +23,22 @@ from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.probe import COLOR
 from sbsar2ptex.probe import COOKER
+from sbsar2ptex.probe import FLOAT2
+from sbsar2ptex.probe import FLOAT3
+from sbsar2ptex.probe import FLOAT4
 from sbsar2ptex.probe import GRAY
+from sbsar2ptex.probe import const
 from sbsar2ptex.probe import cook
 from sbsar2ptex.probe import curve_array
+from sbsar2ptex.probe import fn
+from sbsar2ptex.probe import function_graph
+from sbsar2ptex.probe import get
 from sbsar2ptex.probe import gradient_array
 from sbsar2ptex.probe import input_kinds
 from sbsar2ptex.probe import sbs
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.translate import UnsupportedError
+from sbsar2ptex.translate import graph_inputs
 from sbsar2ptex.translate import shader
 from sbsar2ptex.translate import translate_graph
 
@@ -179,6 +187,55 @@ def cases() -> list[tuple]:
             True,
         ),
     ]
+    return out + function_cases()
+
+
+def function_cases() -> list[dict]:
+    """Return cases whose parameters are driven by functions of graph inputs.
+
+    Each runs at the inputs' defaults and with other values (``set``),
+    which the translated graph takes through its exposed parameters.
+    """
+    pa, pb = get("pa"), get("pb")
+
+    def vec4(x: tuple) -> tuple:
+        v2 = fn("vector2", FLOAT2, componentsin=x, componentslast=x)
+        v3 = fn("vector3", FLOAT3, componentsin=v2, componentslast=x)
+        return fn("vector4", FLOAT4, componentsin=v3, componentslast=const(1.0))
+
+    def dyn(tree: tuple) -> str:
+        return function_graph(tree)
+
+    floats = {"pa": 0.25, "pb": 0.5}
+    levels = (("levelinlow", "dynamicValue", dyn(vec4(fn("mul", a=pa, b=const(0.8))))),)
+    opacity = (
+        ("opacitymult", "dynamicValue",
+         dyn(fn("add", a=fn("mul", a=fn("sin", a=pa), b=const(0.4)), b=const(0.5)))),
+    )  # fmt: skip
+    offset = (
+        ("offset", "dynamicValue",
+         dyn(fn("vector2", FLOAT2, componentsin=pa, componentslast=fn("mul", a=pb, b=const(0.3))))),
+    )  # fmt: skip
+    hue = (("hue", "dynamicValue", dyn(pa)),)
+    blur = (("intensity", "dynamicValue", dyn(fn("mul", a=pa, b=const(8.0)))),)
+    out = []
+    for tag, filt, kind, params, values in (
+        ("fn_levels", "levels", GRAY, levels, {"pa": 0.4}),
+        ("fn_blend", "blend", GRAY, opacity, {"pa": 1.2}),
+        ("fn_transform", "transformation", GRAY, offset, {"pa": 0.1, "pb": 0.9}),
+        ("fn_hsl", "hsl", COLOR, hue, {"pa": 0.7}),
+    ):
+        base = {"filter": filt, "kind": kind, "params": params, "floats": floats}
+        out += [{"tag": tag, **base}, {"tag": f"{tag}_set", **base, "set": values}]
+    out.append(
+        {
+            "tag": "fn_blur",
+            "filter": "blur",
+            "kind": GRAY,
+            "params": blur,
+            "floats": floats,
+        }
+    )
     return out
 
 
@@ -269,6 +326,28 @@ def material_graph(mm_nodes, wires, source: tuple[str, int], color: bool) -> dic
     }
 
 
+def case(c: tuple | dict) -> dict:
+    """Return a case as a dict.
+
+    Keys: tag, filter, kind, params, arrays, format16, floats (graph float
+    inputs and defaults) and set (input values to render with, in both
+    Substance and Material Maker).
+    """
+    if isinstance(c, dict):
+        return {"arrays": "", "format16": False, "floats": {}, "set": {}, **c}
+    tag, filt, kind, params, *rest = c
+    return {
+        "tag": tag,
+        "filter": filt,
+        "kind": kind,
+        "params": params,
+        "arrays": rest[0] if rest else "",
+        "format16": bool(rest[1]) if len(rest) > 1 else False,
+        "floats": {},
+        "set": {},
+    }
+
+
 def main() -> None:
     """Run the cases the command line names, or all."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -280,14 +359,21 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     images = test_images(out)
 
-    todo = [c for c in cases() if not args.tags or c[0] in args.tags]
+    todo = [case(c) for c in cases()]
+    todo = [c for c in todo if not args.tags or c["tag"] in args.tags]
     made: list[tuple[str, int]] = []
-    for tag, filt, kind, params, *rest in todo:
+    for c in todo:
+        tag, filt, kind = c["tag"], c["filter"], c["kind"]
         src = out / f"{tag}.sbs"
-        arrays = rest[0] if rest else ""
-        format16 = bool(rest[1]) if len(rest) > 1 else False
         src.write_text(
-            sbs(filt, kind, params=params, arrays=arrays, format16=format16),
+            sbs(
+                filt,
+                kind,
+                params=c["params"],
+                arrays=c["arrays"],
+                format16=c["format16"],
+                floats=c["floats"],
+            ),
             encoding="utf-8",
         )
         if cook(COOKER, src, out) is None:
@@ -302,6 +388,7 @@ def main() -> None:
                 "--set-entry", f"input_a@{images[a]}", "--set-entry", f"input_b@{images[b]}",
                 "--set-entry", f"input_c@{images['c']}",
                 "--set-value", f"$outputsize@{SIZE},{SIZE}",
+                *(a for k, v in c["set"].items() for a in ("--set-value", f"{k}@{v}")),
                 "--output-path", str(out), "--output-name", f"ref_{tag}",
                 "--output-bit-depth", "16", "--no-report",
             ],
@@ -318,11 +405,23 @@ def main() -> None:
         by_uid = {u: feeds[n].as_posix() for u, n in names.items() if n in feeds}
         try:
             mm_nodes, wires, outs = translate_graph(
-                asm.nodes(), {"output": asm.output_nodes[0][1]}, by_uid
+                asm.nodes(),
+                {"output": asm.output_nodes[0][1]},
+                by_uid,
+                inputs=graph_inputs(asm, xml),
             )
         except UnsupportedError as e:
             print(f"{tag:14} unsupported: {e}")
             continue
+        for k, v in c["set"].items():  # the same input values in Material Maker
+            for n in mm_nodes:
+                if n["type"] == "shader" and f"p_{k}" in n["parameters"]:
+                    n["parameters"][f"p_{k}"] = float(v)
+            for n in mm_nodes:
+                if n["type"] == "remote":
+                    for w in n["widgets"]:
+                        if w["linked_widgets"][0]["widget"] == f"p_{k}":
+                            n["parameters"][w["name"]] = float(v)
         source = next(n for n in mm_nodes if n["name"] == outs["output"][0])
         color = source["type"] == "image" or (
             source["shader_model"]["outputs"][0]["type"] == "rgba"

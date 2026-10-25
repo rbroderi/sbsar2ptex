@@ -49,6 +49,8 @@ ignore = [
     "ANN",
     # Translators share one signature; not all use every argument.
     "ARG001",
+    # Operator methods (__add__ and the like) need no docstrings.
+    "D105",
     "CPY001",
     "D203",
     "D213",

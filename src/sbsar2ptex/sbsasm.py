@@ -129,6 +129,18 @@ has its source input only when its flag word's bit 0 is set. A node whose
 node-word flags lack bit 0 has no code, its constants following its fields.
 Gradient maps are 0 (grayscale out) and 1 (color out), both from either.
 """
+CODE_COUNT = {
+    **dict.fromkeys((0, 2, 3, 4, 5, 6, 7, 12, 13, 29, 30, 31, 32, 33, 38, 39), 1),
+    **dict.fromkeys(
+        (1, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 27, 37, 42, 43, 44, 45), 2
+    ),
+}
+"""Code offsets each op's node has (when it has code: node flag bit 0).
+
+The first is the output size's block, or for gradients and curves their
+data; neighborhood filters have a second. Not here: FX-Maps and pixel
+processors, whose layouts differ.
+"""
 TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
 """Bytes a graph input of each type takes in the defaults block."""
 
@@ -278,9 +290,18 @@ class Asm:
             while k < len(rest) and not is_offset(rest[k]):
                 k += 1
         node.fields = rest[:k]
-        while k < len(rest) and is_offset(rest[k]):
-            node.code.append(rest[k] + BASE)
-            k += 1
+        fixed = CODE_COUNT.get(node.op)
+        if fixed is not None:
+            # A set number of code offsets (none for a node without code);
+            # offsets after them belong to parameters (function blocks).
+            for _ in range(fixed if node.flags & 1 else 0):
+                if k < len(rest) and is_offset(rest[k]):
+                    node.code.append(rest[k] + BASE)
+                    k += 1
+        else:
+            while k < len(rest) and is_offset(rest[k]):
+                node.code.append(rest[k] + BASE)
+                k += 1
         stop = (min(node.code) - start) // 4 - 1 if node.code else len(rest)
         node.inline = rest[k:stop]
         node.reads = [w for w in words if w in known]
