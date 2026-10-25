@@ -1025,13 +1025,16 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
         name, [("input", t)], t,
         box_glsl_live(t, "vec2(0.0, 1.0)", f"{num(k)} * {scale}", size),
     )  # fmt: skip
-    bx, by = f"{name}_buf_x", f"{name}_buf_y"
-    return Sub(
-        [buffer(bx, size), x, buffer(by, size), y],
-        [wire(bx, x["name"]), wire(x["name"], by), wire(by, name)],
-        [("input", bx, 0)],
+    x["name"], y["name"] = "pass_x", "pass_y"
+    group = subgraph(
         name,
+        "Blur",
+        [buffer("buf_x", size), x, buffer("buf_y", size), y],
+        [wire("buf_x", "pass_x"), wire("pass_x", "buf_y"), wire("buf_y", "pass_y")],
+        [(t, "buf_x", 0)],
+        ("pass_y", 0, t),
     )
+    return Sub([group], [], [("input", name, 0)], name)
 
 
 def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
@@ -1996,14 +1999,104 @@ def translate_graph(
     return mm, wires, {o: (out_of[k], 0) for o, k in outputs.items()}
 
 
+def output_type(node: dict[str, Any]) -> str:
+    """Return a Material Maker node's output type: "f" or "rgba"."""
+    if node["type"] == "shader":
+        return node["shader_model"]["outputs"][0]["type"]
+    if node["type"] == "graph":
+        outs = next(c for c in node["nodes"] if c["name"] == "gen_outputs")
+        return outs["ports"][0]["type"]
+    return "rgba"
+
+
+def declared_params(mm: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return the parameters shader nodes declare, inside subgraphs too."""
+    out: dict[str, dict[str, Any]] = {}
+    for node in mm:
+        if node["type"] == "shader":
+            for prm in node["shader_model"]["parameters"]:
+                out.setdefault(prm["name"], prm)
+        elif node["type"] == "graph":
+            out.update(
+                (k, v)
+                for k, v in declared_params(node["nodes"]).items()
+                if k not in out
+            )
+    return out
+
+
+def subgraph(
+    name: str,
+    label: str,
+    inner: list[dict[str, Any]],
+    wires: list[dict[str, Any]],
+    inputs: list[tuple[str, str, int]],
+    output: tuple[str, int, str],
+) -> dict[str, Any]:
+    """Return ``inner`` as one Material Maker graph node named ``name``.
+
+    ``inputs`` are (type, inner node, port) per input port; ``output`` the
+    inner (node, port, type) it outputs. Every parameter of its nodes is one
+    control on it, linked to all the nodes declaring it (a blur's two
+    passes, one intensity); graph inputs among them are exposed as the
+    graph node's, by the name they had.
+    """
+    declared = declared_params(inner)
+    users: dict[str, list[str]] = {}
+    for n in inner:
+        if n["type"] == "shader":
+            for prm in n["shader_model"]["parameters"]:
+                users.setdefault(prm["name"], []).append(n["name"])
+    for p, us in _CTX.exposed.items():  # the graph's inputs: now read here
+        kept = [u for u in us if u not in {n["name"] for n in inner}]
+        if len(kept) != len(us):
+            _CTX.exposed[p] = [*kept, name]
+    ports_in = [{"name": f"port{k}", "type": t} for k, (t, _, _) in enumerate(inputs)]
+    links = [
+        {"from": "gen_inputs", "from_port": k, "to": node, "to_port": port}
+        for k, (_, node, port) in enumerate(inputs)
+    ]
+    node, port, kind = output
+    links.append({"from": node, "from_port": port, "to": "gen_outputs", "to_port": 0})
+    io = {"node_position": {"x": 0, "y": 0}, "parameters": {}, "type": "ios"}
+    controls = {
+        "name": "gen_parameters",
+        "type": "remote",
+        "node_position": {"x": 0, "y": -200},
+        "parameters": {p: declared[p]["default"] for p in users},
+        "seed_int": 0,
+        "widgets": [
+            {
+                "name": p,
+                "label": declared[p]["label"],
+                "type": "linked_control",
+                "linked_widgets": [{"node": u, "widget": p} for u in us],
+            }
+            for p, us in users.items()
+        ],
+    }
+    for k, n in enumerate(inner):
+        n["node_position"] = {"x": 220 * k, "y": 0}
+    return {
+        "name": name,
+        "label": label,
+        "type": "graph",
+        "node_position": {"x": 0, "y": 0},
+        "parameters": {p: declared[p]["default"] for p in users},
+        "seed_int": 0,
+        "nodes": [
+            *inner,
+            {"name": "gen_inputs", "ports": ports_in, **io},
+            {"name": "gen_outputs", "ports": [{"name": "port0", "type": kind}], **io},
+            controls,
+        ],
+        "connections": [*wires, *links],
+    }
+
+
 def remote(exposed: dict[str, list[str]], mm: list[dict[str, Any]]) -> dict[str, Any]:
     """Return a remote node exposing each parameter across the nodes declaring it."""
-    declared = {
-        prm["name"]: prm
-        for node in mm
-        if node["type"] == "shader"
-        for prm in node["shader_model"]["parameters"]
-    }
+    declared = declared_params(mm)
     widgets, values = [], {}
     for k, (pname, users) in enumerate(sorted(exposed.items())):
         prm = declared[pname]

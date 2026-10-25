@@ -2,6 +2,8 @@
 
     sbsar2ptex MATERIAL.sbsar [-o OUT_DIR] [--size 11] [--set NAME=VALUE ...]
         [--maps DIR [--normal opengl|directx]] [--sbsrender PATH] [--embedded]
+    sbsar2ptex MATERIAL.sbsar --procedural [--flat] [--no-library]
+        [--library DIR] [--sbscooker PATH] [--refresh-library]
 
 An .sbsar is a 7z archive of a description (XML: the graph's outputs, their
 channels, its parameters) and a compiled graph (.sbsasm: Substance engine
@@ -16,6 +18,13 @@ Material node, one per channel Material Maker has:
 - or, with no ``sbsrender``, from ``--maps DIR``: maps exported by hand
   (Substance Player, Painter, Designer), found by output name or channel
   (``*_basecolor.png``, ``*_normal.png``, ...).
+
+``--procedural`` instead translates the compiled graph into Material Maker
+nodes (sbsar2ptex.procedural): live, editable, folded into subgraphs named
+after the Substance library nodes found in it (unless ``--flat``). Naming
+them needs Substance's library cooked: the first run cooks it with
+Designer's sbscooker into a cache (``--library`` to choose where,
+``--no-library`` to skip); the graph's files go in ``NAME_data/``.
 
 ``--embedded`` also writes out the bitmaps baked into the bytecode (often a
 material's scanned grunge and scratch sources), for building on in Material
@@ -357,6 +366,28 @@ def main() -> None:
     parser.add_argument(
         "--list", action="store_true", help="print outputs and parameters"
     )
+    parser.add_argument(
+        "--procedural",
+        action="store_true",
+        help="translate the graph into live Material Maker nodes, not images",
+    )
+    parser.add_argument(
+        "--flat", action="store_true", help="with --procedural: no subgraphs"
+    )
+    parser.add_argument(
+        "--no-library",
+        action="store_true",
+        help="with --procedural: do not name Substance library nodes",
+    )
+    parser.add_argument(
+        "--library", type=Path, help="cooked library cache (default: per user)"
+    )
+    parser.add_argument("--sbscooker", help="path to sbscooker (to cook the library)")
+    parser.add_argument(
+        "--refresh-library",
+        action="store_true",
+        help="re-read the cooked library (after a Designer update)",
+    )
     args = parser.parse_args()
 
     files = read_archive(args.sbsar)
@@ -383,6 +414,9 @@ def main() -> None:
 
     stem = args.sbsar.stem
     out = args.out or args.sbsar.parent
+    if args.procedural:
+        procedural_main(args, files, graph, out / f"{stem}.ptex", out / f"{stem}_data")
+        return
     maps = out / f"{stem}_maps"
     maps.mkdir(parents=True, exist_ok=True)
 
@@ -433,6 +467,32 @@ def main() -> None:
     )
     for slot, path in found.items():
         print(f"{slot:9} {path}")
+    print("wrote", target)
+
+
+def procedural_main(
+    args: argparse.Namespace,
+    files: dict[str, bytes],
+    graph: Graph,
+    target: Path,
+    data: Path,
+) -> None:
+    """Write the translated graph (``--procedural``)."""
+    from sbsar2ptex import library  # noqa: PLC0415 (library imports convert's peers)
+    from sbsar2ptex import procedural  # noqa: PLC0415
+
+    templates = []
+    if not (args.flat or args.no_library):
+        templates = library.load(
+            args.library, args.sbscooker, refresh=args.refresh_library
+        )
+        if not templates:
+            print("no Substance library to name nodes by (no Designer found)")
+    made = procedural.build(
+        files, graph, data, size=args.size, library=templates, flat=args.flat
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(made, indent=1), encoding="utf-8")
     print("wrote", target)
 
 

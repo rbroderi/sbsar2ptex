@@ -31,6 +31,7 @@ from typing import Any
 from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import GRAPH_PARAM
+from sbsar2ptex.translate import declared_params
 
 PART = (300, 1200)
 """Smallest and largest part, in Substance nodes."""
@@ -371,6 +372,9 @@ def nest(
             return "rgba"
         if n["type"] == "shader":
             return n["shader_model"]["outputs"][0]["type"]
+        if n["type"] == "graph":
+            outs = next(c for c in n["nodes"] if c["name"] == "gen_outputs")
+            return outs["ports"][0]["type"]
         return "rgba"
 
     def wires_of(g: Group | None) -> list[dict[str, Any]]:
@@ -421,12 +425,7 @@ def nest(
                 add(g, src, ("gen_outputs", g.outputs[src]))
             src = (g.name, g.outputs[src])
         new_outs[name] = src
-    declared = {
-        prm["name"]: prm
-        for n in mm
-        if n["type"] == "shader"
-        for prm in n["shader_model"]["parameters"]
-    }
+    declared = declared_params(mm)
 
     def params_of(n: dict[str, Any]) -> list[str]:
         """Return the graph inputs a node reads (its own knobs stay on it)."""
@@ -437,7 +436,7 @@ def nest(
                 if p["name"].startswith(GRAPH_PARAM)
             ]
         if n["type"] == "graph":
-            return list(n["parameters"])
+            return [p for p in n["parameters"] if p.startswith(GRAPH_PARAM)]
         return []
 
     def build(g: Group) -> dict[str, Any]:

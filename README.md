@@ -50,6 +50,32 @@ normal, ambient occlusion, height, opacity) into a Material node. The normal map
 through Material Maker's `normal_map_convert` node, since the Material node takes
 normals in Material Maker's own convention.
 
+### A live, editable graph
+
+```bash
+sbsar2ptex Material.sbsar --procedural
+```
+
+translates the compiled graph itself into Material Maker nodes instead of
+rendering images (see "Translate to Material Maker nodes" below): nothing
+is baked except big scattering FX-Maps, node settings are parameters, the
+material's inputs are on a "parameters" node. It writes `Material.ptex` and
+`Material_data/` (embedded bitmaps, precomputed FX-Map textures). No
+`sbsrender` is needed.
+
+The graph comes folded into subgraphs named after the Substance library
+nodes found in it. Naming them needs Substance's library cooked: the first
+run cooks Designer's `resources/packages` with its `sbscooker` into a cache
+(a few minutes, once; LOCALAPPDATA/sbsar2ptex/library on Windows, else
+~/.cache/sbsar2ptex/library).
+
+- `--flat` leaves the graph flat (one node per atomic node);
+- `--no-library` groups it without naming library nodes (no Designer needed);
+- `--library DIR` keeps the cooked library elsewhere, `--sbscooker PATH`
+  names the cooker, `--refresh-library` re-reads the cache;
+- `--size` is the resolution the graph is built for (FX-Map textures, blur
+  widths in texels).
+
 ## Decompile
 
 ```bash
@@ -125,7 +151,8 @@ constants in its GLSL: levels' five values, a blend's opacity and mode (a
 drop-down), a transformation's matrix and offset, uniform colors, HSL,
 grayscale weights, and the intensities and angles of blurs, warps, sharpen,
 normal and emboss. Blurs count their taps in the shader, so their intensity
-can change, and follow a function exactly too. Settings driven by functions
+can change, and follow a function exactly too; a blur's two passes are one
+subgraph with one intensity control. Settings driven by functions
 stay functions. Graph inputs (`p_...`) are exposed together on the remote
 "parameters" node; a node's own settings stay on it.
 
@@ -147,9 +174,11 @@ was built:
   order is cut into parts and regions where the fewest values cross,
   never inside one of those nodes; groups are named after what they hold.
 
-In BiomechZombieCircuits, the basecolor's 8,549 Material Maker nodes become
-six parts, at most three levels deep; nesting changes no pixel (a 382-node
-subgraph exports identically flat and nested).
+In BiomechZombieCircuits, the whole material's Material Maker nodes (about
+9,000) become seven parts, at most three levels deep; nesting changes no
+pixel (a 382-node subgraph exports identically flat and nested).
+`sbsar2ptex --procedural` translates and nests it in about 20 seconds with
+the library cached.
 
 ## Develop
 

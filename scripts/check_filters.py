@@ -41,6 +41,7 @@ from sbsar2ptex.probe import sbs
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import graph_inputs
+from sbsar2ptex.translate import output_type
 from sbsar2ptex.translate import param_name
 from sbsar2ptex.translate import shader
 from sbsar2ptex.translate import translate_graph
@@ -662,9 +663,7 @@ def main() -> None:
                         if w["linked_widgets"][0]["widget"] == k:
                             n["parameters"][w["name"]] = float(v)
         source = next(n for n in mm_nodes if n["name"] == outs["output"][0])
-        color = source["type"] == "image" or (
-            source["shader_model"]["outputs"][0]["type"] == "rgba"
-        )
+        color = output_type(source) == "rgba"
         graph = material_graph(mm_nodes, wires, outs["output"], color)
         (out / f"{tag}.ptex").write_text(json.dumps(graph, indent=1), encoding="utf-8")
         made.append((tag, kind))

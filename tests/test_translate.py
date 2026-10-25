@@ -124,7 +124,10 @@ def test_neighborhood_filters_sample_buffers() -> None:
     warp = outs["output"][0]
     into_warp = {w["from"] for w in wires if w["to"] == warp}
     assert {types[n] for n in into_warp} == {"buffer"}  # input and gradient
-    blur_passes = [
-        n for n in nodes if n["type"] == "shader" and n["name"].endswith("_x")
-    ]
-    assert len(blur_passes) == 1  # the chained blur: x pass, then y
+    (blur,) = [n for n in nodes if n["type"] == "graph"]  # the chained blur
+    inner = {n["name"]: n for n in blur["nodes"]}
+    assert {"pass_x", "pass_y", "buf_x", "buf_y"} <= set(inner)
+    # One intensity control, linked to both passes.
+    (control,) = inner["gen_parameters"]["widgets"]
+    assert control["name"] == "intensity"
+    assert {w["node"] for w in control["linked_widgets"]} == {"pass_x", "pass_y"}
