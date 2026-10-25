@@ -79,14 +79,21 @@ their values, and the meaning of most flag bits.
 
 ## Translate to Material Maker nodes (in progress)
 
-`sbsar2ptex.translate` turns decompiled nodes into Material Maker shader nodes
-whose GLSL reproduces each Substance filter, wired as the compiled graph is.
-Done so far: uniform color, levels, transformation and all twelve blend modes,
-grayscale and color, each within 2/255 of `sbsrender` (99th percentile) by
-`scripts/check_filters.py`. Still to come: the remaining filters (blurs and
-warps need Material Maker buffers), FX-Maps, pixel processors, the function
-bytecode (for parameters driven by functions), and exposing the material's
-parameters on the translated graph.
+`sbsar2ptex.translate` turns decompiled nodes into Material Maker shader
+nodes whose GLSL reproduces each Substance filter, wired as the compiled graph
+is; parameters driven by Substance functions become GLSL too, and the graph
+inputs they read become live parameters on a "parameters" remote node.
+
+Translated, each within 3/255 of `sbsrender` (99th percentile) in
+`scripts/check_filters.py`: uniform color, levels, curve, HSL, grayscale
+conversion, channel shuffle, gradient map, dynamic gradient, all twelve blend
+modes, transformation, blur, directional blur, sharpen, warp, directional
+warp, emboss, normal, distance (jump flooding) and pixel processors.
+
+Not yet: FX-Maps, and Substance's random generator (`rand` is approximated by
+a hash with the same distribution, not the same values). Gradient maps with
+midpoint interpolation, and RGB beyond a color distance's range (where alpha
+is 0), are not reproduced.
 
 ## Develop
 
