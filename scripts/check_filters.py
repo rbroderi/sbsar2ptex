@@ -282,6 +282,11 @@ def pixel_cases() -> list[dict]:
     v2 = fn("vector2", FLOAT2, componentsin=l4, componentslast=l4)
     v3 = fn("vector3", FLOAT3, componentsin=v2, componentslast=l4)
     lum_of_color = fn("vector4", FLOAT4, componentsin=v3, componentslast=const(1.0))
+    rand_mix = fn(
+        "add",
+        a=fn("mul", a=fn("rand", a=const(0.5)), b=lum(pos, 0)),
+        b=fn("rand", a=fn("add", a=pa, b=fn("rand", a=const(0.2)))),
+    )
     floats = {"pa": 0.3}
     out = []
     for tag, kind, tree in (
@@ -289,6 +294,8 @@ def pixel_cases() -> list[dict]:
         ("pp_color", COLOR, color),
         ("pp_nearest", GRAY, nearest),
         ("pp_lum_color", COLOR, lum_of_color),
+        ("pp_rand", GRAY, fn("rand", a=const(1.0))),
+        ("pp_rand_mix", GRAY, rand_mix),
     ):
         out.append(
             {
@@ -299,6 +306,16 @@ def pixel_cases() -> list[dict]:
                 "floats": floats,
             }
         )
+    out.append(
+        {
+            "tag": "pp_rand_seed",
+            "filter": "pixelprocessor",
+            "kind": GRAY,
+            "params": per(fn("rand", a=const(1.0))),
+            "floats": floats,
+            "set": {"$randomseed": 3},
+        }
+    )
     return out
 
 
@@ -478,6 +495,7 @@ def main() -> None:
             print(f"{tag:14} unsupported: {e}")
             continue
         for k, v in c["set"].items():  # the same input values in Material Maker
+            k = "".join(ch if ch.isalnum() else "_" for ch in k)  # noqa: PLW2901
             for n in mm_nodes:
                 if n["type"] == "shader" and f"p_{k}" in n["parameters"]:
                     n["parameters"][f"p_{k}"] = float(v)

@@ -90,8 +90,12 @@ conversion, channel shuffle, gradient map, dynamic gradient, all twelve blend
 modes, transformation, blur, directional blur, sharpen, warp, directional
 warp, emboss, normal, distance (jump flooding) and pixel processors.
 
-Not yet: FX-Maps, and Substance's random generator (`rand` is approximated by
-a hash with the same distribution, not the same values). Gradient maps with
+Pixel processors use Substance's own random generator (`rand`), implemented
+clean-room from a behavioral specification ([docs/random-generator.md](docs/random-generator.md))
+and identical to it bit for bit on every test render.
+
+Not yet: FX-Maps. `rand` outside pixel processors (in value functions) is still
+approximated by a hash with the same distribution, not the same values. Gradient maps with
 midpoint interpolation, and RGB beyond a color distance's range (where alpha
 is 0), are not reproduced.
 

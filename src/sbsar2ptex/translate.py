@@ -32,6 +32,7 @@ from sbsar2ptex.function import decode
 from sbsar2ptex.function import evaluate
 from sbsar2ptex.function import glsl_type
 from sbsar2ptex.function import to_glsl
+from sbsar2ptex.rng import RNG_GLSL
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import Node
@@ -65,6 +66,8 @@ class _Context:
     inputs: dict[int, GraphInput] = field(default_factory=dict)
     helpers: list[str] = field(default_factory=list)
     """GLSL helper functions for the next shader node made."""
+    globals: list[str] = field(default_factory=list)
+    """Shared GLSL (Material Maker's global code) for the next shader node."""
     params: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Material Maker parameters for the next shader node made."""
     exposed: dict[str, list[str]] = field(default_factory=dict)
@@ -231,16 +234,31 @@ def _sample(kind: str, index: int, pos: str, filtering: int) -> str:
 def _rand(a: str, k: int) -> str:
     """Return GLSL for Substance's rand(a): uniform in [0, a).
 
-    An approximation: Substance's generator is its own (not identified), so
-    the noise has the same distribution, not the same values. It varies
-    per pixel in a pixel processor, as Substance's does, and with the
-    node's Material Maker seed ($seed), as Substance's with its random seed.
+    In a pixel processor, Substance's own generator (docs/random-generator.md,
+    sbsar2ptex.rng): a per-pixel state, ``rng``, advanced by each call. Its
+    behavior elsewhere (value functions) is not specified, so there an
+    approximation with the same distribution stands in, varying with the
+    node's Material Maker seed ($seed).
     """
+    if _CTX.sampled is not None:
+        return f"sbs_rng_next(rng, float({a}))"
     where = "uv * 1024.0" if _CTX.sampled is not None else "vec2(0.0)"
     return (
         f"({a} * fract(sin(dot(vec3({where}, $seed * 100.0 + {k}.0),"
         " vec3(12.9898, 78.233, 37.719))) * 43758.5453))"
     )
+
+
+RAND = 0x32
+"""The function bytecode op of rand."""
+
+
+def _seed_glsl() -> str:
+    """Return GLSL for the graph's random seed: its $randomseed input, else 0."""
+    for uid, gi in _CTX.inputs.items():
+        if gi.identifier == "$randomseed":
+            return _param_for(uid)
+    return "0"
 
 
 def dynamic(node: Node, offset: int) -> GLExpr:
@@ -278,6 +296,11 @@ def dynamic(node: Node, offset: int) -> GLExpr:
         value = [0.0] * block.instrs[-1].width
     last = block.instrs[-1]
     t = glsl_type(last.type, last.width)
+    if _CTX.sampled is not None and any(i.op == RAND for i in block.instrs):
+        # rand: the pixel's generator, from the graph seed and the pixel.
+        lines.insert(0, f"uint rng = sbs_rng_init(uint({_seed_glsl()}), uv);")
+        if RNG_GLSL not in _CTX.globals:
+            _CTX.globals.append(RNG_GLSL)
     body = "\n\t".join(lines)
     # Material Maker appends seed arguments to instance functions, so they
     # need a parameter list of their own.
@@ -411,7 +434,8 @@ def shader(
     """
     ret = "vec4" if out_type == "rgba" else "float"
     helpers, params = "".join(_CTX.helpers), list(_CTX.params.values())
-    _CTX.helpers, _CTX.params = [], {}
+    shared = "".join(_CTX.globals)
+    _CTX.helpers, _CTX.params, _CTX.globals = [], {}, []
     for prm in params:
         _CTX.exposed.setdefault(prm["name"], []).append(name)
     return {
@@ -423,7 +447,7 @@ def shader(
         "shader_model": {
             "name": name,
             "code": "",
-            "global": "",
+            "global": shared,
             "inputs": [
                 {
                     "name": i,
