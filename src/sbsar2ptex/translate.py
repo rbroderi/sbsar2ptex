@@ -26,12 +26,14 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 
+from sbsar2ptex import fxmap
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
 from sbsar2ptex.function import FunctionError
 from sbsar2ptex.function import decode
 from sbsar2ptex.function import evaluate
 from sbsar2ptex.function import glsl_type
 from sbsar2ptex.function import to_glsl
+from sbsar2ptex.fxrng import FX_RNG_GLSL
 from sbsar2ptex.rng import RNG_GLSL
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
@@ -1167,6 +1169,310 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
     return Sub(nodes, wires, ports, name)
 
 
+FX_ARGS = "vec2 pos, float number, float depth, uint rs"
+"""What an FX-Map function reads: $pos, $number, $depth and its node's
+random state (docs/random-generator.md section 8)."""
+
+FX_DRAW_GLSL = """vec4 fxdraw_$(name)(
+\tvec2 uv, vec2 c, vec2 hs, float a, int id, float s, bool mx
+) {
+\tvec2 d0 = uv - c;
+\td0 -= round(d0) * $(tile);
+\tvec2 h = max(abs(hs), vec2(1e-8));
+\tfloat ext = length(h);
+\tint k = ext > 0.5 ? int(ceil(ext - 0.5)) : 0;
+\tint kx = $(tile).x > 0.5 ? k : 0;
+\tint ky = $(tile).y > 0.5 ? k : 0;
+\tfloat ca = cos(a), sa = sin(a);
+\tvec4 v = vec4(0.0);
+\tfor (int j = -ky; j <= ky; j++) {
+\t\tfor (int i = -kx; i <= kx; i++) {
+\t\t\tvec2 d = d0 + vec2(float(i), float(j));
+\t\t\tvec2 q = vec2(ca * d.x + sa * d.y, -sa * d.x + ca * d.y) / h;
+\t\t\tvec4 p = vec4(0.0);
+\t\t\tif (id >= 0) {
+\t\t\t\tp = vec4(fxpat_$(name)(id, q, s));
+\t\t\t} else if (abs(q.x) <= 1.0 && abs(q.y) <= 1.0) {
+\t\t\t\tp = fximg_$(name)(-1 - id, (q + 1.0) * 0.5);
+\t\t\t}
+\t\t\tv = mx ? max(v, p) : v + p;
+\t\t}
+\t}
+\treturn v;
+}
+"""
+"""A pattern (id >= 0) or image (-1 - index) drawn at c, wrapping."""
+
+_FX_CHILD = ((-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25))
+"""Each Quadrant output's cell center, in parent cells from the parent's."""
+
+
+def _fx_function(node: Node, offset: int) -> str:
+    """Return a GLSL call for the FX-Map function block at file ``offset``.
+
+    $pos, $number and $depth are the tree function's arguments; rand is
+    Substance's FX-Map generator (sbsar2ptex.fxrng), private to the call and
+    started from its tree node's state ``e``.
+    """
+    block = decode(node.at(offset, (node.end - offset) // 4))
+    _CTX.count += 1
+    prefix = f"f{_CTX.count}"
+    n = float(1 << _CTX.size)
+    glsl = {
+        0: "0.0",
+        1: f"vec2({num(n)})",
+        3: f"vec2({num(float(_CTX.size))})",
+        8: "pos",
+        10: "number",
+        12: "depth",
+    }
+
+    def builtins(ident: int, width: int) -> str:
+        if ident not in glsl:
+            msg = f"FX-Map function reads built-in {ident}"
+            raise UnsupportedError(msg)
+        return glsl[ident]
+
+    def rand(a: str, k: int) -> str:
+        return f"fx_rng_next(rng, float({a}))"
+
+    try:
+        lines, result = to_glsl(
+            block, prefix, lambda uid, *_: _param_for(uid), builtins, _sample, rand
+        )
+    except FunctionError as e:
+        raise UnsupportedError(str(e)) from e
+    last = block.instrs[-1]
+    t = glsl_type(last.type, last.width)
+    if any(i.op == RAND for i in block.instrs):
+        lines.insert(0, "uint rng = rs;")
+    body = "\n\t".join(lines)
+    _CTX.helpers.append(
+        f"{t} {prefix}_$(name)({FX_ARGS}) {{\n\t{body}\n\treturn {result};\n}}\n"
+    )
+    return f"{prefix}_$(name)(pos, number, depth, e)"
+
+
+def _fx_param(node: Node, param: Any, default: list[float]) -> str:
+    """Return GLSL for a tree parameter: its value, function, or ``default``."""
+    width = len(default)
+    if param is None:
+        return vec(default, width)
+    if param.state == fxmap.CODE:
+        call = _fx_function(node, param.code)
+        return f"vec{width}({call})" if width > 1 else f"float({call})"
+    value = param.value * width if len(param.value) == 1 else param.value
+    return vec(value, width)
+
+
+def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """FX-Map: its tree evaluated per pixel (see sbsar2ptex.fxmap).
+
+    Each tree node is a GLSL function adding what it draws over the pixel
+    to ``acc`` (premultiplied rgba; gray in x), its children's functions
+    defined first. Every pattern is visited for every pixel.
+    """
+    tree = fxmap.read_tree(node, color=color)
+    st = fxmap.read_settings(node, color=color)
+    deepest = fxmap.max_depth(tree)
+    h = st.hurst
+    if h == 0:
+        weight = "1.0"
+    elif h == 1:
+        weight = num(1.0 / (deepest + 1))
+    else:
+        total = sum(h**j for j in range(deepest + 1))
+        weight = f"pow({num(h)}, depth) * {num(1.0 / total)}"
+    scale = f"{weight} * {num(st.opacity)}"
+    images = [f"pattern{n}" for n in range(len(st.patterns))]
+    t = "rgba" if color else "f"
+    names: dict[int, str] = {}
+
+    def emit(tree: fxmap.Tree | None) -> str | None:
+        if tree is None:
+            return None
+        if id(tree) in names:
+            return names[id(tree)]
+        lines: list[str] = []
+        args = "uv, {pos}, {cell}, {depth}, {number}, {st}, acc"
+        # The node's random state: its incoming state plus its own seed.
+        lines.append(f"uint e = st + {tree.seed or 0}u;")
+        if isinstance(tree, fxmap.Quadrant):
+            kids = [emit(c) for c in tree.children]
+            p = tree.params
+            op = _fx_param(node, p.get("opacity"), [1.0] * 4)
+            bo = _fx_param(node, p.get("branchoffset"), [0.0, 0.0])
+            fo = _fx_param(node, p.get("frameoffset"), [0.0, 0.0])
+            sz = _fx_param(node, p.get("patternsize"), [1.0, 1.0])
+            rot = _fx_param(node, p.get("patternrotation"), [0.0])
+            sup = _fx_param(node, p.get("patternsuppl"), [0.0])
+            lines.append(f"vec2 p = pos + {bo};")
+            draw_id = tree.pattern if tree.pattern is not None else None
+            if tree.image_index is not None:
+                index = _fx_function(node, tree.image_index.code)
+                draw_id = f"(-1 - int({index}))"
+            elif tree.image is not None and tree.image < len(images):
+                draw_id = -1 - tree.image
+            if draw_id is not None:
+                mx = "true" if tree.blend_max else "false"
+                lines += [
+                    f"vec4 op = {op};",
+                    (
+                        f"vec4 v = fxdraw_$(name)(uv, p + {fo}, cell * {sz} * 0.5,"
+                        f" {rot} * 6.28318531, {draw_id}, {sup}, {mx});"
+                    ),
+                ]
+                if color:
+                    lines += [
+                        "vec4 src = v * op;",
+                        f"src.a *= {scale};",
+                        "acc.a = src.a + acc.a * (1.0 - src.a);",
+                        (
+                            "acc.rgb = src.rgb * src.a + acc.rgb * (1.0 - src.a);"
+                            if tree.blend_max
+                            else "acc.rgb += src.rgb * src.a;"
+                        ),
+                    ]
+                else:
+                    value = f"v.x * op.y * {scale}"
+                    lines.append(
+                        f"acc.x = max(acc.x, {value});"
+                        if tree.blend_max
+                        else f"acc.x += {value};"
+                    )
+            shared = len(set(map(id, tree.children))) == 1 and kids and kids[0]
+            # Each slot's state: the child depth's transform, once more per slot.
+            if shared:
+                lines += [
+                    "uint sp = e;",
+                    "for (int c = 0; c < 4; c++) {",
+                    "\tsp = fx_depth_step(sp, depth + 1.0);",
+                    "\tvec2 o = vec2(float(c % 2) - 0.5, float(c / 2) - 0.5) * 0.5;",
+                    f"\t{kids[0]}("
+                    + args.format(
+                        pos="p + o * cell",
+                        cell="cell * 0.5",
+                        depth="depth + 1.0",
+                        number="number",
+                        st="sp",
+                    )
+                    + ");",
+                    "}",
+                ]
+            elif any(kids):
+                lines.append("uint sp = e;")
+                for kid, (ox, oy) in zip(kids, _FX_CHILD, strict=False):
+                    lines.append("sp = fx_depth_step(sp, depth + 1.0);")
+                    if kid:
+                        lines.append(
+                            f"{kid}("
+                            + args.format(
+                                pos=f"p + vec2({num(ox)}, {num(oy)}) * cell",
+                                cell="cell * 0.5",
+                                depth="depth + 1.0",
+                                number="number",
+                                st="sp",
+                            )
+                            + ");"
+                        )
+        elif isinstance(tree, fxmap.Iterate):
+            first, repeated = emit(tree.first), emit(tree.repeated)
+            if isinstance(tree.count, fxmap.Param):
+                count = f"int({_fx_function(node, tree.count.code)})"
+            else:
+                count = str(tree.count)
+            same = args.format(
+                pos="pos", cell="cell", depth="depth", number="number", st="e"
+            )
+            if first:
+                lines.append(f"{first}({same});")
+            if repeated:
+                # Each pass's state: one more Iterate step.
+                lines += [
+                    f"int n = {count};",
+                    "uint ps = e;",
+                    "for (int i = 0; i < n; i++) {",
+                    "\tps = fx_iter_step(ps);",
+                    f"\t{repeated}("
+                    + args.format(
+                        pos="pos",
+                        cell="cell",
+                        depth="depth",
+                        number="float(i)",
+                        st="ps",
+                    )
+                    + ");",
+                    "}",
+                ]
+        else:
+            if_false, if_true = emit(tree.if_false), emit(tree.if_true)
+            if isinstance(tree.value, fxmap.Param):
+                cond = f"bool({_fx_function(node, tree.value.code)})"
+            else:
+                cond = "true" if tree.value else "false"
+            same = args.format(
+                pos="pos", cell="cell", depth="depth", number="number", st="e"
+            )
+            lines.append(f"if ({cond}) {{")
+            if if_true:
+                lines.append(f"\t{if_true}({same});")
+            lines.append("} else {")
+            if if_false:
+                lines.append(f"\t{if_false}({same});")
+            lines.append("}")
+        fname = f"fxn{len(names)}_$(name)"
+        names[id(tree)] = fname
+        body = "\n\t".join(lines)
+        _CTX.helpers.append(
+            f"void {fname}(vec2 uv, vec2 pos, float cell, float depth,"
+            f" float number, uint st, inout vec4 acc) {{\n\t{body}\n}}\n"
+        )
+        return fname
+
+    # Patterns and the drawing helper come before the tree's functions.
+    _CTX.helpers.append(fxmap.PATTERN_GLSL)
+    if FX_RNG_GLSL not in _CTX.globals:
+        _CTX.globals.append(FX_RNG_GLSL)
+    # The root's state: the FX-Map's random seed (a function of $randomseed,
+    # or its own value).
+    seed = str(st.seed or 0)
+    if st.seed_code is not None:
+        seed = f"int({num(dynamic(node, st.seed_code))})"
+    sample = [
+        f"\tif (k == {n}) return {'$' + nm}(fract(q));" for n, nm in enumerate(images)
+    ]
+    _CTX.helpers.append(
+        "vec4 fximg_$(name)(int k, vec2 q) {\n"
+        + "\n".join(sample)
+        + "\n\treturn vec4(0.0);\n}\n"
+    )
+    tile = f"vec2({1.0 if st.tile_x else 0.0}, {1.0 if st.tile_y else 0.0})"
+    _CTX.helpers.append(FX_DRAW_GLSL.replace("$(tile)", tile))
+    _CTX.sampled = images  # functions may sample the pattern inputs
+    try:
+        root = emit(tree)
+    finally:
+        _CTX.sampled = None
+    inputs = [(nm, "rgba") for nm in images]
+    lines = ["vec4 acc = vec4(0.0);"]
+    if isinstance(st.background, int):
+        inputs.append(("background", t))
+        lines.append("acc = $background(uv);" if color else "acc.x = $background(uv);")
+    elif st.background is not None:
+        lines.append(
+            f"acc = {vec(st.background, 4)};"
+            if color
+            else f"acc.x = {num(st.background[0])};"
+        )
+    if root:
+        lines.append(f"{root}(uv, vec2(0.5), 1.0, 0.0, 0.0, uint({seed}), acc);")
+    lines.append(
+        "return clamp(acc, 0.0, 1.0);" if color else "return clamp(acc.x, 0.0, 1.0);"
+    )
+    made = shader(name, inputs, t, "\n".join(lines))
+    return buffered(made, [nm for nm, _ in inputs], set(images), size)
+
+
 TRANSLATORS = {
     0: _gradient,
     1: _gradient,
@@ -1176,6 +1482,8 @@ TRANSLATORS = {
     5: _transformation,
     6: _grayscale,
     7: _shuffle,
+    8: _fxmaps,
+    9: _fxmaps,
     12: _uniform,
     14: _warp,
     15: _warp,

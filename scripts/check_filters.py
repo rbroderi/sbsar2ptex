@@ -32,6 +32,8 @@ from sbsar2ptex.probe import cook
 from sbsar2ptex.probe import curve_array
 from sbsar2ptex.probe import fn
 from sbsar2ptex.probe import function_graph
+from sbsar2ptex.probe import fx
+from sbsar2ptex.probe import fxmap_graph
 from sbsar2ptex.probe import get
 from sbsar2ptex.probe import gradient_array
 from sbsar2ptex.probe import input_kinds
@@ -236,7 +238,124 @@ def function_cases() -> list[dict]:
             "floats": floats,
         }
     )
-    return out + pixel_cases() + distance_cases()
+    return out + pixel_cases() + distance_cases() + fxmap_cases()
+
+
+def fxmap_cases() -> list[dict]:
+    """Return FX-Map cases: trees of Quadrants, Iterates and Switches."""
+    i1, f1, f2 = "constantValueInt32", "constantValueFloat1", "constantValueFloat2"
+
+    def pat(t: int, *more: tuple, children: dict | None = None) -> tuple:
+        return fx("quadrant", (("patterntype", i1, str(t)), *more), children)
+
+    def dyn(name: str, tree: tuple) -> tuple:
+        return (name, "dynamicValue", function_graph(tree))
+
+    def quad4(types: tuple, sup: str = "0") -> tuple:
+        return fx(
+            "quadrant",
+            (),
+            {
+                k: pat(t, ("patternsize", f2, "0.9 0.8"), ("patternsuppl", f1, sup))
+                for k, t in enumerate(types)
+            },
+        )
+
+    flat = (("hurst", f1, "0"),)
+    number = get("$number")
+
+    def vec2(x: tuple, y: tuple) -> tuple:
+        return fn("vector2", FLOAT2, componentsin=x, componentslast=y)
+
+    def lin(a: float, b: float) -> tuple:
+        return fn("add", a=fn("mul", a=number, b=const(a)), b=const(b))
+
+    leaf = pat(3, ("patternsize", f2, "0.8 0.6"), ("blendingmode", i1, "1"))
+    chain = fx("quadrant", (), dict.fromkeys(range(4), leaf))
+    for _ in range(2):
+        shared = chain
+        chain = fx("quadrant", (), dict.fromkeys(range(4), shared))
+    swept = pat(
+        4,
+        ("patternsize", f2, "0.3 0.2"),
+        dyn("frameoffset", vec2(lin(0.17, -0.3), lin(0.07, 0.1))),
+        dyn("patternrotation", lin(0.1, 0.0)),
+    )
+    switch = fx(
+        "switch",
+        (("switch", "constantValueBool", "1"),),
+        {0: pat(2, ("patternsize", f2, "0.5 0.5")), 1: pat(6)},
+    )
+    cases = [
+        ("fx_shape_g", GRAY, pat(3, ("patternsize", f2, "0.5 0.3"),
+                                 ("frameoffset", f2, "0.1 0.2"),
+                                 ("patternrotation", f1, "0.1")), ()),
+        ("fx_pats1_g", GRAY, quad4((2, 3, 4, 5)), flat),
+        ("fx_pats2_g", GRAY, quad4((6, 7, 8, 9), "0.3"), flat),
+        ("fx_pats3_g", GRAY, quad4((10, 12, 15, 16), "0.4"), flat),
+        ("fx_wrap_g", GRAY, pat(8, ("patternsize", f2, "1.6 0.7"),
+                                ("frameoffset", f2, "0.4 0.1")), ()),
+        ("fx_grid_g", GRAY, chain, ()),
+        ("fx_iter_g", GRAY, fx("iterate", (("numberadded", i1, "6"),),
+                               {0: pat(5), 1: swept}), flat),
+        ("fx_switch_g", GRAY, switch, ()),
+        ("fx_hurst_g", GRAY, pat(2, ("patternsize", f2, "0.6 0.6"),
+                                 children={1: quad4((3, 4, 5, 6))}),
+         (("hurst", f1, "0.6"), ("opacitymult", f1, "0.8"))),
+        ("fx_color_c", COLOR, fx("iterate", (("numberadded", i1, "1"),), {
+            0: pat(2, ("opacity", F4, "0.2 0.4 0.6 0.5")),
+            1: pat(3, ("opacity", F4, "0.9 0.3 0.1 0.7"), ("blendingmode", i1, "1"),
+                   ("patternsize", f2, "0.7 0.7"))}), flat),
+    ]  # fmt: skip
+
+    # rand: each function's own generator, from its node's state.
+    def rnd(a: float) -> tuple:
+        return fn("rand", a=const(a))
+
+    gray4 = fn(
+        "vector4",
+        FLOAT4,
+        componentsin=fn(
+            "vector3", FLOAT3, componentsin=vec2(rnd(1.0), rnd(1.0)),
+            componentslast=rnd(1.0),
+        ),
+        componentslast=const(1.0),
+    )  # fmt: skip
+    dot = pat(
+        3,
+        ("randomseed", i1, "5"),
+        dyn("patternsize", vec2(rnd(0.6), rnd(0.6))),
+        dyn("frameoffset", vec2(fn("sub", a=rnd(0.5), b=const(0.25)), rnd(0.2))),
+        dyn("opacity", gray4),
+        ("blendingmode", i1, "1"),
+    )
+    grid = fx("quadrant", (("randomseed", i1, "3"),), dict.fromkeys(range(4), dot))
+    grid = fx("quadrant", (), dict.fromkeys(range(4), grid))
+    splat = pat(
+        6,
+        ("patternsize", f2, "0.2 0.2"),
+        dyn("frameoffset", vec2(rnd(1.0), rnd(1.0))),
+        dyn("patternrotation", rnd(1.0)),
+    )
+    splats = fx(
+        "iterate",
+        (("numberadded", i1, "40"), ("randomseed", i1, "3")),
+        {1: splat},
+    )
+    out = [
+        {"tag": tag, "filter": "fxmaps", "kind": kind, "params": params,
+         "extra": fxmap_graph(root), "connect": 0, "format16": True}
+        for tag, kind, root, params in cases
+    ]  # fmt: skip
+    rand_trees = (("fx_rand_grid_g", grid), ("fx_rand_iter_g", splats))
+    out += [
+        {"tag": f"{tag}{seed}", "filter": "fxmaps", "kind": GRAY,
+         "params": (), "extra": fxmap_graph(root), "connect": 0,
+         "format16": True, "set": {"$randomseed": seed}}
+        for tag, root in rand_trees
+        for seed in (0, 7)
+    ]  # fmt: skip
+    return out
 
 
 def distance_cases() -> list[dict]:
@@ -454,6 +573,7 @@ def main() -> None:
                 format16=c["format16"],
                 floats=c["floats"],
                 connect=c.get("connect"),
+                extra=c.get("extra", ""),
             ),
             encoding="utf-8",
         )

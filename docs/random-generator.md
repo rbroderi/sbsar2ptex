@@ -1,4 +1,4 @@
-# Substance Pixel-Processor Random Generator
+# Substance Random Generators
 
 ## Clean-room behavioral specification
 
@@ -212,3 +212,354 @@ call  state       unit value          u16
 - Dividing by `2^23 - 1` instead of `2^23`.
 - Treating separate pixels as one shared random stream.
 - Skipping state advancement when `rand` has an amplitude of zero.
+
+## 8. FX-Map `rand`
+
+FX-Map function graphs use the same LCG step and float conversion described in
+sections 4 and 5, but they do **not** use the Jenkins pixel-position hash.
+There is no pixel coordinate in an FX-Map random state.
+
+The LCG constants remain:
+
+```text
+LCG_M = 0x4937573B
+LCG_C = 0x0000C7C1
+```
+
+Given an FX-Map function's starting state, every `rand(a)` call is therefore:
+
+```text
+state = (state * LCG_M + LCG_C) & 0xFFFFFFFF
+mantissa = (state >>> 1) & 0x007FFFFF
+unit_value = bitcast_float32(0x3F800000 OR mantissa) - 1.0f
+result = float32(unit_value * float32(a))
+```
+
+### 8.1 FX-Map root state
+
+The FX-Map atomic node first resolves its own `randomseed` against the
+containing graph's `$randomseed`:
+
+```text
+no local override: root_incoming = graph_randomseed
+absolute override: root_incoming = fxmap_randomseed
+relative override: root_incoming = graph_randomseed + fxmap_randomseed
+```
+
+All seed arithmetic wraps modulo `2^32`. In an `.sbs` file, the distinction
+between absolute and relative overrides is the seed parameter's `relativeTo`
+setting.
+
+The root tree node then applies its own inline seed according to the node rules
+below. With no FX-Map override and no tree-node seed, the first `rand` starts
+directly from `$randomseed`.
+
+For example, a root Quadrant at graph seed zero starts at state zero. Its first
+call advances to `0x0000C7C1` and returns `0.003047943115234375`.
+
+### 8.2 Effective tree-node state
+
+Every tree node has an incoming state and may have an inline `randomseed`.
+
+For a Quadrant:
+
+```text
+effective = (incoming + node_randomseed) & 0xFFFFFFFF
+```
+
+Quadrants always inherit their incoming state.
+
+Iterate and Switch nodes also have a `randominherited` flag. Its default is
+true:
+
+```text
+if randominherited:
+    effective = (incoming + node_randomseed) & 0xFFFFFFFF
+else:
+    effective = node_randomseed & 0xFFFFFFFF
+```
+
+An absent inline node seed is zero.
+
+The effective state is used by that node's dynamic functions and as the basis
+for deriving child states. A child's own inline seed is not added until the
+child is entered.
+
+### 8.3 Quadrant child states
+
+A Quadrant derives a separate incoming state for each of its four child
+slots. It uses one affine transform selected by the **child depth modulo 16**.
+The root node is at depth zero.
+
+```text
+transform(s, depth) =
+    (s * DEPTH_M[depth & 15] + DEPTH_C[depth & 15]) & 0xFFFFFFFF
+```
+
+The complete transform table is:
+
+| Depth mod 16 | Multiplier | Increment |
+|---:|---:|---:|
+| 0  | `0x63DC7A18` | `0x0000CD5B` |
+| 1  | `0x4019CF16` | `0x0000CD93` |
+| 2  | `0x6454A406` | `0x0000CDC1` |
+| 3  | `0x7F13AC69` | `0x0000CDE7` |
+| 4  | `0x5CA1EBE2` | `0x0000CE0B` |
+| 5  | `0x7527BAB1` | `0x0000CE47` |
+| 6  | `0x6AC690C5` | `0x0000CE7B` |
+| 7  | `0x5CDCFAA7` | `0x0000CC19` |
+| 8  | `0x7549D83B` | `0x0000CC41` |
+| 9  | `0x613B9CA8` | `0x0000CC61` |
+| 10 | `0x7A3FFD4B` | `0x0000CC9B` |
+| 11 | `0x56470DA9` | `0x0000CCE5` |
+| 12 | `0x6A364C22` | `0x0000CD1F` |
+| 13 | `0x5A76F899` | `0x0000CD3F` |
+| 14 | `0x7C3448BE` | `0x0000CBDD` |
+| 15 | `0x62AFDC7A` | `0x0000CAD9` |
+
+Starting from the parent Quadrant's effective state, apply the selected
+transform once before each slot:
+
+```text
+spawn = parent_effective
+for slot in [0, 1, 2, 3]:
+    spawn = transform(spawn, parent_depth + 1)
+    child[slot].incoming = spawn
+```
+
+Consequently, slot `i` receives the transform applied `i + 1` times. Empty
+slots still occupy their position in this sequence. The compact encoding in
+which all four outputs reference one child follows the same rule; each cell
+evaluation receives a different incoming state.
+
+Evaluating a child subtree does not modify `spawn` and therefore cannot alter
+the states assigned to its siblings.
+
+### 8.4 Iterate child states
+
+An Iterate node has a second affine transition:
+
+```text
+ITERATE_M = 0x598232B9
+ITERATE_C = 0x000038C5
+
+iterate_step(s) =
+    (s * ITERATE_M + ITERATE_C) & 0xFFFFFFFF
+```
+
+The optional output 0 is evaluated once using the Iterate node's effective
+state unchanged:
+
+```text
+output0.incoming = iterate_effective
+```
+
+For output 1, keep a private pass state. Advance it before every repeated
+pass:
+
+```text
+pass_state = iterate_effective
+for number in range(count):
+    pass_state = iterate_step(pass_state)
+    output1.incoming = pass_state
+    output1.$number = number
+    evaluate(output1)
+```
+
+Thus pass zero uses one Iterate step, pass one uses two, and so on. A repeated
+child's inline seed is added after deriving that pass's incoming state. It
+does not feed back into `pass_state`.
+
+Evaluating output 0, the count function, or an earlier repeated subtree does
+not consume or otherwise change the pass-state sequence.
+
+### 8.5 Switch child states
+
+A Switch does not apply an additional affine transform. Its selected child
+receives the Switch node's effective state unchanged:
+
+```text
+selected_child.incoming = switch_effective
+```
+
+At the source graph level, a false `switch` value selects output 0 and a true
+value selects output 1.
+
+Evaluating a dynamic Switch value does not advance or replace the state later
+passed to the selected child.
+
+### 8.6 Dynamic-function lifetime and call order
+
+There is no single mutable random stream running through an entire FX-Map
+subtree.
+
+Each dynamic function evaluation creates a private generator initialized from
+the effective state of the node being evaluated. This applies independently
+to:
+
+- Quadrant opacity;
+- branch offset;
+- frame offset;
+- pattern size;
+- rotation;
+- pattern supplement;
+- an Iterate count function;
+- a Switch value function.
+
+For example, if opacity and branch offset are two separate functions, the
+first `rand` in each function returns the same value. Random calls made by the
+opacity function do not advance the branch-offset function's generator.
+
+The native parameter evaluation order is opacity, branch offset, frame
+offset, pattern size, rotation, then pattern supplement. This order does not
+couple their random sequences because each parameter function starts from a
+fresh copy of the node state.
+
+Within one compiled function, all `rand` instructions share that function's
+private state and execute in function-bytecode instruction order. A
+zero-amplitude call still advances it. Function-graph operands are computed
+before the instruction that consumes them, so their random calls occur in
+their compiled dependency order.
+
+Iterate-count and Switch-value functions follow the same rule: they may use
+`rand`, but their private calls do not affect child states.
+
+### 8.7 FX-Map traversal pseudocode
+
+```text
+function enter_node(node, incoming, depth, context):
+    if node is Iterate or node is Switch:
+        base = incoming if node.randominherited else 0
+    else:
+        base = incoming
+
+    effective = (base + node.randomseed) & 0xFFFFFFFF
+
+    if node is Quadrant:
+        evaluate_each_parameter_with_private_rng(effective, context)
+        draw_pattern_if_present()
+
+        spawn = effective
+        child_depth = depth + 1
+        for slot in [0, 1, 2, 3]:
+            spawn = transform(spawn, child_depth)
+            if node.child[slot] exists:
+                enter_node(node.child[slot], spawn, child_depth, context)
+
+    else if node is Iterate:
+        count = evaluate_count_with_private_rng(effective, context)
+
+        if node.output0 exists:
+            enter_node(node.output0, effective, depth, context)
+
+        pass_state = effective
+        for number in range(count):
+            pass_state = iterate_step(pass_state)
+            pass_context = context with $number = number
+            enter_node(node.output1, pass_state, depth, pass_context)
+
+    else if node is Switch:
+        value = evaluate_switch_with_private_rng(effective, context)
+        selected = node.output1 if value else node.output0
+        if selected exists:
+            enter_node(selected, effective, depth, context)
+```
+
+Iterate and Switch do not increase Quadrant depth. Only descending through a
+Quadrant child slot increments it.
+
+## 9. FX-Map conformance vectors
+
+### 9.1 Nested Quadrants
+
+Use an effective FX-Map seed of `11` and this tree:
+
+```text
+root Quadrant, seed 3
+  slot 2 -> middle Quadrant, seed 5
+    slot 1 -> leaf Quadrant, seed 7
+```
+
+The node states are:
+
+```text
+root effective = 11 + 3
+               = 0x0000000E
+
+middle incoming = depth_transform_1^3(root effective)
+middle effective = middle incoming + 5
+                 = 0x91F05976
+
+leaf incoming = depth_transform_2^2(middle effective)
+leaf effective = leaf incoming + 7
+               = 0xBEB0F8E6
+```
+
+The first three unit-amplitude calls in the leaf are:
+
+```text
+call  state       unit value          u16
+1     0x26CA4EC3  0.7902642488479614  51790
+2     0x384A33B2  0.2898513078689575  18995
+3     0x0DEA2FC7  0.9147914648056030  59951
+```
+
+### 9.2 Iterate passes
+
+Use an effective FX-Map seed of `11`, an Iterate seed of `3`, and a repeated
+child seed of `5`. With inheritance enabled:
+
+```text
+iterate effective = 11 + 3 = 0x0000000E
+
+pass 0 incoming = iterate_step(0x0000000E)
+pass 0 child effective = pass 0 incoming + 5
+                       = 0xE51EFEE8
+
+pass 1 incoming = iterate_step(iterate_step(0x0000000E))
+pass 1 child effective = pass 1 incoming + 5
+                       = 0xFB74C0D5
+```
+
+The first unit-amplitude call in each pass is:
+
+```text
+pass  state after rand  unit value          u16
+0     0x429E5F39        0.6186404228210449  40543
+1     0xCC349BD8        0.2055029869079590  13468
+```
+
+Drawing both full-frame square patterns in additive mode produces:
+
+```text
+round((0.6186404228210449 + 0.2055029869079590) * 65535)
+    = 54010
+```
+
+### 9.3 Independent parameter functions
+
+At effective state zero:
+
+```text
+first rand(1)  = 0.003047943115234375
+second rand(1) = 0.5328404903411865
+```
+
+Two calls inside one parameter function return those first and second values.
+The first call in a different parameter function returns
+`0.003047943115234375` again, because that function restarts from state zero.
+
+## 10. Additional FX-Map implementation errors
+
+- Applying the pixel-position Jenkins hash to FX-Map states.
+- Sharing one mutable RNG across parameter functions or the whole subtree.
+- Letting a child's random calls affect its siblings.
+- Adding a child node's seed before deriving its incoming slot/pass state.
+- Feeding a repeated child's seed back into the Iterate pass sequence.
+- Treating Quadrant slot variation as one universal transform at every depth.
+- Forgetting that the depth-transform table wraps every 16 levels.
+- Incrementing depth through Iterate or Switch nodes.
+- Starting Iterate pass zero from the unadvanced Iterate state.
+- Treating `randominherited=false` as also discarding the node's own seed.
+- Letting random calls in Iterate-count or Switch-value functions advance the
+  selected child state.

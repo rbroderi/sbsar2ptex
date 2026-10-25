@@ -53,6 +53,7 @@ FILTERS: dict[str, tuple[str, ...]] = {
     "uniform": (),
     "warp": ("input1", "inputgradient"),
     "pixelprocessor": ("input", "input:1"),
+    "fxmaps": ("inputpattern", "inputpattern:1"),
 }
 
 PARAMETERS: dict[str, tuple[tuple[str, str, str], ...]] = {
@@ -229,6 +230,72 @@ def function_graph(root: tuple) -> str:
     return f'<rootnode v="{top}"/><paramNodes>{"".join(nodes)}</paramNodes>'
 
 
+FX_TYPES = {"quadrant": "paramset", "iterate": "addnode", "switch": "markov2"}
+"""FX-Map node kinds and their .sbs types."""
+
+
+def fx(kind: str, params: tuple = (), children: dict | None = None) -> tuple:
+    """Return an FX-Map node: kind, parameters and children.
+
+    Parameters are (name, value kind, value) each, value kind "dynamicValue"
+    for a function graph; children are by output index (a Quadrant's 0-3,
+    an Iterate's or Switch's 0-1). A child given to several outputs is one
+    node with several connections.
+    """
+    return (kind, params, children or {})
+
+
+def fxmap_graph(root: tuple) -> str:
+    """Return an FX-Map filter's <paramsGraphs> for the node tree ``root``."""
+    datas: list[str] = []
+    nodes: list[str] = []
+
+    def param_xml(name: str, vkind: str, value: str) -> str:
+        val = (
+            f"<{vkind}>{value}</{vkind}>"
+            if vkind == "dynamicValue"
+            else f'<{vkind} v="{value}"/>'
+        )
+        return (
+            f'<parameter><name v="{name}"/><paramValue>{val}</paramValue></parameter>'
+        )
+
+    made: dict[int, int] = {}
+
+    def emit(node: tuple) -> int:
+        if id(node) in made:  # one node shared by several outputs
+            return made[id(node)]
+        kind, params, children = node
+        refs = {k: emit(child) for k, child in children.items()}
+        k = len(nodes)
+        data_uid, node_uid = 7000 + 2 * k, 7001 + 2 * k
+        sbs_type = FX_TYPES[kind]
+        datas.append(
+            f'<paramsGraphData><identifier v="n{k}"/><uid v="{data_uid}"/>'
+            f'<type v="{sbs_type}"/><parameters>'
+            + "".join(param_xml(*p) for p in params)
+            + "</parameters></paramsGraphData>"
+        )
+        conns = "".join(
+            f'<connection><identifier v="output{i}"/><connRef v="{ref}"/></connection>'
+            for i, ref in sorted(refs.items())
+        )
+        nodes.append(
+            f'<paramsGraphNode><uid v="{node_uid}"/>'
+            f"{f'<connections>{conns}</connections>' if conns else ''}"
+            f'<type v="{sbs_type}"/><data v="{data_uid}"/></paramsGraphNode>'
+        )
+        made[id(node)] = node_uid
+        return node_uid
+
+    top = emit(root)
+    return (
+        '<paramsGraphs><paramsGraph><name v=""/><uid v="0"/>'
+        f'<rootnode v="{top}"/><paramsGraphDatas>{"".join(datas)}</paramsGraphDatas>'
+        f"<paramsGraphNodes>{''.join(nodes)}</paramsGraphNodes></paramsGraph></paramsGraphs>"
+    )
+
+
 def sbs(
     filt: str,
     kind: int,
@@ -236,6 +303,7 @@ def sbs(
     chain: bool = False,
     params: tuple[tuple[str, str, str], ...] | None = None,
     arrays: str = "",
+    extra: str = "",
     format16: bool = False,
     floats: dict[str, float] | None = None,
     connect: int | None = None,
@@ -245,6 +313,7 @@ def sbs(
     With ``chain``, input A reaches the filter through a blur, so the filter's
     first input is not node 0 (which reads the same as a zero flag word).
     ``params`` ((name, value kind, value) each) replaces PARAMETERS[filt];
+    ``extra`` is more of the filter's XML (an FX-Map's <paramsGraphs>);
     ``arrays`` is the filter's <paramsArrays> content (gradient keys, curve
     points), as .sbs XML. ``format16`` makes the graph 16-bit throughout (its
     inputs are 8-bit otherwise, which slope-based filters amplify).
@@ -340,6 +409,7 @@ def sbs(
         f'<compImplementation><compFilter><filter v="{filt}"/>'
         f"<parameters>{parameters}</parameters>"
         f"{f'<paramsArrays>{arrays}</paramsArrays>' if arrays else ''}"
+        f"{extra}"
         "</compFilter></compImplementation></compNode>"
         # The output.
         '<compNode><uid v="300"/><connections><connection>'

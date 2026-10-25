@@ -64,9 +64,9 @@ def test_blend_ports_and_opacity() -> None:
 
 
 def test_unsupported_op() -> None:
-    fxmap = Node(index=0, start=0, end=4, op=8, words=[8])
-    with pytest.raises(UnsupportedError, match="op 8"):
-        translate_graph([fxmap], {"output": 0}, {})
+    odd = Node(index=0, start=0, end=4, op=99, words=[99])
+    with pytest.raises(UnsupportedError, match="op 99"):
+        translate_graph([odd], {"output": 0}, {})
 
 
 def test_distance_jump_floods() -> None:
