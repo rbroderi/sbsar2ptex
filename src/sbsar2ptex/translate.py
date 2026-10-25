@@ -160,14 +160,14 @@ Made = tuple[dict[str, Any], list[str]]
 """A translated node: its Material Maker node and its input names by port."""
 
 
-def _uniform(node: Node, name: str, *, color: bool) -> Made:
+def _uniform(node: Node, name: str, *, color: bool, size: int) -> Made:
     vals = [f32(w) for w in node.inline]
     if color:
         return shader(name, [], "rgba", f"return {vec(vals or [1, 1, 1, 1])};"), []
     return shader(name, [], "f", f"return {num(vals[0]) if vals else '1.0'};"), []
 
 
-def _levels(node: Node, name: str, *, color: bool) -> Made:
+def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
     t, n = ("rgba", 4) if color else ("f", 1)
     p = flag_params(node.fields[0], node.inline, LEVELS, n)
     g = "vec4" if color else "float"
@@ -186,7 +186,7 @@ def _levels(node: Node, name: str, *, color: bool) -> Made:
     return shader(name, [("input", t)], t, "\n".join(lines)), ["input"]
 
 
-def _blend(node: Node, name: str, *, color: bool) -> Made:
+def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
     t = "rgba" if color else "f"
     flags = node.fields[0]
     mode = flags & 0xF
@@ -228,7 +228,7 @@ def _blend(node: Node, name: str, *, color: bool) -> Made:
     return shader(name, inputs, t, "\n".join(lines)), [i for i, _ in inputs]
 
 
-def _transformation(node: Node, name: str, *, color: bool) -> Made:
+def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made:
     t = "rgba" if color else "f"
     flags = node.fields[0]
     matrix = [1.0, 0.0, 0.0, 1.0]
@@ -310,7 +310,7 @@ def _gradient_keys(node: Node, *, color: bool) -> list[tuple[float, list[float]]
     return sorted(keys, key=lambda k: k[0])
 
 
-def _gradient(node: Node, name: str, *, color: bool) -> Made:
+def _gradient(node: Node, name: str, *, color: bool, size: int) -> Made:
     keys = _gradient_keys(node, color=color)
     t, n = ("rgba", 4) if color else ("f", 1)
     g = "vec4" if color else "float"
@@ -324,7 +324,7 @@ def _gradient(node: Node, name: str, *, color: bool) -> Made:
     return shader(name, [("input", "f")], t, "\n".join(lines)), ["input"]
 
 
-def _shuffle(node: Node, name: str, *, color: bool) -> Made:
+def _shuffle(node: Node, name: str, *, color: bool, size: int) -> Made:
     select = node.fields[0]
     parts = []
     for c in range(4):
@@ -364,7 +364,7 @@ vec3 rgb_$(name)(vec3 hsl) {
 """
 
 
-def _hsl(node: Node, name: str, *, color: bool) -> Made:
+def _hsl(node: Node, name: str, *, color: bool, size: int) -> Made:
     p = word_params(
         node, [("hue", 0, 0.5), ("saturation", 2, 0.5), ("luminosity", 4, 0.5)], {}
     )
@@ -381,7 +381,7 @@ def _hsl(node: Node, name: str, *, color: bool) -> Made:
     return made, ["input"]
 
 
-def _grayscale(node: Node, name: str, *, color: bool) -> Made:
+def _grayscale(node: Node, name: str, *, color: bool, size: int) -> Made:
     p = word_params(
         node,
         [("weights", 0, [1 / 3, 1 / 3, 1 / 3, 0.0]), ("matte", 2, 0.0)],
@@ -393,6 +393,101 @@ def _grayscale(node: Node, name: str, *, color: bool) -> Made:
         f"return mix({num(p['matte'])}, g, c.a);" if alpha_mult else "return g;"
     )
     return shader(name, [("input", "rgba")], "f", "\n".join(lines)), ["input"]
+
+
+def _curve_points(words: list[int], at: int) -> tuple[list[list[float]], int]:
+    """Read one curve list at word ``at``: a count, then six floats a point.
+
+    Returns the points (x, y, left x, left y, right x, right y) and the
+    index after them.
+    """
+    count = words[at]
+    floats = [f32(w) for w in words[at + 1 : at + 1 + 6 * count]]
+    return [floats[6 * k : 6 * k + 6] for k in range(count)], at + 1 + 6 * count
+
+
+def _curve_glsl(fn: str, points: list[list[float]]) -> str:
+    """Return GLSL ``float fn(float x)`` evaluating a Bezier curve's y at x.
+
+    Each segment runs from a point through its right handle and the next
+    point's left handle; t is found by bisection on x(t), which the handles
+    keep monotonic. Outside the points the end values hold.
+    """
+    pts = sorted(points, key=lambda p: p[0])
+    lines = [
+        f"float {fn}(float x) {{",
+        f"\tif (x <= {num(pts[0][0])}) return {num(pts[0][1])};",
+    ]
+    for p0, p1 in itertools.pairwise(pts):
+        a, b = f"vec2({num(p0[0])}, {num(p0[1])})", f"vec2({num(p0[4])}, {num(p0[5])})"
+        c, d = f"vec2({num(p1[2])}, {num(p1[3])})", f"vec2({num(p1[0])}, {num(p1[1])})"
+        lines += [
+            f"\tif (x <= {num(p1[0])}) {{",
+            "\t\tfloat lo = 0.0; float hi = 1.0; vec2 q = vec2(0.0);",
+            "\t\tfor (int i = 0; i < 24; i++) {",
+            "\t\t\tfloat t = 0.5 * (lo + hi); float s = 1.0 - t;",
+            (
+                f"\t\t\tq = s * s * s * {a} + 3.0 * s * s * t * {b}"
+                f" + 3.0 * s * t * t * {c} + t * t * t * {d};"
+            ),
+            "\t\t\tif (q.x < x) lo = t; else hi = t;",
+            "\t\t}",
+            "\t\treturn q.y;",
+            "\t}",
+        ]
+    lines += [f"\treturn {num(pts[-1][1])};", "}"]
+    return "\n".join(lines) + "\n"
+
+
+def _curve(node: Node, name: str, *, color: bool, size: int) -> Made:
+    """Curve: per-channel curves (color) first, then the luminance curve.
+
+    The curve data is at the node's first offset: the luminance curve, then
+    for color red, green, blue and alpha; an empty curve leaves the channel.
+    """
+    words = node.at(node.code[0], len(node.words))
+    lum, at = _curve_points(words, 0)
+    helpers = []
+    if lum:
+        helpers.append(_curve_glsl("lum_$(name)", lum))
+    if not color:
+        body = "float x = $input(uv);\n" + (
+            "return lum_$(name)(x);" if lum else "return x;"
+        )
+        made = shader(name, [("input", "f")], "f", body)
+    else:
+        lines = ["vec4 c = $input(uv);"]
+        for ch in "rgba":
+            pts, at = _curve_points(words, at)
+            if pts:
+                helpers.append(_curve_glsl(f"{ch}_$(name)", pts))
+                lines.append(f"c.{ch} = {ch}_$(name)(c.{ch});")
+        if lum:
+            lines += [f"c.{ch} = lum_$(name)(c.{ch});" for ch in "rgb"]
+        lines.append("return c;")
+        made = shader(name, [("input", "rgba")], "rgba", "\n".join(lines))
+    made["shader_model"]["instance"] = (
+        "".join(helpers) + made["shader_model"]["instance"]
+    )
+    return made, ["input"]
+
+
+def _dyngradient(node: Node, name: str, *, color: bool, size: int) -> Made:
+    """Dynamic gradient: sample the gradient at (input, coordinate).
+
+    The input value maps to texel centers, x (N - 1) / N + 0.5 / N, sampled
+    with clamping; the U/V selector (node-word flag 0x08) swaps the axes.
+    """
+    t = "rgba" if color else "f"
+    coordinate = word_params(node, [("coordinate", 1, 0.5)], {})["coordinate"]
+    swap = bool(node.flags >> 8 & 0x08)
+    n = float(1 << size)
+    x = f"$input(uv) * {num((n - 1) / n)} + {num(0.5 / n)}"
+    p = f"vec2({num(coordinate)}, {x})" if swap else f"vec2({x}, {num(coordinate)})"
+    lo, hi = num(0.5 / n), num(1 - 0.5 / n)
+    body = f"return $gradient(clamp({p}, vec2({lo}), vec2({hi})));"
+    inputs = [("input", "f"), ("gradient", t)]
+    return shader(name, inputs, t, body), ["input", "gradient"]
 
 
 TRANSLATORS = {
@@ -409,23 +504,28 @@ TRANSLATORS = {
     29: _hsl,
     30: _levels,
     31: _levels,
+    38: _dyngradient,
+    39: _dyngradient,
+    44: _curve,
+    45: _curve,
 }
-"""Each op's translator: (node, Material Maker node name, *, color) -> Made."""
+"""Each op's translator: (node, MM node name, *, color, size log2) -> Made."""
 
 
-def node_shader(node: Node, name: str) -> Made:
+def node_shader(node: Node, name: str, size: int = 11) -> Made:
     """Return the shader node for ``node`` and its input names, in port order."""
     translate = TRANSLATORS.get(node.op)
     if translate is None:
         msg = f"op {node.op}"
         raise UnsupportedError(msg)
-    return translate(node, name, color=node.op in COLOR_OPS)
+    return translate(node, name, color=node.op in COLOR_OPS, size=size)
 
 
 def translate_graph(
     nodes: list[Node],
     outputs: dict[str, int],
     images: dict[int, str],
+    size: int = 11,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -458,7 +558,7 @@ def translate_graph(
                 }
             )
             continue
-        made, ports = node_shader(node, name)
+        made, ports = node_shader(node, name, size)
         mm.append(made)
         for port, inp in enumerate(ports):
             wires.append(

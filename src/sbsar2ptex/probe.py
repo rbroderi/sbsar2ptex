@@ -90,6 +90,23 @@ BRIDGE_PARAMETERS = "".join(
 )
 
 
+def input_kinds(filt: str, kind: int) -> list[int]:
+    """Return the image type of graph inputs A, B and C in ``filt``'s probe.
+
+    Input k feeds the filter's k-th input: grayscale where that input always
+    is (opacity, gradients, intensities, a dynamic gradient's input1), else
+    the probe's own image type.
+    """
+    inputs = FILTERS[filt]
+    return [
+        GRAY
+        if k < len(inputs)
+        and (inputs[k] in GRAY_INPUTS or (filt, inputs[k]) == ("dyngradient", "input1"))
+        else kind
+        for k in range(3)
+    ]
+
+
 def gradient_array(
     keys: list[tuple[float, tuple[float, float, float, float]]],
     *,
@@ -106,6 +123,38 @@ def gradient_array(
         f'<constantValueFloat4 v="{" ".join(map(str, rgba))}"/></paramValue>'
         "</parameter></parameters></paramsArrayCell>"
         for i, (pos, rgba) in enumerate(keys)
+    )
+    return (
+        f'<paramsArray><name v="{name}"/><uid v="899"/>'
+        f"<paramsArrayCells>{cells}</paramsArrayCells></paramsArray>"
+    )
+
+
+def curve_array(
+    points: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]],
+    *,
+    name: str = "curveluminance",
+) -> str:
+    """Return a curve's <paramsArray>: points as (position, left, right) handles."""
+
+    def f2(pname: str, xy: tuple[float, float]) -> str:
+        return (
+            f'<parameter><name v="{pname}"/><paramValue>'
+            f'<constantValueFloat2 v="{xy[0]} {xy[1]}"/></paramValue></parameter>'
+        )
+
+    def flag(pname: str) -> str:
+        return (
+            f'<parameter><name v="{pname}"/><paramValue>'
+            '<constantValueBool v="0"/></paramValue></parameter>'
+        )
+
+    cells = "".join(
+        f'<paramsArrayCell><uid v="{900 + i}"/><parameters>'
+        f"{f2('position', pos)}{f2('left', left)}{flag('isLeftBroken')}"
+        f"{f2('right', right)}{flag('isRightBroken')}{flag('isLocked')}"
+        "</parameters></paramsArrayCell>"
+        for i, (pos, left, right) in enumerate(points)
     )
     return (
         f'<paramsArray><name v="{name}"/><uid v="899"/>'
@@ -156,11 +205,7 @@ def sbs(
             PARAMETERS.get(filt, ()) if params is None else params
         )
     )
-    # Graph input k feeds the filter's k-th input: grayscale where that
-    # input always is, else the probe's image type.
-    kinds = [
-        GRAY if k < len(inputs) and inputs[k] in GRAY_INPUTS else kind for k in range(3)
-    ]
+    kinds = input_kinds(filt, kind)
 
     def paraminput(ident: str, uid: int) -> str:
         k = kinds[uid - 10]

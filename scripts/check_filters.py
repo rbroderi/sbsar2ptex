@@ -25,7 +25,9 @@ from sbsar2ptex.probe import COLOR
 from sbsar2ptex.probe import COOKER
 from sbsar2ptex.probe import GRAY
 from sbsar2ptex.probe import cook
+from sbsar2ptex.probe import curve_array
 from sbsar2ptex.probe import gradient_array
+from sbsar2ptex.probe import input_kinds
 from sbsar2ptex.probe import sbs
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.translate import UnsupportedError
@@ -91,6 +93,12 @@ def cases() -> list[tuple]:
         ]
     )
     gray = (("colorswitch", "constantValueBool", "0"),)
+    curve = [
+        ((0, 0.1), (0, 0.1), (0.2, 0.15)),
+        ((0.5, 0.7), (0.35, 0.6), (0.65, 0.8)),
+        ((1, 0.9), (0.85, 0.95), (1, 0.9)),
+    ]
+    red = [((0, 0), (0, 0), (0.3, 0.0)), ((1, 1), (0.7, 1.0), (1, 1))]
     i32 = "constantValueInt32"
     out += [
         ("gradient_c", "gradient", GRAY, (), keys),
@@ -111,6 +119,13 @@ def cases() -> list[tuple]:
         ("shuffle_c", "shuffle", COLOR, (
             ("channelred", i32, "6"), ("channelgreen", i32, "0"),
             ("channelblue", i32, "3"), ("channelalpha", i32, "5"),
+        )),
+        ("curve_g", "curve", GRAY, (), curve_array(curve)),
+        ("curve_c", "curve", COLOR, (), curve_array(curve) + curve_array(red, name="curvered")),
+        ("dyngrad_g", "dyngradient", GRAY, (("coordinate", "constantValueFloat1", "0.3"),)),
+        ("dyngrad_c", "dyngradient", COLOR, (("coordinate", "constantValueFloat1", "0.3"),)),
+        ("dyngrad_uv_c", "dyngradient", COLOR, (
+            ("coordinate", "constantValueFloat1", "0.3"), ("uvselector", i32, "1"),
         )),
     ]  # fmt: skip
     return out
@@ -220,7 +235,9 @@ def main() -> None:
         if cook(COOKER, src, out) is None:
             print(f"{tag:14} cook failed")
             continue
-        a, b = ("A", "B") if kind == COLOR else ("a", "b")
+        ka, kb, _ = input_kinds(filt, kind)
+        a = "A" if ka == COLOR else "a"
+        b = "B" if kb == COLOR else "b"
         subprocess.run(
             [
                 str(SBSRENDER), "render", "--input", str(out / f"{tag}.sbsar"),
