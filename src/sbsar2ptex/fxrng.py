@@ -15,8 +15,15 @@ from sbsar2ptex.rng import UINT32_MASK
 from sbsar2ptex.rng import float32
 from sbsar2ptex.rng import unit_value
 
-FX_LCG_M = 0x3E1BD4C1
-FX_LCG_C = 0x0000C613
+PARAM_LCG = {
+    "opacity": (0x4937573B, 0x0000C7C1),
+    "branchoffset": (0x5AD7FCD1, 0x0000C72D),
+    "frameoffset": (0x3E1BD4C1, 0x0000C613),
+    "patternsize": (0x4458B04D, 0x0000C4EB),
+    "patternrotation": (0x4A34F3F5, 0x0000C3D3),
+    "patternsuppl": (0x5FBCF1A6, 0x0000C5D7),
+}
+FX_LCG_M, FX_LCG_C = PARAM_LCG["frameoffset"]
 
 # Quadrant child-slot transforms, indexed by child depth modulo 16.
 DEPTH_M = (
@@ -89,15 +96,16 @@ def iterate_pass_states(effective: int, count: int) -> list[int]:
 class FxRng:
     """One dynamic function's private generator, started from a node state."""
 
-    __slots__ = ("state",)
+    __slots__ = ("increment", "multiplier", "state")
 
-    def __init__(self, state: int) -> None:
-        """Start from a tree node's effective state."""
+    def __init__(self, state: int, parameter: str = "frameoffset") -> None:
+        """Start a parameter lane from a tree node's effective state."""
         self.state = state & UINT32_MASK
+        self.multiplier, self.increment = PARAM_LCG[parameter]
 
     def rand(self, amplitude: float) -> float:
         """Advance the state and return a value in [0, amplitude), in binary32."""
-        self.state = (self.state * FX_LCG_M + FX_LCG_C) & UINT32_MASK
+        self.state = (self.state * self.multiplier + self.increment) & UINT32_MASK
         return float32(unit_value(self.state) * float32(amplitude))
 
 
@@ -126,8 +134,8 @@ uint fx_iter_step(uint s) {{
     return s * 0x{ITERATE_M:08X}u + 0x{ITERATE_C:08X}u;
 }}
 
-float fx_rng_next(inout uint s, float a) {{
-    s = s * 0x{FX_LCG_M:08X}u + 0x{FX_LCG_C:08X}u;
+float fx_rng_next(inout uint s, float a, uint m, uint c) {{
+    s = s * m + c;
     uint mantissa = (s >> 1u) & 0x007FFFFFu;
     return (uintBitsToFloat(0x3F800000u | mantissa) - 1.0) * a;
 }}

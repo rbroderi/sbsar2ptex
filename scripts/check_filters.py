@@ -229,6 +229,13 @@ def function_cases() -> list[dict]:
     ):
         base = {"filter": filt, "kind": kind, "params": params, "floats": floats}
         out += [{"tag": tag, **base}, {"tag": f"{tag}_set", **base, "set": values}]
+    # No opacity input: the opacity's own state (inline, a function).
+    out += [
+        {"tag": "blend_inline_g", "filter": "blend", "kind": GRAY, "params": None,
+         "floats": floats, "connect": 2},
+        {"tag": "fn_blend_inline", "filter": "blend", "kind": GRAY,
+         "params": opacity, "floats": floats, "connect": 2, "set": {"pa": 1.2}},
+    ]  # fmt: skip
     out.append(
         {
             "tag": "fn_blur",
@@ -348,7 +355,30 @@ def fxmap_cases() -> list[dict]:
          "extra": fxmap_graph(root), "connect": 0, "format16": True}
         for tag, kind, root, params in cases
     ]  # fmt: skip
-    rand_trees = (("fx_rand_grid_g", grid), ("fx_rand_iter_g", splats))
+    # More than translate.LIVE_SPLATS patterns: precomputed (fxsplat).
+    jitter = fn("sub", a=rnd(0.3), b=const(0.15))
+    leaf = pat(
+        5,
+        dyn("branchoffset", vec2(jitter, fn("sub", a=rnd(0.3), b=const(0.15)))),
+        dyn("patternsize", vec2(fn("add", a=rnd(1.5), b=const(0.5)), rnd(2.0))),
+        dyn("patternrotation", rnd(1.0)),
+    )
+    scatter = leaf
+    for _ in range(4):
+        scatter = fx("quadrant", (), dict.fromkeys(range(4), scatter))
+    many = fx(
+        "iterate",
+        (("numberadded", i1, "300"),),
+        {1: pat(3, ("patternsize", f2, "0.05 0.03"), ("blendingmode", i1, "1"),
+                dyn("frameoffset", vec2(rnd(1.0), rnd(1.0))),
+                dyn("patternrotation", rnd(1.0)))},
+    )  # fmt: skip
+    rand_trees = (
+        ("fx_rand_grid_g", grid),
+        ("fx_rand_iter_g", splats),
+        ("fx_scatter_g", scatter),
+        ("fx_many_g", many),
+    )
     out += [
         {"tag": f"{tag}{seed}", "filter": "fxmaps", "kind": GRAY,
          "params": (), "extra": fxmap_graph(root), "connect": 0,
@@ -605,12 +635,17 @@ def main() -> None:
         asm = Asm(member(files, ".sbsasm"))
         feeds = {"input_a": images[a], "input_b": images[b], "input_c": images["c"]}
         by_uid = {u: feeds[n].as_posix() for u, n in names.items() if n in feeds}
+        given = graph_inputs(asm, xml)
+        for gi in given.values():  # precomputed FX-Maps take values when made
+            if gi.identifier in c["set"]:
+                gi.default = [c["set"][gi.identifier]]
         try:
             mm_nodes, wires, outs = translate_graph(
                 asm.nodes(),
                 {"output": asm.output_nodes[0][1]},
                 by_uid,
-                inputs=graph_inputs(asm, xml),
+                inputs=given,
+                data_dir=out / "data" / tag,
             )
         except UnsupportedError as e:
             print(f"{tag:14} unsupported: {e}")

@@ -99,15 +99,21 @@ Iterate and Switch tree becomes GLSL functions, and the patterns, placement,
 depth weighting (hurst), blending, image patterns and function-driven
 parameters ($pos, $number, $depth) match `sbsrender` within 2/255 in the
 harness. Their `rand` follows the FX-Map part of the specification
-(sections 8–9, `sbsar2ptex.fxrng`), including its distinct call LCG and the
-Quadrant-slot and Iterate-pass state transforms; random Iterate cases match
-pixel for pixel, but random pattern sizes in a Quadrant grid do not yet.
+(sections 8–9, `sbsar2ptex.fxrng`), including its parameter-specific LCGs and
+the Quadrant-slot and Iterate-pass state transforms. Random Iterate cases
+match pixel for pixel, and Quadrant-grid size vectors match the render probe.
 
 Each tree node is skipped for pixels it cannot reach (interval bounds on its
 offsets and sizes, `rand(a)` within [0, a]); what depends on graph inputs is
-never skipped, since they can change. Scattering maps, whose random offsets
-reach far beyond their cells, still visit thousands of patterns per pixel and
-are slow in Material Maker.
+never skipped, since they can change.
+
+Given `translate_graph(..., data_dir=...)`, an FX-Map drawing more than 64
+patterns is precomputed instead (`sbsar2ptex.fxsplat`): its tree is walked
+once, with the graph inputs at their values then, into a list of splats,
+packed with a grid of cells into an RGBA8 data texture (one float32 a texel),
+and the shader draws only its cell's splats. Such a map no longer follows
+its parameters live. In BiomechZombieCircuits that is 16 of 102 FX-Maps, at
+about 150 splats per pixel at worst.
 
 `rand` in value functions is still approximated by a hash with the same
 distribution, not the same values. Gradient maps with

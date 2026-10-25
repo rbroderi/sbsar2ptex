@@ -24,9 +24,11 @@ import re
 import struct
 from dataclasses import dataclass
 from dataclasses import field
+from pathlib import Path
 from typing import Any
 
 from sbsar2ptex import fxmap
+from sbsar2ptex import fxsplat
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
 from sbsar2ptex.function import FunctionError
 from sbsar2ptex.function import bounds
@@ -35,6 +37,7 @@ from sbsar2ptex.function import evaluate
 from sbsar2ptex.function import glsl_type
 from sbsar2ptex.function import to_glsl
 from sbsar2ptex.fxrng import FX_RNG_GLSL
+from sbsar2ptex.fxrng import PARAM_LCG
 from sbsar2ptex.rng import RNG_GLSL
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
@@ -78,6 +81,8 @@ class _Context:
     sampled: list[str] | None = None
     """A pixel processor's input names by index, while translating it."""
     count: int = 0
+    data_dir: Path | None = None
+    """Where precomputed FX-Map textures go (none: FX-Maps stay live)."""
 
 
 _CTX = _Context()
@@ -602,10 +607,13 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
         msg = f"blend mode {mode}"
         raise UnsupportedError(msg)
     inline = list(node.inline)
-    has_input = bool(flags & 0x20)
+    # Opacity, bits 4-5: 1 inline, 2 a function, 3 an input, which a
+    # multiplier (its state in bits 9-10) scales.
+    state = flags >> 4 & 3
+    has_input = state == 3  # noqa: PLR2004
     if has_input:
         inline = inline[1:]
-    state = (flags >> 9) & 3
+        state = (flags >> 9) & 3
     if state == 2:  # noqa: PLR2004
         opacity = dynamic(node, inline[0] + BASE)
     else:
@@ -1218,7 +1226,7 @@ _FX_CHILD = ((-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25))
 """Each Quadrant output's cell center, in parent cells from the parent's."""
 
 
-def _fx_function(node: Node, offset: int) -> str:
+def _fx_function(node: Node, offset: int, parameter: str = "frameoffset") -> str:
     """Return a GLSL call for the FX-Map function block at file ``offset``.
 
     $pos, $number and $depth are the tree function's arguments; rand is
@@ -1245,7 +1253,8 @@ def _fx_function(node: Node, offset: int) -> str:
         return glsl[ident]
 
     def rand(a: str, k: int) -> str:
-        return f"fx_rng_next(rng, float({a}))"
+        m, c = PARAM_LCG[parameter]
+        return f"fx_rng_next(rng, float({a}), 0x{m:08X}u, 0x{c:08X}u)"
 
     try:
         lines, result = to_glsl(
@@ -1264,13 +1273,13 @@ def _fx_function(node: Node, offset: int) -> str:
     return f"{prefix}_$(name)(pos, number, depth, e)"
 
 
-def _fx_param(node: Node, param: Any, default: list[float]) -> str:
+def _fx_param(node: Node, param: Any, default: list[float], parameter: str) -> str:
     """Return GLSL for a tree parameter: its value, function, or ``default``."""
     width = len(default)
     if param is None:
         return vec(default, width)
     if param.state == fxmap.CODE:
-        call = _fx_function(node, param.code)
+        call = _fx_function(node, param.code, parameter)
         return f"vec{width}({call})" if width > 1 else f"float({call})"
     value = param.value * width if len(param.value) == 1 else param.value
     return vec(value, width)
@@ -1368,6 +1377,92 @@ def _fx_reach(node: Node, tree: fxmap.Tree | None, size: int) -> dict[int, Reach
     return {k: v for k, v in out.items() if math.isfinite(v[0]) or v[0] == -inf}
 
 
+LIVE_SPLATS = 64
+"""FX-Maps drawing more patterns than this are precomputed (fxsplat)."""
+
+
+def _fx_splats(
+    node: Node,
+    tree: fxmap.Tree | None,
+    st: fxmap.Settings,
+    *,
+    color: bool,
+    size: int,
+) -> tuple[fxsplat.Packed, Path] | None:
+    """Precompute the FX-Map's patterns into a data texture, when worth it.
+
+    Only with a data folder (translate_graph's ``data_dir``), when the tree
+    can be evaluated here and draws more than LIVE_SPLATS patterns. Returns
+    the packing and the texture's file, else None (the map stays live).
+    """
+    if _CTX.data_dir is None:
+        return None
+    defaults = {
+        uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
+    }
+    try:
+        spl = fxsplat.splats(node, tree, st, defaults, color=color, size=size)
+    except Exception as e:
+        if fxsplat.evaluable(e):
+            return None
+        raise
+    if len(spl) <= LIVE_SPLATS:
+        return None
+    packed = fxsplat.pack(spl, color=color, tile=(st.tile_x, st.tile_y))
+    _CTX.data_dir.mkdir(parents=True, exist_ok=True)
+    path = _CTX.data_dir / f"fxmap_{node.index}.png"
+    fxsplat.write_png(path, packed)
+    return packed, path
+
+
+def _fx_splat_lines(packed: fxsplat.Packed, *, color: bool) -> list[str]:
+    """Return GLSL drawing the pixel's cell's splats from the data texture."""
+    rows = packed.image.shape[0]
+    rec = fxsplat.RECORD[color]
+    _CTX.helpers.append(
+        "uint fxword_$(name)(int i) {\n"
+        f"\tvec2 t = (vec2(float(i % {fxsplat.WIDTH}), float(i / {fxsplat.WIDTH}))"
+        f" + 0.5) / vec2({num(float(fxsplat.WIDTH))}, {num(float(rows))});\n"
+        "\tvec4 s = floor($splats(t) * 255.0 + 0.5);\n"
+        "\treturn uint(s.r) | (uint(s.g) << 8u) | (uint(s.b) << 16u)"
+        " | (uint(s.a) << 24u);\n"
+        "}\n"
+        "float fxfloat_$(name)(int i) {\n"
+        "\treturn uintBitsToFloat(fxword_$(name)(i));\n"
+        "}\n"
+    )
+    g = packed.grid
+    lines = [
+        f"ivec2 gc = min(ivec2(floor(fract(uv) * {num(float(g))})), ivec2({g - 1}));",
+        f"int cell = {packed.cells} + 2 * (gc.y * {g} + gc.x);",
+        "int first = int(fxword_$(name)(cell));",
+        "int count = int(fxword_$(name)(cell + 1));",
+        "for (int k = 0; k < count; k++) {",
+        f"\tint s = int(fxword_$(name)({packed.index} + first + k)) * {rec};",
+        "\tvec2 c = vec2(fxfloat_$(name)(s), fxfloat_$(name)(s + 1));",
+        "\tvec2 hs = vec2(fxfloat_$(name)(s + 2), fxfloat_$(name)(s + 3));",
+        "\tbool mx = fxfloat_$(name)(s + 7) > 0.5;",
+        "\tfloat a = fxfloat_$(name)(s + 4);",
+        "\tint id = int(fxfloat_$(name)(s + 5));",
+        "\tvec4 v = fxdraw_$(name)(uv, c, hs, a, id, fxfloat_$(name)(s + 6), mx);",
+    ]
+    if color:
+        lines += [
+            "\tvec2 rg = vec2(fxfloat_$(name)(s + 8), fxfloat_$(name)(s + 9));",
+            "\tvec2 ba = vec2(fxfloat_$(name)(s + 10), fxfloat_$(name)(s + 11));",
+            "\tvec4 src = v * vec4(rg, ba);",
+            "\tacc.a = src.a + acc.a * (1.0 - src.a);",
+            "\tvec3 over = src.rgb * src.a + acc.rgb * (1.0 - src.a);",
+            "\tacc.rgb = mx ? over : acc.rgb + src.rgb * src.a;",
+        ]
+    else:
+        lines += [
+            "\tfloat value = v.x * fxfloat_$(name)(s + 8);",
+            "\tacc.x = mx ? max(acc.x, value) : acc.x + value;",
+        ]
+    return [*lines, "}"]
+
+
 def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """FX-Map: its tree evaluated per pixel (see sbsar2ptex.fxmap).
 
@@ -1411,12 +1506,12 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
         if isinstance(tree, fxmap.Quadrant):
             kids = [emit(c) for c in tree.children]
             p = tree.params
-            op = _fx_param(node, p.get("opacity"), [1.0] * 4)
-            bo = _fx_param(node, p.get("branchoffset"), [0.0, 0.0])
-            fo = _fx_param(node, p.get("frameoffset"), [0.0, 0.0])
-            sz = _fx_param(node, p.get("patternsize"), [1.0, 1.0])
-            rot = _fx_param(node, p.get("patternrotation"), [0.0])
-            sup = _fx_param(node, p.get("patternsuppl"), [0.0])
+            op = _fx_param(node, p.get("opacity"), [1.0] * 4, "opacity")
+            bo = _fx_param(node, p.get("branchoffset"), [0.0, 0.0], "branchoffset")
+            fo = _fx_param(node, p.get("frameoffset"), [0.0, 0.0], "frameoffset")
+            sz = _fx_param(node, p.get("patternsize"), [1.0, 1.0], "patternsize")
+            rot = _fx_param(node, p.get("patternrotation"), [0.0], "patternrotation")
+            sup = _fx_param(node, p.get("patternsuppl"), [0.0], "patternsuppl")
             lines.append(f"vec2 p = pos + {bo};")
             draw_id = tree.pattern if tree.pattern is not None else None
             if tree.image_index is not None:
@@ -1560,12 +1655,15 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     tile = f"vec2({1.0 if st.tile_x else 0.0}, {1.0 if st.tile_y else 0.0})"
     _CTX.helpers.append(FX_DRAW_GLSL.replace("$(tile)", tile))
     _CTX.helpers.append(FX_NEAR_GLSL.replace("$(tile)", tile))
-    _CTX.sampled = images  # functions may sample the pattern inputs
-    try:
-        root = emit(tree)
-    finally:
-        _CTX.sampled = None
     inputs = [(nm, "rgba") for nm in images]
+    splats = _fx_splats(node, tree, st, color=color, size=size)
+    root = None
+    if splats is None:
+        _CTX.sampled = images  # functions may sample the pattern inputs
+        try:
+            root = emit(tree)
+        finally:
+            _CTX.sampled = None
     lines = ["vec4 acc = vec4(0.0);"]
     if isinstance(st.background, int):
         inputs.append(("background", t))
@@ -1578,11 +1676,30 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
         )
     if root:
         lines.append(f"{root}(uv, vec2(0.5), 1.0, 0.0, 0.0, uint({seed}), acc);")
+    if splats is not None:
+        packed, path = splats
+        inputs.append(("splats", "rgba"))
+        lines += _fx_splat_lines(packed, color=color)
     lines.append(
         "return clamp(acc, 0.0, 1.0);" if color else "return clamp(acc.x, 0.0, 1.0);"
     )
     made = shader(name, inputs, t, "\n".join(lines))
-    return buffered(made, [nm for nm, _ in inputs], set(images), size)
+    sub = buffered(made, [nm for nm, _ in inputs], set(images), size)
+    if splats is not None:
+        data = f"{name}_splats"
+        port = len(inputs) - 1
+        sub.nodes.append(
+            {
+                "name": data,
+                "type": "image",
+                "node_position": {"x": 0, "y": 0},
+                "parameters": {"image": path.as_posix()},
+                "seed_int": 0,
+            }
+        )
+        sub.wires.append(wire(data, name, port))
+        sub.ports = [pt for pt in sub.ports if pt[0] != "splats"]
+    return sub
 
 
 TRANSLATORS = {
@@ -1664,6 +1781,7 @@ def translate_graph(
     images: dict[int, str],
     size: int = 11,
     inputs: dict[int, GraphInput] | None = None,
+    data_dir: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -1674,7 +1792,7 @@ def translate_graph(
     translated.
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
-    _CTX = _Context(size=size, inputs=dict(inputs or {}))
+    _CTX = _Context(size=size, inputs=dict(inputs or {}), data_dir=data_dir)
     need: set[int] = set()
     todo = list(outputs.values())
     while todo:

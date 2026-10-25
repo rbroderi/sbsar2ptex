@@ -90,9 +90,10 @@ between grayscale and color.
 """
 COLOR_OPS = {op + 1 for op in _PAIRS} | {1, 7, 29, 37}
 
-BLEND_OPACITY = 0x20
-"""Blend flag: an opacity input, its index the first inline word (the flag
-word's low nibble is the blending mode)."""
+BLEND_OPACITY = 0x30
+"""Blend flag word, bits 4-5: the opacity's state, 3 for an opacity input,
+its index the first inline word (1 an inline value, 2 a function; the low
+nibble is the blending mode)."""
 
 _LAYOUT = {
     # Fields before the code offsets: "-" a flag word, "#" a count, else the
@@ -322,7 +323,9 @@ class Asm:
                     node.uid = value
                 elif name[0] not in "-#":
                     node.inputs[name] = value
-            if op in (2, 3) and fields and fields[0] & BLEND_OPACITY and node.inline:
+            # Opacity state, bits 4-5: 1 inline, 2 a function, 3 an input.
+            opacity = fields[0] & BLEND_OPACITY if op in (2, 3) and fields else 0
+            if opacity == BLEND_OPACITY and node.inline:
                 node.inputs["opacity"] = node.inline[0]
         elif op in (40, 41) and fields:
             for n, value in enumerate(fields[1 : 1 + fields[0]]):

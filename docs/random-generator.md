@@ -219,17 +219,22 @@ FX-Map function graphs use the float conversion described in section 5, but
 they use a different LCG step and do **not** use the Jenkins pixel-position
 hash. There is no pixel coordinate in an FX-Map random state.
 
-The FX-Map call constants are:
+Each Quadrant parameter has a separate generator lane. Every lane starts from
+the node's effective state, but each parameter uses its own LCG pair:
 
-```text
-FX_LCG_M = 0x3E1BD4C1
-FX_LCG_C = 0x0000C613
-```
+| Parameter | Multiplier | Increment |
+|---|---:|---:|
+| opacity | `0x4937573B` | `0x0000C7C1` |
+| branch offset | `0x5AD7FCD1` | `0x0000C72D` |
+| frame offset | `0x3E1BD4C1` | `0x0000C613` |
+| pattern size | `0x4458B04D` | `0x0000C4EB` |
+| pattern rotation | `0x4A34F3F5` | `0x0000C3D3` |
+| pattern supplement | `0x5FBCF1A6` | `0x0000C5D7` |
 
 Given an FX-Map function's starting state, every `rand(a)` call is therefore:
 
 ```text
-state = (state * FX_LCG_M + FX_LCG_C) & 0xFFFFFFFF
+state = (state * PARAMETER_LCG_M + PARAMETER_LCG_C) & 0xFFFFFFFF
 mantissa = (state >>> 1) & 0x007FFFFF
 unit_value = bitcast_float32(0x3F800000 OR mantissa) - 1.0f
 result = float32(unit_value * float32(a))
@@ -393,9 +398,11 @@ passed to the selected child.
 There is no single mutable random stream running through an entire FX-Map
 subtree.
 
-Each dynamic function evaluation creates a private generator initialized from
-the effective state of the node being evaluated. This applies independently
-to:
+Each dynamic function evaluation creates a private parameter generator
+initialized from the effective state of the node being evaluated. Separate
+parameters use the separate LCG lanes in section 8, while calls within one
+parameter function advance that parameter's lane in compiled instruction
+order. This applies independently to:
 
 - Quadrant opacity;
 - branch offset;
@@ -406,14 +413,15 @@ to:
 - an Iterate count function;
 - a Switch value function.
 
-For example, if opacity and branch offset are two separate functions, the
-first `rand` in each function returns the same value. Random calls made by the
-opacity function do not advance the branch-offset function's generator.
+For example, opacity and branch offset both start from the effective node
+state, but their first values generally differ because their LCG constants
+differ. Random calls made by the opacity function do not advance the
+branch-offset function's generator.
 
 The native parameter evaluation order is opacity, branch offset, frame
 offset, pattern size, rotation, then pattern supplement. This order does not
-couple their random sequences because each parameter function starts from a
-fresh copy of the node state.
+couple their random sequences because each parameter lane starts from a fresh
+copy of the node state and has its own constants.
 
 Within one compiled function, all `rand` instructions share that function's
 private state and execute in function-bytecode instruction order. A
@@ -538,7 +546,7 @@ round((0.9338833093643188 + 0.17789697647094727) * 65535)
 
 An unsigned 16-bit output clamps this sum to `65535`.
 
-### 9.3 Independent parameter functions
+### 9.3 Frame-offset function calls
 
 At effective state zero:
 
@@ -547,13 +555,26 @@ first rand(1)  = 0.003022313117980957
 second rand(1) = 0.6204589605331421
 ```
 
-Two calls inside one parameter function return those first and second values.
-The first call in a different parameter function returns
-`0.003022313117980957` again, because that function restarts from state zero.
+Two calls inside one frame-offset function return those first and second
+values. A separate evaluation of a frame-offset function returns
+`0.003022313117980957` again because its lane restarts from state zero.
 
 A literal `rand(0)` is not a reliable way to skip a value in a compiled
 function: the compiler may constant-fold the call away, in which case it does
 not advance the runtime generator.
+
+### 9.4 Parameter-specific pattern-size lane
+
+At effective state `0x90F1B74A`, two `rand(0.6)` calls in `patternsize`
+use `M = 0x4458B04D` and `C = 0x0000C4EB` and return:
+
+```text
+0.09322082996368408
+0.4085485339164734
+```
+
+Using the frame-offset pair for this function is incorrect even though the
+same node's random frame offset is otherwise pixel-exact.
 
 ## 10. Additional FX-Map implementation errors
 

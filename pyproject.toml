@@ -9,6 +9,8 @@ authors = [{ name = "rbroderi" }]
 requires-python = ">=3.12"
 dependencies = [
     "defusedxml>=0.7.1",
+    "numpy>=2.5.4",
+    "pillow>=13.0.0",
     "py7zr>=1.0.0",
 ]
 keywords = ["substance", "sbsar", "material-maker", "ptex", "textures"]

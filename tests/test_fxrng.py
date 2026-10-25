@@ -4,9 +4,8 @@ import pytest
 
 from sbsar2ptex.fxrng import DEPTH_C
 from sbsar2ptex.fxrng import DEPTH_M
-from sbsar2ptex.fxrng import FX_LCG_C
-from sbsar2ptex.fxrng import FX_LCG_M
 from sbsar2ptex.fxrng import FX_RNG_GLSL
+from sbsar2ptex.fxrng import PARAM_LCG
 from sbsar2ptex.fxrng import FxRng
 from sbsar2ptex.fxrng import depth_step
 from sbsar2ptex.fxrng import effective_state
@@ -61,6 +60,39 @@ def test_rendered_quadrant_slot_offsets():
         [0.08837089, 0.07705319, 0.16057569, 0.03403562],
         abs=1e-8,
     )
+
+
+def test_rendered_grid_pattern_sizes():
+    expected = [
+        (0.093221, 0.408549),
+        (0.430774, 0.113531),
+        (0.437026, 0.375234),
+        (0.435136, 0.111324),
+        (0.206145, 0.401973),
+        (0.440205, 0.229199),
+        (0.534923, 0.050004),
+        (0.370368, 0.144513),
+        (0.572648, 0.234035),
+        (0.578188, 0.121869),
+        (0.096611, 0.307781),
+        (0.343230, 0.501722),
+        (0.358982, 0.330946),
+        (0.378417, 0.034776),
+        (0.591341, 0.573895),
+        (0.271768, 0.230437),
+    ]
+    states = []
+    for root_child in quadrant_child_states(0, 0):
+        middle = effective_state(root_child, 3)
+        states.extend(
+            effective_state(child, 5) for child in quadrant_child_states(middle, 1)
+        )
+    sizes = []
+    for state in states:
+        rng = FxRng(state, "patternsize")
+        sizes.append((rng.rand(0.6), rng.rand(0.6)))
+    for actual, wanted in zip(sizes, expected, strict=True):
+        assert actual == pytest.approx(wanted, abs=5e-7)
 
 
 def test_table_shape():
@@ -146,10 +178,17 @@ def test_zero_amplitude_still_advances():
 def test_glsl_helpers_declared():
     assert "uint fx_depth_step(uint s, float depth)" in FX_RNG_GLSL
     assert "uint fx_iter_step(uint s)" in FX_RNG_GLSL
-    assert "float fx_rng_next(inout uint s, float a)" in FX_RNG_GLSL
+    assert "float fx_rng_next(inout uint s, float a, uint m, uint c)" in FX_RNG_GLSL
     assert "int(depth) & 15" in FX_RNG_GLSL
     assert "uintBitsToFloat" in FX_RNG_GLSL
-    assert f"0x{FX_LCG_M:08X}u + 0x{FX_LCG_C:08X}u" in FX_RNG_GLSL
+    assert set(PARAM_LCG) == {
+        "opacity",
+        "branchoffset",
+        "frameoffset",
+        "patternsize",
+        "patternrotation",
+        "patternsuppl",
+    }
     for m, c in zip(DEPTH_M, DEPTH_C, strict=True):
         assert f"0x{m:08X}u + 0x{c:08X}u" in FX_RNG_GLSL
     assert "0x598232B9u + 0x000038C5u" in FX_RNG_GLSL

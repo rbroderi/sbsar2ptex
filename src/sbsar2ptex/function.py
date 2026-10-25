@@ -180,9 +180,16 @@ def _bcast(a: list, b: list) -> tuple[list, list]:
 
 
 def evaluate(
-    block: Block, inputs: dict[int, list[float]], builtins: dict[int, list[float]]
+    block: Block,
+    inputs: dict[int, list[float]],
+    builtins: dict[int, list[float]],
+    rand: Callable[[float], float] | None = None,
 ) -> list:
-    """Return the block's value with graph ``inputs`` (by uid) and ``builtins``."""
+    """Return the block's value with graph ``inputs`` (by uid) and ``builtins``.
+
+    ``rand(a)``, when given, is the generator rand instructions call, in
+    instruction order.
+    """
     vals: list[list] = []
     var: dict[int, list] = {}
     for ins in block.instrs:
@@ -222,6 +229,8 @@ def evaluate(
             a, b = _bcast(vals[ops[0]], vals[ops[1]])
             x = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
             v = [p + (q - p) * t for p, q, t in zip(a, b, x, strict=True)]
+        elif ins.op == 0x32 and rand is not None:  # noqa: PLR2004
+            v = [rand(vals[ops[0]][0])]
         elif ins.op in _BINARY:
             a, b = _bcast(vals[ops[0]], vals[ops[1]])
             v = [_BINARY[ins.op](p, q) for p, q in zip(a, b, strict=True)]
