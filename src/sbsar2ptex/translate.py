@@ -787,11 +787,11 @@ Made = tuple[dict[str, Any], list[str]] | Sub
 
 
 def _uniform(node: Node, name: str, *, color: bool, size: int) -> Made:
-    vals = [f32(w) for w in node.inline]
+    vals = [f32(w) for w in node.inline]  # none: the default, opaque black
     if color:
-        c = knob("color", "Color", vals[:4] or [1.0, 1.0, 1.0, 1.0])
+        c = knob("color", "Color", vals[:4] or [0.0, 0.0, 0.0, 1.0])
         return shader(name, [], "rgba", f"return {vec(c)};"), []
-    v = knob("value", "Value", vals[0] if vals else 1.0)
+    v = knob("value", "Value", vals[0] if vals else 0.0)
     return shader(name, [], "f", f"return {num(v)};"), []
 
 

@@ -64,6 +64,7 @@ def cases() -> list[tuple]:
                 kind,
                 (("outputcolor", F4, "0.3 0.4 0.5 0.8"),),
             ),
+            (f"uniform_default_{k}", "uniform", kind, ()),
             (
                 f"levels_{k}",
                 "levels",
