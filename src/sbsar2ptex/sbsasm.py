@@ -231,14 +231,24 @@ class Asm:
         while at < self.table and data[at + 4 : at + 8].startswith(MAGICS):
             self.bitmaps.append((at + 4, self.u32(at)))
             at = (at + 4 + self.u32(at) + 3) & ~3
-        # The uid table ends at the trailer.
+        # The uid table ends at the trailer, and the defaults before it are
+        # its inputs' (a default can look like a table that ends there).
         end = len(data) - 16
-        for at in range(self.defaults_at, end, 4):
+
+        def table_at(at: int) -> bool:
             n_out, n_in = struct.unpack_from("<HH", data, at)
-            if at + 4 + 4 * n_out + 8 * n_in == end:
-                break
-        else:
+            if at + 4 + 4 * n_out + 8 * n_in != end:
+                return False
+            pairs = at + 4 + 4 * n_out
+            kinds = [self.u32(pairs + 8 * i) for i in range(n_in)]
+            if any(k not in TYPE_SIZES for k in kinds):
+                return True  # (sizes unknown: take it)
+            return sum(TYPE_SIZES[k] for k in kinds) == at - self.defaults_at
+
+        at = next((a for a in range(self.defaults_at, end, 4) if table_at(a)), None)
+        if at is None:
             sys.exit("no uid table before the trailer")
+        n_out, n_in = struct.unpack_from("<HH", data, at)
         self.output_uids = [self.u32(at + 4 + 4 * i) for i in range(n_out)]
         pairs = at + 4 + 4 * n_out
         self.inputs = [

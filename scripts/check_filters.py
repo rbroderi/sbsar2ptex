@@ -388,6 +388,25 @@ def fxmap_cases() -> list[dict]:
         for tag, root in rand_trees
         for seed in (0, 7)
     ]  # fmt: skip
+    # Functions sharing a variable and sampling the input: recorded.
+    x = get("x")
+    step = fn("set", data='<constantValueString v="x"/>',
+              value=fn("mul", a=number, b=const(0.04)))
+    # (a get is a variable only where its function also sets it)
+    same = fn("set", data='<constantValueString v="x"/>', value=x)
+    lum = fn("samplelum", pos=vec2(same, const(0.5)),
+             data='<constantValueInt2 v="0 0"/>')
+    walk = pat(
+        3,
+        dyn("frameoffset", vec2(fn("sub", a=step, b=const(0.5)), const(0.0))),
+        dyn("patternsize", vec2(fn("add", a=fn("mul", a=lum, b=const(0.05)),
+                                       b=const(0.01)), const(0.1))),
+    )
+    state = fx("iterate", (("numberadded", i1, "24"),), {1: walk})
+    out.append(
+        {"tag": "fx_state_g", "filter": "fxmaps", "kind": GRAY, "params": flat,
+         "extra": fxmap_graph(state), "connect": 1, "format16": True}
+    )  # fmt: skip
     return out
 
 
