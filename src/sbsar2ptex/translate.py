@@ -23,6 +23,7 @@ import itertools
 import math
 import re
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
@@ -556,20 +557,64 @@ class Sub:
     output: str
 
 
-def buffer(name: str, size: int, *, filtering: bool = True) -> dict[str, Any]:
+def buffer(
+    name: str, size: int, *, filtering: bool = True, precise: bool = False
+) -> dict[str, Any]:
     """Return a Material Maker buffer node: its input rendered to a texture.
 
     Filters that read neighboring pixels sample buffers, so their input's
-    graph is computed once, not once per tap. 32-bit; linear filtering
-    unless not ``filtering`` (for buffers of positions).
+    graph is computed once, not once per tap. 16-bit float (images need no
+    more), or 32-bit when ``precise`` (what slopes are taken of: half
+    floats' steps would show in a normal map) or unfiltered (positions);
+    linear filtering unless not ``filtering``.
     """
     return {
         "name": name,
         "type": "buffer",
         "node_position": {"x": 0, "y": 0},
-        "parameters": {"size": size, "f32": True, "filter": filtering, "mipmap": False},
+        "parameters": {
+            "size": size,
+            "f32": precise or not filtering,
+            "filter": filtering,
+            "mipmap": False,
+        },
         "seed_int": 0,
     }
+
+
+def merge_buffers(
+    mm: list[dict[str, Any]], wires: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``mm`` and ``wires`` with one buffer per buffered source.
+
+    Each filter buffers its own inputs, so a node several filters read gets
+    as many buffers; they are the same image (the same source, size and
+    filtering), so all but one go, and the one kept is 32-bit if any was.
+    """
+    by_name = {n["name"]: n for n in mm}
+    source: dict[str, tuple[str, int]] = {}
+    for w in wires:
+        if by_name.get(w["to"], {}).get("type") == "buffer":
+            source[w["to"]] = (w["from"], w["from_port"])
+    kept: dict[tuple, str] = {}
+    gone: dict[str, str] = {}
+    for name, src in source.items():
+        prm = by_name[name]["parameters"]
+        key = (src, prm["size"], prm["filter"])
+        if key in kept:
+            gone[name] = kept[key]
+            first = by_name[kept[key]]["parameters"]
+            first["f32"] = first["f32"] or prm["f32"]
+        else:
+            kept[key] = name
+    out_wires = []
+    for w in wires:
+        if w["to"] in gone:
+            continue
+        if w["from"] in gone:
+            w = {**w, "from": gone[w["from"]]}  # noqa: PLW2901
+        out_wires.append(w)
+    return [n for n in mm if n["name"] not in gone], out_wires
 
 
 def wire(src: str, dst: str, port: int = 0) -> dict[str, Any]:
@@ -578,14 +623,21 @@ def wire(src: str, dst: str, port: int = 0) -> dict[str, Any]:
 
 
 def buffered(
-    made: dict[str, Any], names: list[str], sampled: set[str], size: int
+    made: dict[str, Any],
+    names: list[str],
+    sampled: set[str],
+    size: int,
+    precise: Iterable[str] = (),
 ) -> Sub:
-    """Return ``made`` (a shader node) with buffers before its ``sampled`` inputs."""
+    """Return ``made`` (a shader node) with buffers before its ``sampled`` inputs.
+
+    ``precise`` inputs get 32-bit buffers (see buffer).
+    """
     nodes, wires, ports = [made], [], []
     for port, inp in enumerate(names):
         if inp in sampled:
             buf = f"{made['name']}_{inp}_buf"
-            nodes.append(buffer(buf, size))
+            nodes.append(buffer(buf, size, precise=inp in precise))
             wires.append(wire(buf, made["name"], port))
             ports.append((inp, buf, 0))
         else:
@@ -1077,8 +1129,9 @@ def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:
         "return r;" if color else "return r.x;",
     ]
     return buffered(
-        shader(name, [("input", t)], t, "\n".join(lines)), ["input"], {"input"}, size
-    )
+        shader(name, [("input", t)], t, "\n".join(lines)),
+        ["input"], {"input"}, size, precise={"input"},
+    )  # fmt: skip
 
 
 def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
@@ -1097,7 +1150,9 @@ def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
         f"return $input(fract(uv + {num(k * n / 256)} * g));",
     ]
     made = shader(name, [("input", t), ("gradient", "f")], t, "\n".join(lines))
-    return buffered(made, ["input", "gradient"], {"input", "gradient"}, size)
+    return buffered(
+        made, ["input", "gradient"], {"input", "gradient"}, size, precise={"gradient"}
+    )
 
 
 def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
@@ -1137,7 +1192,7 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
         "return vec4(n * 0.5 + 0.5, h);",
     ]
     made = shader(name, [("input", "f")], "rgba", "\n".join(lines))
-    return buffered(made, ["input"], {"input"}, size)
+    return buffered(made, ["input"], {"input"}, size, precise={"input"})
 
 
 def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
@@ -1187,7 +1242,9 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
             f" - max(-s, 0.0) * (1.0 - {num(sh)}), 0.0, 1.0);"
         )
     made = shader(name, [("input", t), ("gradient", "f")], t, "\n".join(lines))
-    return buffered(made, ["input", "gradient"], {"gradient"}, size)
+    return buffered(
+        made, ["input", "gradient"], {"gradient"}, size, precise={"gradient"}
+    )
 
 
 def _pixelprocessor(node: Node, name: str, *, color: bool, size: int) -> Sub:
@@ -1205,7 +1262,7 @@ def _pixelprocessor(node: Node, name: str, *, color: bool, size: int) -> Sub:
     t = "rgba" if color else "f"
     body = f"return {vec(value, 4)};" if color else f"return {num(value)};"
     made = shader(name, [(nm, "rgba") for nm in names], t, body)
-    return buffered(made, names, set(names), size)
+    return buffered(made, names, set(names), size, precise=set(names))
 
 
 TORUS_GLSL = """float tdist_$(name)(vec2 a, vec2 b) {
@@ -1992,6 +2049,7 @@ def translate_graph(
             wire(out_of[node.inputs[inp]], to, port) for inp, to, port in made.ports
         ]
         out_of[k] = made.output
+    mm, wires = merge_buffers(mm, wires)
     for row, made in enumerate(mm):
         made["node_position"] = {"x": 220 * (row % 12), "y": 180 * (row // 12)}
     if _CTX.exposed:

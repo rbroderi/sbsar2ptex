@@ -523,6 +523,8 @@ def to_glsl(
             kind = "lum" if ins.op == 0x33 else "col"  # noqa: PLR2004
             filtering = ops[2] if len(ops) > 2 else 0  # noqa: PLR2004
             expr = samples(kind, ops[1], v(ops[0]), filtering)
+        elif ins.op == 0x16 and ins.type == INT:  # noqa: PLR2004 (GLSL's mod is float)
+            expr = f"({v(ops[0])} % {v(ops[1])})"
         elif ins.op in _GLSL_BINARY:
             expr = _GLSL_BINARY[ins.op].format(a=v(ops[0]), b=v(ops[1]))
         elif ins.op in _GLSL_UNARY:
