@@ -582,6 +582,73 @@ def buffer(
     }
 
 
+def cache_shared(
+    mm: list[dict[str, Any]],
+    wires: list[dict[str, Any]],
+    size: int,
+    origins: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``mm`` and ``wires`` with nodes several others read buffered.
+
+    Material Maker builds one shader from everything up to a buffer, each
+    node a function called wherever it is read: a node read along several
+    paths is computed once per path, per pixel, which multiplies through a
+    graph whose paths keep meeting again (hours for a material of
+    thousands of nodes). A buffer computes it once: its existing (filtered)
+    buffer if it has one, else a new one, which all its readers then read.
+    The buffer is 32-bit when the node's image reaches a 32-bit buffer
+    before any other (a slope is taken of it downstream), else 16-bit.
+    """
+    by_name = {n["name"]: n for n in mm}
+    out_of: dict[str, list[dict[str, Any]]] = {}
+    for w in wires:
+        out_of.setdefault(w["from"], []).append(w)
+
+    def kind(name: str) -> str:
+        return by_name.get(name, {}).get("type", "")
+
+    def filtered_buffer(name: str) -> bool:
+        return kind(name) == "buffer" and by_name[name]["parameters"]["filter"]
+
+    precise_memo: dict[str, bool] = {}
+
+    def precise(name: str) -> bool:
+        """Whether ``name``'s image reaches a 32-bit buffer unbuffered."""
+        if name not in precise_memo:
+            precise_memo[name] = False  # (a DAG; this guards recursion)
+            precise_memo[name] = any(
+                by_name[w["to"]]["parameters"]["f32"]
+                if kind(w["to"]) == "buffer"
+                else kind(w["to"]) in ("shader", "graph") and precise(w["to"])
+                for w in out_of.get(name, [])
+            )
+        return precise_memo[name]
+
+    for name in [n["name"] for n in mm if n["type"] in ("shader", "graph")]:
+        for port in sorted({w["from_port"] for w in out_of.get(name, [])}):
+            ws = [w for w in out_of[name] if w["from_port"] == port]
+            if len({w["to"] for w in ws}) < 2:  # noqa: PLR2004
+                continue
+            caches = [w["to"] for w in ws if filtered_buffer(w["to"])]
+            if caches:
+                cache = caches[0]
+            else:
+                cache = f"{name}_cache{port or ''}"
+                made = buffer(cache, size, precise=precise(name))
+                mm = [*mm, made]
+                by_name[cache] = made
+                wires = [
+                    *wires,
+                    {"from": name, "from_port": port, "to": cache, "to_port": 0},
+                ]
+                if origins is not None and name in origins:
+                    origins[cache] = origins[name]
+            for w in ws:
+                if kind(w["to"]) != "buffer":  # unfiltered buffers: positions
+                    w["from"], w["from_port"] = cache, 0
+    return mm, wires
+
+
 def merge_buffers(
     mm: list[dict[str, Any]], wires: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2050,6 +2117,7 @@ def translate_graph(
         ]
         out_of[k] = made.output
     mm, wires = merge_buffers(mm, wires)
+    mm, wires = cache_shared(mm, wires, size, origins)
     for row, made in enumerate(mm):
         made["node_position"] = {"x": 220 * (row % 12), "y": 180 * (row // 12)}
     if _CTX.exposed:
