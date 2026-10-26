@@ -77,6 +77,15 @@ def cases() -> list[tuple]:
                     ("levelouthigh", F4, "0.95 0.9 1.0 1.0"),
                 ),
             ),
+            *(
+                (
+                    f"levels_step{i}_{k}",
+                    "levels",
+                    kind,
+                    (("levelinlow", F4, edges), ("levelinhigh", F4, edges)),
+                )
+                for i, edges in enumerate(("0.5 0.5 0.5 0.5", "0 0.25 0.75 1"))
+            ),
             (
                 f"transform_{k}",
                 "transformation",
@@ -404,17 +413,25 @@ def fxmap_cases() -> list[dict]:
     ]  # fmt: skip
     # Functions sharing a variable and sampling the input: recorded.
     x = get("x")
-    step = fn("set", data='<constantValueString v="x"/>',
-              value=fn("mul", a=number, b=const(0.04)))
+    step = fn(
+        "set",
+        data='<constantValueString v="x"/>',
+        value=fn("mul", a=number, b=const(0.04)),
+    )
     # (a get is a variable only where its function also sets it)
     same = fn("set", data='<constantValueString v="x"/>', value=x)
-    lum = fn("samplelum", pos=vec2(same, const(0.5)),
-             data='<constantValueInt2 v="0 0"/>')
+    lum = fn(
+        "samplelum", pos=vec2(same, const(0.5)), data='<constantValueInt2 v="0 0"/>'
+    )
     walk = pat(
         3,
         dyn("frameoffset", vec2(fn("sub", a=step, b=const(0.5)), const(0.0))),
-        dyn("patternsize", vec2(fn("add", a=fn("mul", a=lum, b=const(0.05)),
-                                       b=const(0.01)), const(0.1))),
+        dyn(
+            "patternsize",
+            vec2(
+                fn("add", a=fn("mul", a=lum, b=const(0.05)), b=const(0.01)), const(0.1)
+            ),
+        ),
     )
     state = fx("iterate", (("numberadded", i1, "24"),), {1: walk})
     out.append(

@@ -807,7 +807,18 @@ def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
         f"{g} lo = {vec(p['in_low'], n)};",
         f"{g} hi = {vec(p['in_high'], n)};",
         f"{g} m = {vec(p['in_mid'], n)};",
-        "x = clamp((x - lo) / max(hi - lo, 1e-9), 0.0, 1.0);",
+        # an empty input range thresholds, strictly, on the input as Substance
+        # stored it: in 8 bits a computed 0.5 is 128/255, above a 0.5 threshold
+        (
+            "x = mix(clamp((x - lo) / max(hi - lo, 1e-9), 0.0, 1.0),"
+            " 1.0 - step(floor(x * 255.0 + 0.5) / 255.0, lo),"
+            " step(hi - lo, vec4(1e-6)));"
+            if color
+            else (
+                "x = hi - lo <= 1e-6 ? 1.0 - step(floor(x * 255.0 + 0.5) / 255.0, lo)"
+                " : clamp((x - lo) / (hi - lo), 0.0, 1.0);"
+            )
+        ),
         (
             "x = pow(x, mix(1.0 / (1.0 + 16.0 * (0.5 - m)),"
             " 1.0 + 16.0 * (m - 0.5), step(0.5, m)));"
