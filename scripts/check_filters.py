@@ -407,6 +407,19 @@ def fxmap_cases() -> list[dict]:
         {"tag": "fx_state_g", "filter": "fxmaps", "kind": GRAY, "params": flat,
          "extra": fxmap_graph(state), "connect": 1, "format16": True}
     )  # fmt: skip
+    # Patterns larger than the map, many: baked (fxsplat.bake).
+    blob = pat(
+        6,  # gaussian
+        ("patternsize", f2, "1.5 1.2"),
+        ("patternrotation", f1, "0.1"),
+        dyn("frameoffset", vec2(rnd(1.0), rnd(1.0))),
+    )
+    blobs = fx("iterate", (("numberadded", i1, "300"),), {1: blob})
+    faint = (*flat, ("opacitymult", f1, "0.01"))
+    out.append(
+        {"tag": "fx_bake_g", "filter": "fxmaps", "kind": GRAY, "params": faint,
+         "extra": fxmap_graph(blobs), "connect": 0, "format16": True}
+    )  # fmt: skip
     return out
 
 

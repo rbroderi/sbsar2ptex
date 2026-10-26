@@ -1694,7 +1694,7 @@ def _fx_splats(
     *,
     color: bool,
     size: int,
-) -> tuple[fxsplat.Packed, Path] | None:
+) -> tuple[fxsplat.Packed | None, Path] | None:
     """Precompute the FX-Map's patterns into a data texture, when worth it.
 
     Only with a data folder (translate_graph's ``data_dir``), when the tree
@@ -1702,6 +1702,9 @@ def _fx_splats(
     functions share variables (fxsplat.stateful), which per-pixel GLSL
     cannot follow. Returns
     the packing and the texture's file, else None (the map stays live).
+    When drawing the splats would cost a pixel more than BAKE_WORK patterns
+    and fxsplat.bake can, the texture is the drawn map instead (one float a
+    texel), the packing None.
     """
     if _CTX.data_dir is None:
         return None
@@ -1716,11 +1719,42 @@ def _fx_splats(
         raise
     if len(spl) <= LIVE_SPLATS and not fxsplat.stateful(node, tree, st):
         return None
-    packed = fxsplat.pack(spl, color=color, tile=(st.tile_x, st.tile_y))
     _CTX.data_dir.mkdir(parents=True, exist_ok=True)
     path = _CTX.data_dir / f"fxmap_{node.index}.png"
+    if fxsplat.pixel_work(spl) > BAKE_WORK:
+        baked = fxsplat.bake(spl, size, (st.tile_x, st.tile_y))
+        if baked is not None:
+            fxsplat.write_floats(path, baked)
+            return None, path
+    packed = fxsplat.pack(spl, color=color, tile=(st.tile_x, st.tile_y))
     fxsplat.write_png(path, packed)
     return packed, path
+
+
+BAKE_WORK = 2048
+"""Patterns a pixel past which a precomputed FX-Map is baked, if it can be."""
+
+
+def _fx_baked_lines() -> list[str]:
+    """Return GLSL adding the baked map (fxsplat.bake), filtered bilinearly."""
+    n = 1 << _CTX.size
+    _CTX.helpers.append(
+        "float fxbaked_$(name)(ivec2 t) {\n"
+        f"\tt = (t % {n} + {n}) % {n};\n"
+        f"\tvec4 s = floor($splats((vec2(t) + 0.5) / {num(float(n))}) * 255.0 + 0.5);\n"
+        "\treturn uintBitsToFloat(uint(s.r) | (uint(s.g) << 8u)"
+        " | (uint(s.b) << 16u) | (uint(s.a) << 24u));\n"
+        "}\n"
+    )
+    return [
+        f"vec2 bp = uv * {num(float(n))} - 0.5;",
+        "ivec2 b0 = ivec2(floor(bp));",
+        "vec2 bf = bp - floor(bp);",
+        "float b00 = fxbaked_$(name)(b0), b10 = fxbaked_$(name)(b0 + ivec2(1, 0));",
+        "float b01 = fxbaked_$(name)(b0 + ivec2(0, 1));",
+        "float b11 = fxbaked_$(name)(b0 + ivec2(1, 1));",
+        "acc.x += mix(mix(b00, b10, bf.x), mix(b01, b11, bf.x), bf.y);",
+    ]
 
 
 def _fx_splat_lines(packed: fxsplat.Packed, *, color: bool) -> list[str]:
@@ -2125,7 +2159,11 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     if splats is not None:
         packed, path = splats
         inputs.append(("splats", "rgba"))
-        lines += _fx_splat_lines(packed, color=color)
+        lines += (
+            _fx_baked_lines()
+            if packed is None
+            else _fx_splat_lines(packed, color=color)
+        )
     lines.append(
         "return clamp(acc, 0.0, 1.0);" if color else "return clamp(acc.x, 0.0, 1.0);"
     )

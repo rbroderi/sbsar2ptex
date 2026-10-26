@@ -366,6 +366,119 @@ def write_png(path: Path, packed: Packed) -> None:
     Image.fromarray(packed.image, "RGBA").save(path)
 
 
+def _smooth(e: float, x: np.ndarray) -> np.ndarray:
+    t = np.clip(x / max(e, 1e-6), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def pattern(pid: int, qx: np.ndarray, qy: np.ndarray, s: float) -> np.ndarray:
+    """Return pattern ``pid`` at (qx, qy), supplement ``s`` (fxmap.PATTERN_GLSL)."""
+    r2 = qx * qx + qy * qy
+    r = np.sqrt(r2)
+    bell = np.maximum(1.0 - r2, 0.0) ** 4
+    one = np.ones_like(qx)
+    values = {
+        0: lambda: one,
+        1: lambda: (r <= 1.0) * one,
+        2: lambda: np.maximum(1.0 - r2, 0.0),
+        3: lambda: bell,
+        4: lambda: np.exp(-11.1 * r2),
+        5: lambda: np.maximum(1.0 - r, 0.0) ** 4,
+        6: lambda: np.maximum(1.0 - np.maximum(abs(qx), abs(qy)), 0.0),
+        7: lambda: _smooth(s, 1.0 - abs(qx)) * _smooth(s, 1.0 - abs(qy)),
+        8: lambda: (qx + 1.0) * 0.5 * (1.0 - s) * one,
+        9: lambda: (
+            np.maximum(1.0 - r2, 0.0)
+            * (0.5 + 0.5 * np.cos((3.0 + 12.0 * s) * math.pi * qx))
+        ),
+        10: lambda: np.where(qx > 0.0, bell * (1.0 - _smooth(1.0 - s, qx)), bell),
+        11: lambda: bell * (1.0 - abs(qx)) ** 2,
+        12: lambda: (
+            np.where(r <= 1.0, 6.75 * r2 * (1.0 - r2) ** 2, 0.0)
+            * (1.0 - _smooth(2.0 - 2.0 * s, qx + 1.0))
+        ),
+        13: lambda: np.maximum(
+            1.0 - 20.0 * (np.maximum(abs(qx) - 0.77 * s, 0.0) ** 2 + qy * qy), 0.0
+        ),
+        14: lambda: np.maximum(1.0 - r, 0.0),
+        15: lambda: (qx + 1.0) * 0.5 + s,
+    }
+    if pid in values:
+        v = values[pid]()
+    else:
+        v = np.where(r <= 1.0, np.sqrt(np.maximum(1.0 - r2, 0.0)) + s, 0.0)
+    return np.where((abs(qx) <= 1.0) & (abs(qy) <= 1.0), v, 0.0)
+
+
+def _copies(s: Splat) -> int:
+    """Return the tile copies a side the shader draws of ``s`` (FX_DRAW_GLSL)."""
+    ext = math.hypot(max(abs(s.hx), 1e-8), max(abs(s.hy), 1e-8))
+    return 2 * (math.ceil(ext - 0.5) if ext > 0.5 else 0) + 1  # noqa: PLR2004
+
+
+def pixel_work(spl: list[Splat]) -> float:
+    """Return about how many patterns the shader draws a pixel, on average."""
+    return sum(min(1.0, (2 * _reach(s)) ** 2) * _copies(s) ** 2 for s in spl)
+
+
+BAKE_KINDS = 16
+"""Most kinds of splat (pattern, size, angle, supplement) a bake takes."""
+
+
+def bake(spl: list[Splat], size: int, tile: tuple[bool, bool]) -> np.ndarray | None:
+    """Return the gray map the splats draw, 2**size a side, or None.
+
+    Only a tiling map of gray splats of patterns (not images) that add
+    (not max), of few kinds: each kind's patterns are one kernel, wrapped
+    as the map tiles, convolved with their centers and values by FFT (each
+    center spread bilinearly over its four nearest pixels). Clamped.
+    """
+    if not all(tile) or any(
+        len(s.value) != 1 or s.pattern < 0 or s.blend_max for s in spl
+    ):
+        return None
+    kinds: dict[tuple, list[Splat]] = {}
+    for s in spl:
+        kinds.setdefault((s.pattern, s.hx, s.hy, s.angle, s.suppl), []).append(s)
+    if len(kinds) > BAKE_KINDS:
+        return None
+    n = 1 << size
+    d = np.arange(n) / n
+    d = np.where(d >= 0.5, d - 1.0, d)  # noqa: PLR2004 (offsets, wrapped)
+    dx, dy = np.meshgrid(d, d)
+    total = np.zeros((n, n))
+    for (pid, hx, hy, angle, suppl), members in kinds.items():
+        hx_, hy_ = max(abs(hx), 1e-8), max(abs(hy), 1e-8)
+        k = (_copies(members[0]) - 1) // 2 + 1
+        ext = math.hypot(hx_, hy_)
+        ca, sa = math.cos(angle), math.sin(angle)
+        kernel = np.zeros((n, n))
+        for j in range(-k, k + 1):
+            for i in range(-k, k + 1):
+                if math.hypot(max(abs(i) - 0.5, 0), max(abs(j) - 0.5, 0)) > ext:
+                    continue  # (that copy cannot reach the tile)
+                ox, oy = dx + i, dy + j
+                qx = (ca * ox + sa * oy) / hx_
+                qy = (-sa * ox + ca * oy) / hy_
+                kernel += pattern(pid, qx, qy, suppl)
+        points = np.zeros((n, n))
+        for s in members:
+            px, py = s.x * n - 0.5, s.y * n - 0.5
+            x0, y0 = math.floor(px), math.floor(py)
+            fx, fy = px - x0, py - y0
+            for yy, wy in ((y0, 1 - fy), (y0 + 1, fy)):
+                for xx, wx in ((x0, 1 - fx), (x0 + 1, fx)):
+                    points[yy % n, xx % n] += s.value[0] * wx * wy
+        total += np.fft.irfft2(np.fft.rfft2(points) * np.fft.rfft2(kernel), s=(n, n))
+    return np.clip(total, 0.0, 1.0).astype(np.float32)
+
+
+def write_floats(path: Path, image: np.ndarray) -> None:
+    """Write float32s as an RGBA8 PNG, one float a texel (bit for bit)."""
+    rgba = np.ascontiguousarray(image, dtype="<f4").view(np.uint8)
+    Image.fromarray(rgba.reshape(*image.shape, 4), "RGBA").save(path)
+
+
 def evaluable(err: Exception) -> bool:
     """Whether an error from ``splats`` just means: keep the map live."""
     return isinstance(err, (FunctionError, KeyError, TooBig, IndexError))
