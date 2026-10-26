@@ -33,6 +33,7 @@ Built-ins: 1 $size, 3 $sizelog2, 8 $pos (a pixel processor's pixel).
 import math
 import struct
 from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
@@ -184,14 +185,17 @@ def evaluate(
     inputs: dict[int, list[float]],
     builtins: dict[int, list[float]],
     rand: Callable[[float], float] | None = None,
+    variables: dict[int, list] | None = None,
 ) -> list:
     """Return the block's value with graph ``inputs`` (by uid) and ``builtins``.
 
     ``rand(a)``, when given, is the generator rand instructions call, in
-    instruction order.
+    instruction order. ``variables``, when given, is the variable store,
+    read and written in place: blocks that share one (an FX-Map's) see each
+    other's variables.
     """
     vals: list[list] = []
-    var: dict[int, list] = {}
+    var: dict[int, list] = {} if variables is None else variables
     for ins in block.instrs:
         ops = ins.operands
         if ins.op == 0x00:
@@ -452,6 +456,7 @@ def to_glsl(
     builtins: Callable[[int, int], str],
     samples: Callable[[str, int, str, int], str] | None = None,
     rand: Callable[[str, int], str] | None = None,
+    variables: Mapping[int, tuple[str, str]] | None = None,
 ) -> tuple[list[str], str]:
     """Return GLSL statements computing ``block`` and the name of its value.
 
@@ -460,7 +465,9 @@ def to_glsl(
     built-ins (a Material Maker parameter such as ``$p_amount``, a
     constant...); ``samples(kind, input index, position, filtering)``, kind
     "lum" or "col", gives a pixel processor's input sampled; ``rand(a,
-    k)`` a random value in [0, a) for instruction k.
+    k)`` a random value in [0, a) for instruction k. ``variables`` maps
+    variables shared beyond the block (an FX-Map's) to a GLSL global and
+    its type, which the block reads and writes instead of locals.
     """
     lines: list[str] = []
     names: list[str] = []
@@ -483,6 +490,13 @@ def to_glsl(
             expr = inputs(ins.u32s()[0], ins.type, ins.width)
             if ins.type == BOOL:  # a bool input is a number parameter
                 expr = f"bool({expr})"
+        elif ins.op == 0x04 and variables and ops[0] in variables:  # noqa: PLR2004
+            glob, kind = variables[ops[0]]
+            expr = glob if kind == t else f"{t}({glob})"
+        elif ins.op == 0x07 and variables and ops[1] in variables:  # noqa: PLR2004
+            glob, kind = variables[ops[1]]
+            lines.append(f"{glob} = {kind}({v(ops[0])});")
+            expr = v(ops[0])
         elif ins.op == 0x04:  # noqa: PLR2004
             # A variable this block never set (one an FX-Map node's
             # ancestors set, it seems) reads as zero, as in evaluate.

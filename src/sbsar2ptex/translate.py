@@ -88,6 +88,8 @@ class _Context:
     """Resolved random seed of the ordinary filter currently being translated."""
     count: int = 0
     data_dir: Path | None = None
+    fx_variables: dict[int, tuple[str, str]] | None = None
+    """The FX-Map being translated's shared variables: GLSL global, type."""
     """Where precomputed FX-Map textures go (none: FX-Maps stay live)."""
 
 
@@ -1517,7 +1519,13 @@ def _fx_function(node: Node, offset: int, parameter: str = "frameoffset") -> str
 
     try:
         lines, result = to_glsl(
-            block, prefix, lambda uid, *_: _param_for(uid), builtins, _sample, rand
+            block,
+            prefix,
+            lambda uid, *_: _param_for(uid),
+            builtins,
+            _sample,
+            rand,
+            _CTX.fx_variables,
         )
     except FunctionError as e:
         raise UnsupportedError(str(e)) from e
@@ -1651,7 +1659,9 @@ def _fx_splats(
     """Precompute the FX-Map's patterns into a data texture, when worth it.
 
     Only with a data folder (translate_graph's ``data_dir``), when the tree
-    can be evaluated here and draws more than LIVE_SPLATS patterns. Returns
+    can be evaluated here and draws more than LIVE_SPLATS patterns, or its
+    functions share variables (fxsplat.stateful), which per-pixel GLSL
+    cannot follow. Returns
     the packing and the texture's file, else None (the map stays live).
     """
     if _CTX.data_dir is None:
@@ -1665,7 +1675,7 @@ def _fx_splats(
         if fxsplat.evaluable(e):
             return None
         raise
-    if len(spl) <= LIVE_SPLATS:
+    if len(spl) <= LIVE_SPLATS and not fxsplat.stateful(node, tree, st):
         return None
     packed = fxsplat.pack(spl, color=color, tile=(st.tile_x, st.tile_y))
     _CTX.data_dir.mkdir(parents=True, exist_ok=True)
@@ -1745,7 +1755,10 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     images = [f"pattern{n}" for n in range(len(st.patterns))]
     t = "rgba" if color else "f"
     names: dict[int, str] = {}
-    reaches = _fx_reach(node, tree, size)
+    # Functions that share variables run in Substance's order, every one of
+    # them, on per-pixel globals: no node may be skipped (it could set one).
+    stateful = fxsplat.stateful(node, tree, st)
+    reaches = {} if stateful else _fx_reach(node, tree, size)
 
     def emit(tree: fxmap.Tree | None) -> str | None:
         if tree is None:
@@ -1770,26 +1783,35 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
         if isinstance(tree, fxmap.Quadrant):
             kids = [emit(c) for c in tree.children]
             p = tree.params
-            op = _fx_param(node, p.get("opacity"), [1.0] * 4, "opacity")
-            bo = _fx_param(node, p.get("branchoffset"), [0.0, 0.0], "branchoffset")
-            fo = _fx_param(node, p.get("frameoffset"), [0.0, 0.0], "frameoffset")
-            sz = _fx_param(node, p.get("patternsize"), [1.0, 1.0], "patternsize")
-            rot = _fx_param(node, p.get("patternrotation"), [0.0], "patternrotation")
-            sup = _fx_param(node, p.get("patternsuppl"), [0.0], "patternsuppl")
-            lines.append(f"vec2 p = pos + {bo};")
             draw_id = tree.pattern if tree.pattern is not None else None
+            if tree.image is not None and tree.image < len(images):
+                draw_id = -1 - tree.image
+            # Its parameters in Substance's order (opacity, branch and frame
+            # offsets, size, rotation, supplement, image index): their
+            # functions may set variables the next ones read.
+            draws = draw_id is not None or tree.image_index is not None
+            for local, key, default in (
+                ("vec4 op", "opacity", [1.0] * 4),
+                ("vec2 bo", "branchoffset", [0.0, 0.0]),
+                ("vec2 fo", "frameoffset", [0.0, 0.0]),
+                ("vec2 sz", "patternsize", [1.0, 1.0]),
+                ("float rot", "patternrotation", [0.0]),
+                ("float sup", "patternsuppl", [0.0]),
+            ):
+                if draws or key == "branchoffset" or (stateful and key in p):
+                    value = _fx_param(node, p.get(key), default, key)
+                    lines.append(f"{local} = {value};")
             if tree.image_index is not None:
                 index = _fx_function(node, tree.image_index.code, "imageindex")
-                draw_id = f"(-1 - int({index}))"
-            elif tree.image is not None and tree.image < len(images):
-                draw_id = -1 - tree.image
+                lines.append(f"int image = -1 - int({index});")
+                draw_id = "image"
+            lines.append("vec2 p = pos + bo;")
             if draw_id is not None:
                 mx = "true" if tree.blend_max else "false"
                 lines += [
-                    f"vec4 op = {op};",
                     (
-                        f"vec4 v = fxdraw_$(name)(uv, p + {fo}, cell * {sz} * 0.5,"
-                        f" {rot} * 6.28318531, {draw_id}, {sup}, {mx});"
+                        "vec4 v = fxdraw_$(name)(uv, p + fo, cell * sz * 0.5,"
+                        f" rot * 6.28318531, {draw_id}, sup, {mx});"
                     ),
                 ]
                 if color:
@@ -1854,12 +1876,12 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
             same = args.format(
                 pos="pos", cell="cell", depth="depth", number="number", st="e"
             )
+            lines.append(f"int n = {count};")  # first: it may set variables
             if first:
                 lines.append(f"{first}({same});")
             if repeated:
                 # Each pass's state: one more Iterate step.
                 lines += [
-                    f"int n = {count};",
                     "uint ps = e;",
                     "for (int i = 0; i < n; i++) {",
                     "\tps = fx_iter_step(ps);",
@@ -1924,10 +1946,27 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     root = None
     if splats is None:
         _CTX.sampled = images  # functions may sample the pattern inputs
+        if stateful:
+            shared = fxsplat.variable_types(node, tree, st)
+            _CTX.fx_variables = {k: (f"fxv{k}_$(name)", t) for k, t in shared.items()}
+            _CTX.helpers.append(
+                "".join(f"{t} fxv{k}_$(name);\n" for k, t in shared.items())
+            )
         try:
             root = emit(tree)
+            if stateful:  # the per-pixel start: variables zero, then the setup
+                start = [f"fxv{k}_$(name) = {t}(0);" for k, t in shared.items()]
+                if st.setup_code is not None:
+                    setup = _fx_function(node, st.setup_code)
+                    start.append(
+                        setup.replace(
+                            "(pos, number, depth, e)", "(vec2(0.5), 0.0, 0.0, 0u)"
+                        )
+                        + ";"
+                    )
         finally:
             _CTX.sampled = None
+            _CTX.fx_variables = None
     lines = ["vec4 acc = vec4(0.0);"]
     if isinstance(st.background, int):
         inputs.append(("background", t))
@@ -1939,6 +1978,8 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
             else f"acc.x = {num(st.background[0])};"
         )
     if root:
+        if stateful:
+            lines += start
         lines.append(f"{root}(uv, vec2(0.5), 1.0, 0.0, 0.0, uint({seed}), acc);")
     if splats is not None:
         packed, path = splats

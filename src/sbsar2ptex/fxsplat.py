@@ -29,6 +29,7 @@ from sbsar2ptex import fxmap
 from sbsar2ptex.function import FunctionError
 from sbsar2ptex.function import decode
 from sbsar2ptex.function import evaluate
+from sbsar2ptex.function import glsl_type
 from sbsar2ptex.fxrng import FxRng
 from sbsar2ptex.fxrng import depth_step
 from sbsar2ptex.fxrng import iterate_step
@@ -93,12 +94,16 @@ def splats(
         return h**depth / total
 
     blocks: dict[int, Any] = {}
+    # One variable store for the whole map: its setup sets variables the
+    # tree's functions read, and they keep state from one call to the next
+    # (a walk over a grid, pass by pass), in Substance's order of calls.
+    variables: dict[int, list] = {}
 
     def run(code: int, state: int, lane: str, ctx: dict[int, list[float]]) -> list:
         block = blocks.get(code)
         if block is None:
             block = blocks[code] = decode(node.at(code, (node.end - code) // 4))
-        return evaluate(block, inputs, ctx, FxRng(state, lane).rand)
+        return evaluate(block, inputs, ctx, FxRng(state, lane).rand, variables)
 
     def param(
         p: fxmap.Param | None,
@@ -119,6 +124,9 @@ def splats(
         root = int(run(settings.seed_code, 0, "frameoffset", {})[0])
     else:
         root = 0
+    if settings.setup_code is not None:
+        n_px = [n, n]
+        run(settings.setup_code, 0, "frameoffset", {1: n_px, 3: [float(size)] * 2})
     out: list[Splat] = []
 
     def enter(
@@ -199,6 +207,79 @@ def splats(
 
     enter(tree, root & UINT32_MASK, (0.5, 0.5), 1.0, 0, 0.0)
     return out
+
+
+def stateful(node: Node, tree: fxmap.Tree | None, settings: fxmap.Settings) -> bool:
+    """Whether the map's functions share variables (one reads what another set).
+
+    Then each function's GLSL alone cannot know them: the map must be
+    walked in order, as ``splats`` does.
+    """
+    for code in _codes(tree, settings):
+        block = decode(node.at(code, (node.end - code) // 4))
+        set_here: set[int] = set()
+        for ins in block.instrs:
+            if ins.op == SETVAR:
+                set_here.add(ins.operands[1])
+            elif ins.op == GETVAR and ins.operands[0] not in set_here:
+                return True
+    return False
+
+
+def _codes(tree: fxmap.Tree | None, settings: fxmap.Settings) -> list[int]:
+    """Return every function block of a map: its setup, then its tree's."""
+    codes: list[int] = [settings.setup_code] if settings.setup_code else []
+    seen: set[int] = set()
+
+    def walk(t: fxmap.Tree | None) -> None:
+        if t is None or id(t) in seen:
+            return
+        seen.add(id(t))
+        if isinstance(t, fxmap.Quadrant):
+            codes.extend(p.code for p in t.params.values() if p.state == fxmap.CODE)
+            if t.image_index is not None:
+                codes.append(t.image_index.code)
+            for c in t.children:
+                walk(c)
+        elif isinstance(t, fxmap.Iterate):
+            if isinstance(t.count, fxmap.Param):
+                codes.append(t.count.code)
+            walk(t.first)
+            walk(t.repeated)
+        else:
+            if isinstance(t.value, fxmap.Param):
+                codes.append(t.value.code)
+            walk(t.if_false)
+            walk(t.if_true)
+
+    walk(tree)
+    return codes
+
+
+def variable_types(
+    node: Node, tree: fxmap.Tree | None, settings: fxmap.Settings
+) -> dict[int, str]:
+    """Return the GLSL type of every variable the map's functions use.
+
+    Its type is what sets it (else what reads it); one set as two types
+    is an error.
+    """
+    found: dict[int, str] = {}
+    read: dict[int, str] = {}
+    for code in _codes(tree, settings):
+        for ins in decode(node.at(code, (node.end - code) // 4)).instrs:
+            if ins.op == SETVAR:
+                kind = glsl_type(ins.type, ins.width)
+                if found.setdefault(ins.operands[1], kind) != kind:
+                    message = f"FX-Map variable {ins.operands[1]} is set as two types"
+                    raise FunctionError(message)
+            elif ins.op == GETVAR:
+                read.setdefault(ins.operands[0], glsl_type(ins.type, ins.width))
+    return {**read, **found}
+
+
+GETVAR, SETVAR = 0x04, 0x07
+"""Function ops reading and writing a variable."""
 
 
 RECORD = {False: 9, True: 12}

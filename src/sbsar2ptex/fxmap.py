@@ -186,6 +186,10 @@ class Settings:
     """The FX-Map's own random seed, when a constant."""
     seed_code: int | None = None
     """Its random seed's code block (file offset), when a function."""
+    setup_code: int | None = None
+    """A function run before the tree (its output size's, in a plain FX-Map):
+    library FX-Maps set variables there (regions from $outputsize) that the
+    tree's functions read."""
 
 
 def _float(w: int) -> float:
@@ -207,10 +211,12 @@ def read_settings(node: Node, *, color: bool) -> Settings:
         k += 1
     if words[0] >> 22 & 3 == INLINE and out.patterns:  # the seed, inline
         out.seed = out.patterns.pop()
-        k += 1  # the output size's code
     else:
         out.seed_code = words[k] + BASE if k < len(words) else None
-        k += 2  # the seed's and output size's code
+        k += 1
+    if k < len(words) and is_offset(words[k]):
+        out.setup_code = words[k] + BASE
+    k += 1  # the setup's code
     sizes = (("background", 4 if color else 1), ("hurst", 1), ("opacity", 1))
     for n, (name, size) in enumerate(sizes):
         state = states >> 2 * n & 3
