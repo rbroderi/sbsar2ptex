@@ -481,6 +481,8 @@ def to_glsl(
             expr = builtins(ops[0], ins.width)
         elif ins.op == 0x02:  # noqa: PLR2004
             expr = inputs(ins.u32s()[0], ins.type, ins.width)
+            if ins.type == BOOL:  # a bool input is a number parameter
+                expr = f"bool({expr})"
         elif ins.op == 0x04:  # noqa: PLR2004
             # A variable this block never set (one an FX-Map node's
             # ancestors set, it seems) reads as zero, as in evaluate.

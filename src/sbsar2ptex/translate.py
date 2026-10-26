@@ -494,7 +494,14 @@ def vec(values: Any, n: int = 4) -> str:
             return values.text
         if values.width == 1:
             return values.text if n == 1 else f"vec{n}({values.text})"
-        return f"{values.text}.y" if n == 1 else f"{values.text}.{'xyzw'[:n]}"
+        if n == 1:
+            return f"{values.text}.y"
+        if values.width < n:  # fill out: zeros, and an opaque alpha
+            fill = ["0.0"] * (n - values.width)
+            if n == 4:  # noqa: PLR2004
+                fill[-1] = "1.0"
+            return f"vec{n}({values.text}, {', '.join(fill)})"
+        return f"{values.text}.{'xyzw'[:n]}"
     if isinstance(values, (int, float)):
         values = [values] * n
     nums = ", ".join(num(v) for v in values[:n])
