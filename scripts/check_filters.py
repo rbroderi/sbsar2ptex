@@ -89,6 +89,19 @@ def cases() -> list[tuple]:
         ]
         out += [
             (
+                f"transform_tile{tiling}_{k}",
+                "transformation",
+                kind,
+                (
+                    ("matrix22", F4, "1.6 0.2 -0.3 1.4"),
+                    ("offset", "constantValueFloat2", "0.15 0.1"),
+                    ("tiling", "constantValueInt32", str(tiling)),
+                ),
+            )
+            for tiling in range(3)
+        ]
+        out += [
+            (
                 f"blend{m}_{k}",
                 "blend",
                 kind,

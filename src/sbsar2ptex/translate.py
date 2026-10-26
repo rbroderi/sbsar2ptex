@@ -894,14 +894,22 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made:
     a, b, c, d = (knob(k, f"Matrix {k}", v, -2.0, 2.0) for k, v in zip(
         ("m11", "m12", "m21", "m22"), matrix, strict=True))  # fmt: skip
     offset = knob("offset", "Offset", offset, -1.0, 1.0)
+    # Tiling, node word bits 24-25: 1 across, 2 down, 3 both; where it
+    # does not tile, the image is empty beyond its edges.
+    tiling = node.flags >> 8 & 3
     lines = [
         "vec2 p = uv - vec2(0.5);",
         (
             f"vec2 q = vec2({num(a)} * p.x + {num(c)} * p.y,"
             f" {num(b)} * p.x + {num(d)} * p.y);"
         ),
-        f"return $input(fract(q + vec2(0.5) + {vec(offset, 2)}));",
+        f"q += vec2(0.5) + {vec(offset, 2)};",
     ]
+    for axis, bit in (("x", 1), ("y", 2)):
+        if not tiling & bit:
+            empty = "vec4(0.0)" if color else "0.0"
+            lines.append(f"if (q.{axis} < 0.0 || q.{axis} >= 1.0) return {empty};")
+    lines.append("return $input(fract(q));")
     return shader(name, [("input", t)], t, "\n".join(lines)), ["input"]
 
 
