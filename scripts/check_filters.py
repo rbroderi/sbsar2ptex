@@ -531,6 +531,31 @@ def pixel_cases() -> list[dict]:
             "set": {"$randomseed": 3},
         }
     )
+    # A parameter function sets a variable, once per node with its value
+    # generator; the per-pixel function reads it. Biomech hides one in an
+    # output size relative to the input's, adding (0, 0); Substance renders
+    # that at twice the size, so the image is flat, the variable alone.
+    v = '<constantValueString v="v"/>'
+    same = fn("const_int2", 32, data='<constantValueInt2 v="0 0"/>')
+    noise = fn("vector2", FLOAT2, componentsin=fn("rand", a=const(1.0)),
+               componentslast=fn("rand", a=const(1.0)))  # fmt: skip
+    sets = fn("sequence", 32, seqin=fn("set", FLOAT2, data=v, value=noise), seqout=same)
+    weights = fn("const_float2", FLOAT2, data='<constantValueFloat2 v="0.6 0.3"/>')
+    shade = fn("dot", a=get("v", FLOAT2), b=weights)
+    for tag, seed in (("pp_param_var", {}), ("pp_param_var_seed", {"$randomseed": 3})):
+        out.append(
+            {
+                "tag": tag,
+                "filter": "pixelprocessor",
+                "kind": GRAY,
+                "params": (
+                    *per(shade),
+                    ("outputsize", "dynamicValue", function_graph(sets), 1),
+                ),
+                "floats": floats,
+                **({"set": seed} if seed else {}),
+            }
+        )
     return out
 
 
@@ -753,13 +778,17 @@ def main() -> None:
         ref, got = load(out / f"ref_{tag}.png"), load(got_path)
         if ref.ndim == 2:
             got = got[..., 0]
+        note = ""
+        if ref.shape[:2] != got.shape[:2]:  # a case whose output size Substance moves
+            note = f"  (Substance at {ref.shape[1]}x{ref.shape[0]})"
+            ref = ref[:: ref.shape[0] // got.shape[0], :: ref.shape[1] // got.shape[1]]
         diff = np.abs(ref - got[..., : ref.shape[-1]] if ref.ndim == 3 else ref - got)
         p99 = float(np.percentile(diff, 99)) * 255
         mean = float(diff.mean()) * 255
         worst = max(worst, p99)
         verdict = "ok" if p99 <= 4 and mean <= 1.5 else "OFF"
         print(
-            f"{tag:14} mean {mean:6.2f}/255  p99 {p99:6.2f}/255  max {diff.max() * 255:6.1f}  {verdict}"
+            f"{tag:14} mean {mean:6.2f}/255  p99 {p99:6.2f}/255  max {diff.max() * 255:6.1f}  {verdict}{note}"
         )
     print(f"worst p99 {worst:.2f}/255")
     sys.exit(0)

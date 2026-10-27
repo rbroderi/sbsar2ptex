@@ -39,6 +39,8 @@ from dataclasses import field
 from typing import Any
 
 FLOAT, INT, BOOL = 1, 2, 0
+NO_VALUE = 0xFFFF
+"""An operand naming no value: a sequence whose result the cooker dropped."""
 
 OP_NAMES = {
     0x00: "const", 0x01: "builtin", 0x02: "input", 0x04: "getvar", 0x07: "setvar",
@@ -212,7 +214,7 @@ def evaluate(
         elif ins.op == 0x09:  # noqa: PLR2004
             v = vals[ops[1]] if vals[ops[0]][0] else vals[ops[2]]
         elif ins.op == 0x0C:  # noqa: PLR2004
-            v = vals[ops[1]]
+            v = [0.0] * ins.width if ops[1] == NO_VALUE else vals[ops[1]]
         elif ins.op in (0x0D, 0x0E, 0x0F):
             v = [x for o in ops for x in vals[o]]
         elif ins.op == 0x10:  # noqa: PLR2004
@@ -323,7 +325,7 @@ def bounds(
             a, b = _bcast(arg(1), arg(2))
             v = [(min(p[0], q[0]), max(p[1], q[1])) for p, q in zip(a, b, strict=True)]
         elif ins.op == 0x0C:  # noqa: PLR2004
-            v = arg(1)
+            v = [(0.0, 0.0)] * ins.width if ops[1] == NO_VALUE else arg(1)
         elif ins.op in (0x0D, 0x0E, 0x0F):
             v = [x for o in ops for x in vals[o]]
         elif ins.op == 0x10:  # noqa: PLR2004
@@ -516,7 +518,7 @@ def to_glsl(
         elif ins.op == 0x09:  # noqa: PLR2004
             expr = f"({v(ops[0])} ? {v(ops[1])} : {v(ops[2])})"
         elif ins.op == 0x0C:  # noqa: PLR2004
-            expr = v(ops[1])
+            expr = f"{t}(0)" if ops[1] == NO_VALUE else v(ops[1])
         elif ins.op in (0x0D, 0x0E, 0x0F):
             expr = f"{t}({', '.join(v(o) for o in ops)})"
         elif ins.op == 0x10:  # noqa: PLR2004

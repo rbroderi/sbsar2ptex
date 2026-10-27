@@ -312,7 +312,8 @@ def sbs(
 
     With ``chain``, input A reaches the filter through a blur, so the filter's
     first input is not node 0 (which reads the same as a zero flag word).
-    ``params`` ((name, value kind, value) each) replaces PARAMETERS[filt];
+    ``params`` ((name, value kind, value[, relative to]) each) replaces
+    PARAMETERS[filt];
     ``extra`` is more of the filter's XML (an FX-Map's <paramsGraphs>);
     ``arrays`` is the filter's <paramsArrays> content (gradient keys, curve
     points), as .sbs XML. ``format16`` makes the graph 16-bit throughout (its
@@ -339,14 +340,15 @@ def sbs(
         else ""
     )
     parameters = "".join(
-        f'<parameter><name v="{name}"/><relativeTo v="0"/><paramValue>'
+        f'<parameter><name v="{name}"/><relativeTo v="{rel[0] if rel else 0}"/>'
+        "<paramValue>"
         + (
             f"<{vkind}>{value}</{vkind}>"
             if vkind == "dynamicValue"
             else f'<{vkind} v="{value}"/>'
         )
         + "</paramValue></parameter>"
-        for name, vkind, value in (
+        for name, vkind, value, *rel in (
             PARAMETERS.get(filt, ()) if params is None else params
         )
     )
