@@ -300,7 +300,7 @@ def sbs(
     filt: str,
     kind: int,
     *,
-    chain: bool = False,
+    chain: bool | tuple[str, str] = False,
     params: tuple[tuple[str, str, str], ...] | None = None,
     arrays: str = "",
     extra: str = "",
@@ -311,7 +311,8 @@ def sbs(
     """Return a package: graph inputs -> ``filt`` -> output, of image ``kind``.
 
     With ``chain``, input A reaches the filter through a blur, so the filter's
-    first input is not node 0 (which reads the same as a zero flag word).
+    first input is not node 0 (which reads the same as a zero flag word); or
+    through the filter it names, (filter, its <parameters> content).
     ``params`` ((name, value kind, value[, relative to]) each) replaces
     PARAMETERS[filt];
     ``extra`` is more of the filter's XML (an FX-Map's <paramsGraphs>);
@@ -327,14 +328,23 @@ def sbs(
         f'<connRefOutput v="{first + 1 if k == 0 else 101 + 10 * k}"/></connection>'
         for k, name in enumerate(inputs)
     )
+    pre, pre_params = (
+        chain
+        if isinstance(chain, tuple)
+        else (
+            "blur",
+            (
+                '<parameter><name v="intensity"/><relativeTo v="0"/><paramValue>'
+                '<constantValueFloat1 v="3"/></paramValue></parameter>'
+            ),
+        )
+    )
     chained = (
         '<compNode><uid v="150"/><connections><connection>'
         '<identifier v="input1"/><connRef v="100"/><connRefOutput v="101"/>'
         '</connection></connections><compOutputs><compOutput><uid v="151"/>'
         f'<comptype v="{kind}"/></compOutput></compOutputs><compImplementation>'
-        '<compFilter><filter v="blur"/><parameters><parameter>'
-        '<name v="intensity"/><relativeTo v="0"/><paramValue>'
-        '<constantValueFloat1 v="3"/></paramValue></parameter></parameters>'
+        f'<compFilter><filter v="{pre}"/><parameters>{pre_params}</parameters>'
         "</compFilter></compImplementation></compNode>"
         if chain
         else ""

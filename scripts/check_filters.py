@@ -86,6 +86,27 @@ def cases() -> list[tuple]:
                 )
                 for i, edges in enumerate(("0.5 0.5 0.5 0.5", "0 0.25 0.75 1"))
             ),
+            # A computed 0.5 (half of min(2 v, 1), from v = 0.5 up) clears a
+            # 0.5 threshold: stored in 8 bits it rounds to 128 / 255 (on
+            # Direct3D and Vulkan here; a GPU may break the tie down).
+            {
+                "tag": f"levels_step_stored_{k}",
+                "filter": "levels",
+                "kind": kind,
+                "params": (
+                    ("levelinlow", F4, "0.5 0.5 0.5 0.5"),
+                    ("levelinhigh", F4, "0.5 0.5 0.5 0.5"),
+                ),
+                "chain": (
+                    "levels",
+                    "".join(
+                        f'<parameter><name v="{name}"/><relativeTo v="0"/>'
+                        f'<paramValue><constantValueFloat4 v="{v} {v} {v} {v}"/>'
+                        "</paramValue></parameter>"
+                        for name, v in (("levelinhigh", 0.5), ("levelouthigh", 0.5))
+                    ),
+                ),
+            },
             (
                 f"transform_{k}",
                 "transformation",
@@ -271,6 +292,11 @@ def function_cases() -> list[dict]:
          "floats": floats, "connect": 2},
         {"tag": "fn_blend_inline", "filter": "blend", "kind": GRAY,
          "params": opacity, "floats": floats, "connect": 2, "set": {"pa": 1.2}},
+        # Add sub at half opacity is (a + b) / 255 - 0.5: every value a tie
+        # between two 8-bit steps; exact where a + b = 255 (0.5, stored 128).
+        {"tag": "blend_addsub_half_g", "filter": "blend", "kind": GRAY,
+         "connect": 2, "params": (("blendingmode", "constantValueInt32", "4"),
+                                  ("opacitymult", "constantValueFloat1", "0.5"))},
     ]  # fmt: skip
     out.append(
         {
@@ -721,6 +747,7 @@ def main() -> None:
                 floats=c["floats"],
                 connect=c.get("connect"),
                 extra=c.get("extra", ""),
+                chain=c.get("chain", False),
             ),
             encoding="utf-8",
         )
