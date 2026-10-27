@@ -27,6 +27,9 @@ from descend import cone
 from descend import export
 from descend import wiring
 
+RESET_PAUSE = 60
+"""Seconds to wait after an export that reset the GPU."""
+
 
 class Bisect:
     """Exports of a graph's nodes, each remembered."""
@@ -68,6 +71,9 @@ class Bisect:
                 f"  {name} ({size} nodes): {verdict} in {time.time() - t0:.0f} s",
                 flush=True,
             )
+            if lost:
+                # Windows stops the machine at several GPU resets a minute.
+                time.sleep(RESET_PAUSE)
         return self.memo[name]
 
     def path(self, name: str) -> list[str]:
