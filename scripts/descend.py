@@ -2,18 +2,20 @@
 
     uv run python scripts/descend.py SBSAR NODE --mm PATH/TO/material_maker.exe
         [--sbsrender PATH] [--work DIR] [--size 10] [--output height]
+        [--color-output basecolor]
 
 NODE is a compiled node index (``sbsasm-dump`` lists them; a graph output's
 node is a good start). Each step renders a node twice: in Substance, by
-retargeting a grayscale graph output (``--output``) to it and running
-sbsrender; and in Material Maker, by exporting the translated graph (flat,
+retargeting a graph output to it (``--output`` for a grayscale node,
+``--color-output`` for a color one) and running sbsrender; and in Material Maker, by exporting the translated graph (flat,
 ``--procedural --flat``) pruned to the node and the nodes feeding it. A node
 matches when the two images agree pixel for pixel, or when they have the same
 content placed elsewhere: the same value distribution and the same frequency
 spectrum (random placement that differs only by GPU float rounding, such as
 a hash of cos, moves things without changing them). From a differing node it
 follows the input that matches worst, and stops at a node whose inputs all
-match: the first node translated wrong. Color nodes are not compared.
+match: the first node translated wrong. A color node matches when each of
+its red, green and blue channels does.
 
 The flat graph is built once into the work folder (``--rebuild`` to redo it).
 Side-by-side images (Substance left) go to WORK/vs.
@@ -44,14 +46,21 @@ SIDE = 512
 """Images are compared at this size."""
 
 
-def load(path: Path) -> np.ndarray:
-    """Return an image's first channel as floats in [0, 1], SIDE square."""
+def load(path: Path, channels: int = 1) -> np.ndarray:
+    """Return an image's first ``channels`` channels as floats in [0, 1].
+
+    Each is SIDE square; with more than one, they are the last axis.
+    """
     im = Image.open(path)
     a = np.asarray(im).astype(float)
     a = a / 65535 if im.mode.startswith("I") or a.max() > 255 else a / 255
-    a = a[..., 0] if a.ndim == 3 else a
-    im = Image.fromarray((np.clip(a, 0, 1) * 65535).astype(np.uint16))
-    return np.asarray(im.resize((SIDE, SIDE), Image.BILINEAR)).astype(float) / 65535
+    a = a[..., None] if a.ndim == 2 else a
+    out = []
+    for c in range(channels):
+        ch = a[..., min(c, a.shape[2] - 1)]
+        im = Image.fromarray((np.clip(ch, 0, 1) * 65535).astype(np.uint16))
+        out.append(np.asarray(im.resize((SIDE, SIDE), Image.BILINEAR)) / 65535)
+    return out[0] if channels == 1 else np.stack(out, axis=-1)
 
 
 def spectrum(x: np.ndarray) -> np.ndarray:
@@ -86,6 +95,14 @@ def compare(t: np.ndarray, o: np.ndarray) -> tuple[bool, str, float]:
         text + (" (placed elsewhere)" if moved and not same else ""),
         c,
     )
+
+
+def compare_color(t: np.ndarray, o: np.ndarray) -> tuple[bool, str, float]:
+    """Return ``compare`` over the red, green and blue channels: the worst one."""
+    per = [compare(t[..., c], o[..., c]) for c in range(3)]
+    k = min(range(3), key=lambda c: (per[c][0], per[c][2]))
+    _, text, c = per[k]
+    return all(p[0] for p in per), f"{'rgb'[k]}: {text}", c
 
 
 def wiring(graph: dict) -> dict[str, set[str]]:
@@ -161,8 +178,9 @@ class Search:
             int(u): i for u, i in re.findall(r'uid="(\d+)" identifier="([^"]*)"', xml)
         }
         self.outputs = [ids.get(u) for u in self.asm.output_uids]
-        if args.output not in self.outputs:
-            sys.exit(f"no graph output {args.output!r}: {self.outputs}")
+        for output in (args.output, args.color_output):
+            if output not in self.outputs:
+                sys.exit(f"no graph output {output!r}: {self.outputs}")
         built = self.work / "graph"
         ptex = next(built.glob("*.ptex"), None)
         if ptex is None or args.rebuild:
@@ -178,13 +196,13 @@ class Search:
         self.memo: dict[int, bool | None] = {}
         self.corr: dict[int, float] = {}
 
-    def truth(self, node: int) -> Path | None:
-        """Render ``node`` in Substance: retarget the graph output to it."""
+    def truth(self, node: int, output: str) -> Path | None:
+        """Render ``node`` in Substance: retarget the graph ``output`` to it."""
         out = self.work / "truth" / f"n{node}.png"
         if out.exists():
             return out
         data = bytearray(self.files[self.asm_name])
-        k = self.outputs.index(self.args.output)
+        k = self.outputs.index(output)
         struct.pack_into("<I", data, self.asm.outputs_at + 8 * k + 4, node)
         files = {**self.files, self.asm_name: bytes(data)}
         with tempfile.TemporaryDirectory() as tmp:
@@ -198,7 +216,7 @@ class Search:
                     z.write(root / "x" / n, n)
             subprocess.run(
                 [str(self.args.sbsrender), "render", "--input", str(sbsar),
-                 "--input-graph-output", self.args.output,
+                 "--input-graph-output", output,
                  "--set-value", f"$outputsize@{self.args.size},{self.args.size}",
                  "--output-path", str(out.parent), "--output-name", out.stem,
                  "--output-bit-depth", "16", "--no-report"],
@@ -222,11 +240,15 @@ class Search:
         if node in self.memo:
             return self.memo[node]
         result = None
-        if self.nodes[node].op not in COLOR_OPS and f"n{node}" in self.names:
-            truth, ours = self.truth(node), self.ours(node)
+        if f"n{node}" in self.names:
+            color = self.nodes[node].op in COLOR_OPS
+            output = self.args.color_output if color else self.args.output
+            truth, ours = self.truth(node, output), self.ours(node)
             if truth and ours:
-                t, o = load(truth), load(ours)
-                result, text, self.corr[node] = compare(t, o)
+                t, o = load(truth, 3 if color else 1), load(ours, 3 if color else 1)
+                result, text, self.corr[node] = (compare_color if color else compare)(
+                    t, o
+                )
                 kind = OPS.get(self.nodes[node].op)
                 print(
                     f"  n{node} {kind}: {text} -> {'ok' if result else 'DIFF'}",
@@ -255,6 +277,9 @@ def main() -> None:
     parser.add_argument("--work", type=Path, default=Path("descend"))
     parser.add_argument("--size", type=int, default=10, help="log2 pixels")
     parser.add_argument("--output", default="height", help="a grayscale graph output")
+    parser.add_argument(
+        "--color-output", default="basecolor", help="a color graph output"
+    )
     parser.add_argument("--rebuild", action="store_true", help="rebuild the flat graph")
     args = parser.parse_args()
     search = Search(args)
