@@ -355,7 +355,10 @@ def pack(spl: list[Splat], *, color: bool, tile: tuple[bool, bool]) -> Packed:
         table += [len(index), len(members)]
         index += members
     words += table + index
-    rows = -(-len(words) // WIDTH)
+    # A power of two of rows: texel centers then sit exactly where the shader
+    # samples. At 4187 or 5251 rows, NVIDIA's sampler lands a sliver off a
+    # center and blends in its neighbor, garbling the word.
+    rows = 1 << (-(-len(words) // WIDTH) - 1).bit_length()
     flat = np.zeros(rows * WIDTH, dtype="<u4")
     flat[: len(words)] = words
     return Packed(flat.view(np.uint8).reshape(rows, WIDTH, 4), grid, start, index_at)
