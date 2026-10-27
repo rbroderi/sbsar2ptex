@@ -233,7 +233,9 @@ def read_settings(node: Node, *, color: bool) -> Settings:
         state = states >> 2 * n & 3
         if state == INLINE:
             vals = [_float(w) for w in words[k : k + size]]
-            setattr(out, name, vals if size > 1 else vals[0])
+            setattr(
+                out, name, vals if name.endswith(("background", "_roi")) else vals[0]
+            )
             k += size
         elif state == INPUT and name == "background":
             out.background = words[k]

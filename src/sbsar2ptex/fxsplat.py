@@ -18,6 +18,7 @@ list (splat numbers, as uints).
 """
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -131,13 +132,8 @@ def splats(
     if settings.setup_code is not None:
         n_px = [n, n]
         run(settings.setup_code, 0, "frameoffset", {1: n_px, 3: [float(size)] * 2})
-    rois = []
-    for roi in (settings.render_roi, settings.tiling_roi):
-        if isinstance(roi, int):  # a function, of the setup's variables
-            roi = [float(v) for v in run(roi, 0, "frameoffset", {})]  # noqa: PLW2901
-        rois.append(roi)
-    render, tiling = rois
-    if tiling is not None and tiling != (render or [0.0, 1.0, 0.0, 1.0]):
+    render, tiling = _regions(settings, lambda code: run(code, 0, "frameoffset", {}))
+    if tiling != render:  # the image is not the tile (translate's to handle)
         msg = f"FX-Map tiling region {tiling} is not its render region {render}"
         raise RegionError(msg)
     out: list[Splat] = []
@@ -219,7 +215,7 @@ def splats(
             enter(t.if_true if value else t.if_false, e, pos, cell, depth, number)
 
     enter(tree, root & UINT32_MASK, (0.5, 0.5), 1.0, 0, 0.0)
-    if render is not None:  # the region drawn fills the image
+    if render != UNIT_REGION:  # the region drawn fills the image
         x0, x1, y0, y1 = render
         w, h = x1 - x0, y1 - y0
         if w != h and any(s.angle % math.pi for s in out):
@@ -230,6 +226,43 @@ def splats(
             s.x, s.y = (s.x - x0) / w, (s.y - y0) / h
             s.hx, s.hy = s.hx / w, s.hy / h
     return out
+
+
+UNIT_REGION = [0.0, 1.0, 0.0, 1.0]
+"""The render and tiling regions' default: the image is the tile."""
+
+
+def _regions(
+    settings: fxmap.Settings, run: Callable[[int], list]
+) -> tuple[list[float], list[float]]:
+    """Return the map's render and tiling regions, x0 x1 y0 y1 each.
+
+    ``run`` evaluates a code block, after the map's setup. The tiling region
+    is a tile of pattern space that wraps, drawn only within itself; the
+    render region is the part of pattern space the image shows.
+    """
+    out = []
+    for roi in (settings.render_roi, settings.tiling_roi):
+        if isinstance(roi, int):  # a function, of the setup's variables
+            roi = [float(v) for v in run(roi)]  # noqa: PLW2901
+        out.append(UNIT_REGION if roi is None else roi)
+    return out[0], out[1]
+
+
+def regions(
+    node: Node, settings: fxmap.Settings, inputs: dict[int, list[float]], size: int
+) -> tuple[list[float], list[float]]:
+    """Return ``_regions`` for the FX-Map ``node``, its setup run first."""
+    variables: dict[int, list] = {}
+    n = float(1 << size)
+
+    def run(code: int, ctx: dict[int, list[float]]) -> list:
+        block = decode(node.at(code, (node.end - code) // 4))
+        return evaluate(block, inputs, ctx, FxRng(0, "frameoffset").rand, variables)
+
+    if settings.setup_code is not None:
+        run(settings.setup_code, {1: [n, n], 3: [float(size)] * 2})
+    return _regions(settings, lambda code: run(code, {}))
 
 
 def stateful(node: Node, tree: fxmap.Tree | None, settings: fxmap.Settings) -> bool:

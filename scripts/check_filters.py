@@ -430,6 +430,13 @@ def fxmap_cases() -> list[dict]:
          "params": (("renderroi", F4, roi), ("tilingroi", F4, roi)),
          "extra": fxmap_graph(many), "connect": 0, "format16": True}
     )  # fmt: skip
+    # Without a tiling region, the default tile wraps; a render region in it
+    # is a window onto it, stretched over the image (make_it_tile's).
+    out.append(
+        {"tag": "fx_window_g", "filter": "fxmaps", "kind": GRAY,
+         "params": (("renderroi", F4, "0.2 0.7 0.3 0.8"),),
+         "extra": fxmap_graph(many), "connect": 0, "format16": True}
+    )  # fmt: skip
     # Functions sharing a variable and sampling the input: recorded.
     x = get("x")
     step = fn(

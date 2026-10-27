@@ -1874,7 +1874,58 @@ def _fx_splat_lines(packed: fxsplat.Packed, *, color: bool) -> list[str]:
 
 
 def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """FX-Map: drawn (_fxmap_drawn) through its render and tiling regions.
+
+    The tiling region is a tile of pattern space that wraps; the render
+    region the part of pattern space the image shows. Equal, the image is
+    the tile: precomputed patterns are placed in it (fxsplat.splats). A
+    render region inside the default tile, a window onto it (make_it_tile
+    stretches a column), is the tile drawn, then sampled through the window.
+    """
+    st = fxmap.read_settings(node, color=color)
+    if st.render_roi is None and st.tiling_roi is None:
+        return _fxmap_drawn(node, name, color=color, size=size, regions=False)
+    defaults = {
+        uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
+    }
+    try:
+        render, tiling = fxsplat.regions(node, st, defaults, size)
+    except Exception as e:
+        if fxsplat.evaluable(e):
+            msg = "an FX-Map's regions, not evaluable here"
+            raise UnsupportedError(msg) from e
+        raise
+    unit = fxsplat.UNIT_REGION
+    if render == tiling:
+        return _fxmap_drawn(node, name, color=color, size=size, regions=render != unit)
+    x0, x1, y0, y1 = render
+    if tiling != unit or not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+        msg = f"an FX-Map's render region {render} outside its tiling region {tiling}"
+        raise UnsupportedError(msg)
+    # The tile drawn finer by the window's magnification (up to four times),
+    # so that sampling it keeps the patterns' edges.
+    finer = size + min(2, max(0, math.ceil(-math.log2(min(x1 - x0, y1 - y0)))))
+    sub = _fxmap_drawn(node, f"{name}_tile", color=color, size=finer, regions=False)
+    t = "rgba" if color else "f"
+    buf = f"{name}_tile_buf"
+    window = shader(
+        name, [("input", t)], t,
+        f"return $input(fract(vec2({num(x0)}, {num(y0)})"
+        f" + uv * vec2({num(x1 - x0)}, {num(y1 - y0)})));",
+    )  # fmt: skip
+    sub.nodes += [buffer(buf, finer), window]
+    sub.wires += [wire(sub.output, buf), wire(buf, name)]
+    sub.output = name
+    return sub
+
+
+def _fxmap_drawn(
+    node: Node, name: str, *, color: bool, size: int, regions: bool
+) -> Sub:
     """FX-Map: its tree evaluated per pixel (see sbsar2ptex.fxmap).
+
+    With ``regions``, precomputed patterns are placed by the render region
+    (equal to the tiling region); a map drawn per pixel cannot be.
 
     Each tree node is a GLSL function adding what it draws over the pixel
     to ``acc`` (premultiplied rgba; gray in x), its children's functions
@@ -1891,6 +1942,8 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """
     tree = fxmap.read_tree(node, color=color)
     st = fxmap.read_settings(node, color=color)
+    if not regions:
+        st = replace(st, render_roi=None, tiling_roi=None)
     deepest = fxmap.max_depth(tree)
     h = st.hurst
     if h == 0:
@@ -1909,11 +1962,8 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     stateful = fxsplat.stateful(node, tree, st)
     reaches = {} if stateful else _fx_reach(node, tree, size)
     splats = _fx_splats(node, tree, st, color=color, size=size)
-    if splats is None and any(
-        roi not in (None, [0.0, 1.0, 0.0, 1.0])
-        for roi in (st.render_roi, st.tiling_roi)
-    ):
-        msg = "an FX-Map's render or tiling region, drawn per pixel"
+    if splats is None and regions:
+        msg = "an FX-Map's render and tiling region, drawn per pixel"
         raise UnsupportedError(msg)
     recording = stateful and splats is None
 
