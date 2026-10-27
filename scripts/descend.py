@@ -15,7 +15,10 @@ spectrum (random placement that differs only by GPU float rounding, such as
 a hash of cos, moves things without changing them). From a differing node it
 follows the input that matches worst, and stops at a node whose inputs all
 match: the first node translated wrong. A color node matches when each of
-its red, green and blue channels does. ``--strict`` turns placement off,
+its red, green and blue channels does, and its alpha too where a node
+downstream reads that (alpha_read: an FX-Map's patterns, a shuffle's
+picks, ...); Material Maker's alpha is exported apart, as gray, since its
+albedo export is opaque. ``--strict`` turns placement off,
 for a node fed by one placed elsewhere that a later step (a narrow levels,
 a gradient lookup) magnifies: such an input can be the real difference.
 
@@ -47,6 +50,7 @@ from sbsar2ptex.archive import read_archive
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Asm
+from sbsar2ptex.sbsasm import Node
 
 SBSRENDER = Path("C:/Program Files/Adobe/Adobe Substance 3D Designer/sbsrender.exe")
 SIDE = 512
@@ -118,11 +122,41 @@ def compare(
 def compare_color(
     t: np.ndarray, o: np.ndarray, *, strict: bool = False
 ) -> tuple[bool, str, float]:
-    """Return ``compare`` over the red, green and blue channels: the worst one."""
-    per = [compare(t[..., c], o[..., c], strict=strict) for c in range(3)]
-    k = min(range(3), key=lambda c: (per[c][0], per[c][2]))
+    """Return ``compare`` over the channels (red, green, blue[, alpha]): the worst."""
+    n = t.shape[-1]
+    per = [compare(t[..., c], o[..., c], strict=strict) for c in range(n)]
+    k = min(range(n), key=lambda c: (per[c][0], per[c][2]))
     _, text, c = per[k]
-    return all(p[0] for p in per), f"{'rgb'[k]}: {text}", c
+    return all(p[0] for p in per), f"{'rgba'[k]}: {text}", c
+
+
+def alpha_read(node: Node, alpha: bool) -> set[str]:
+    """Return the inputs whose alpha ``node``'s output depends on.
+
+    ``alpha``: whether its own alpha counts (a node downstream reads it).
+    An FX-Map draws its patterns through their alpha (a color one over its
+    background); a shuffle reads the alpha its selector picks; a color blend
+    composites by alpha; a grayscale conversion multiplies by it when its
+    flag says. Other color nodes pass their inputs' alpha on to their own.
+    """
+    color_in = {name for name, m in node.inputs.items() if m is not None}
+    out: set[str] = set()
+    if node.op in (8, 9):
+        out |= {name for name in node.inputs if name.startswith("pattern")}
+        if node.op == 9:
+            out |= {"background"} & color_in
+    elif node.op == 7:
+        picks = {node.fields[0] >> 8 * c & 0xFF for c in range(4)}
+        out |= {"input1"} if 3 in picks else set()
+        out |= {"input2"} if 7 in picks else set()
+        return out & set(node.inputs)
+    elif node.op == 3:
+        out |= {"source", "destination"}
+    elif node.op == 6 and node.flags >> 8 & 0x10:
+        out |= {"input"}
+    if alpha and node.op in COLOR_OPS:
+        out |= color_in
+    return out & set(node.inputs)
 
 
 def wiring(graph: dict) -> dict[str, set[str]]:
@@ -168,10 +202,13 @@ def export(
     mm: Path,
     folder: Path,
     magnify: tuple[float, float] | None = None,
+    *,
+    alpha: bool = False,
 ) -> Path | None:
     """Export ``src`` alone (with what feeds it) as the albedo; None on failure.
 
-    ``magnify`` (center, gain) exports ``magnified`` of it instead.
+    ``magnify`` (center, gain) exports ``magnified`` of it instead; ``alpha``
+    its alpha, as gray (the albedo's own alpha is exported opaque).
     Material Maker's output goes to ``folder``/mm.log.
     """
     g = copy.deepcopy(graph)
@@ -202,6 +239,20 @@ def export(
                     f"float $(name)_fct(vec2 uv) {{\n  return clamp(($input(uv) - {c!r})"
                     f" * {k!r} + 0.5, 0.0, 1.0);\n}}\n"
                 ),
+                "outputs": [{"type": "f", "f": "$(name)_fct($uv)"}],
+            },
+        })  # fmt: skip
+        g["connections"].append({"from": src, "from_port": 0, "to": out, "to_port": 0})
+    if alpha:
+        out = f"{src}_alpha"
+        g["nodes"].append({
+            "name": out, "type": "shader", "node_position": {"x": 0, "y": 0},
+            "parameters": {}, "seed_int": 0,
+            "shader_model": {
+                "name": out, "code": "", "global": "", "parameters": [],
+                "inputs": [{"name": "input", "type": "rgba", "default": "vec4(0.0)",
+                            "function": True, "label": "input"}],
+                "instance": "float $(name)_fct(vec2 uv) {\n  return $input(uv).a;\n}\n",
                 "outputs": [{"type": "f", "f": "$(name)_fct($uv)"}],
             },
         })  # fmt: skip
@@ -255,7 +306,7 @@ class Search:
         self.graph = json.loads(ptex.read_text(encoding="utf-8"))
         self.names = {n["name"] for n in self.graph["nodes"]}
         self.into = wiring(self.graph)
-        self.memo: dict[int, bool | None] = {}
+        self.memo: dict[tuple[int, bool], bool | None] = {}
         self.corr: dict[int, float] = {}
 
     def truth(self, node: int, output: str) -> Path | None:
@@ -287,11 +338,24 @@ class Search:
         return out if out.exists() else None
 
     def ours(
-        self, node: int, magnify: tuple[float, float] | None = None
+        self,
+        node: int,
+        magnify: tuple[float, float] | None = None,
+        *,
+        alpha: bool = False,
     ) -> Path | None:
         """Export ``node`` alone (with what feeds it) from Material Maker."""
-        folder = self.work / "ours" / (f"n{node}" + ("_magnified" if magnify else ""))
-        png = export(self.graph, self.into, f"n{node}", self.args.mm, folder, magnify)
+        tail = "_magnified" if magnify else "_alpha" if alpha else ""
+        folder = self.work / "ours" / f"n{node}{tail}"
+        png = export(
+            self.graph,
+            self.into,
+            f"n{node}",
+            self.args.mm,
+            folder,
+            magnify,
+            alpha=alpha,
+        )
         if png is None:
             # Without the image the search cannot tell this node from a match.
             sys.exit(
@@ -299,20 +363,29 @@ class Search:
             )
         return png
 
-    def matches(self, node: int) -> bool | None:
-        """Return whether ``node`` matches Substance; None if not compared."""
-        if node in self.memo:
-            return self.memo[node]
+    def matches(self, node: int, *, alpha: bool = False) -> bool | None:
+        """Return whether ``node`` matches Substance; None if not compared.
+
+        ``alpha``: a color node's alpha counts too (something reads it).
+        """
+        color = self.nodes[node].op in COLOR_OPS
+        alpha = alpha and color
+        if (node, alpha) in self.memo:
+            return self.memo[node, alpha]
         result = None
         if f"n{node}" in self.names:
-            color = self.nodes[node].op in COLOR_OPS
             output = self.args.color_output if color else self.args.output
             truth = self.truth(node, output)
-            t = load(truth, 3 if color else 1) if truth else None
+            channels = 4 if alpha else 3 if color else 1
+            t = load(truth, channels) if truth else None
             magnify = None if color or t is None else magnifier(t)
             ours = self.ours(node, magnify)
+            if ours and alpha:
+                ours_a = self.ours(node, alpha=True)
             if truth and ours:
                 o = load(ours, 3 if color else 1)
+                if alpha:
+                    o = np.concatenate([o, load(ours_a)[..., None]], axis=-1)
                 if magnify:
                     t = magnified(t, *magnify)
                 result, text, self.corr[node] = (compare_color if color else compare)(
@@ -321,6 +394,14 @@ class Search:
                 kind = OPS.get(self.nodes[node].op)
                 if magnify:
                     kind += " (magnified {1:.0f}x about {0:.4f})".format(*magnify)
+                if alpha:
+                    kind += " (with alpha)"
+                    Image.fromarray(
+                        (np.concatenate([t[..., 3], o[..., 3]], axis=1) * 255).astype(
+                            np.uint8
+                        )
+                    ).save(self.work / "vs" / f"n{node}_alpha.png")
+                    t, o = t[..., :3], o[..., :3]
                 print(
                     f"  n{node} {kind}: {text} -> {'ok' if result else 'DIFF'}",
                     flush=True,
@@ -334,7 +415,7 @@ class Search:
                     f"  n{node}: no {'Substance' if not truth else 'Material Maker'} image",
                     flush=True,
                 )
-        self.memo[node] = result
+        self.memo[node, alpha] = result
         return result
 
 
@@ -357,12 +438,15 @@ def main() -> None:
     )
     args = parser.parse_args()
     search = Search(args)
-    n = args.node
+    n, alpha = args.node, False
     if search.matches(n):
         print(f"n{n} matches")
         return
     while True:
-        bad = [m for m in search.nodes[n].inputs.values() if search.matches(m) is False]
+        node = search.nodes[n]
+        reads = alpha_read(node, alpha)
+        flagged = {m: name in reads for name, m in node.inputs.items()}
+        bad = [m for m, a in flagged.items() if search.matches(m, alpha=a) is False]
         if not bad:
             x = search.nodes[n]
             print(
@@ -371,6 +455,7 @@ def main() -> None:
             print(f"  side by side: {search.work / 'vs' / f'n{n}.png'}")
             return
         n = min(bad, key=lambda m: search.corr.get(m, 1.0))
+        alpha = flagged[n]
 
 
 if __name__ == "__main__":
