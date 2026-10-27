@@ -88,6 +88,61 @@ def compare(t: np.ndarray, o: np.ndarray) -> tuple[bool, str, float]:
     )
 
 
+def wiring(graph: dict) -> dict[str, set[str]]:
+    """Return each node's direct inputs, by name."""
+    into: dict[str, set[str]] = {}
+    for w in graph["connections"]:
+        into.setdefault(w["to"], set()).add(w["from"])
+    return into
+
+
+def cone(into: dict[str, set[str]], name: str) -> set[str]:
+    """Return ``name`` and every node feeding it."""
+    seen, todo = set(), [name]
+    while todo:
+        n = todo.pop()
+        if n not in seen:
+            seen.add(n)
+            todo += into.get(n, ())
+    return seen
+
+
+def export(
+    graph: dict, into: dict[str, set[str]], src: str, mm: Path, folder: Path
+) -> Path | None:
+    """Export ``src`` alone (with what feeds it) as the albedo; None on failure.
+
+    Material Maker's output goes to ``folder``/mm.log.
+    """
+    g = copy.deepcopy(graph)
+    keep = cone(into, src) | {"Material"}
+    g["nodes"] = [n for n in g["nodes"] if n["name"] in keep or n["type"] == "remote"]
+    for n in g["nodes"]:
+        if n["type"] == "remote":  # its widgets may point at pruned nodes
+            for wd in n["widgets"]:
+                wd["linked_widgets"] = [
+                    lw for lw in wd["linked_widgets"] if lw["node"] in keep
+                ]
+    g["connections"] = [
+        w for w in g["connections"]
+        if w["to"] != "Material" and w["from"] in keep and w["to"] in keep
+    ]  # fmt: skip
+    g["connections"].append(
+        {"from": src, "from_port": 0, "to": "Material", "to_port": 0}
+    )
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{src}.ptex"
+    path.write_text(json.dumps(g), encoding="utf-8")
+    png = folder / f"{src}_albedo.png"
+    png.unlink(missing_ok=True)
+    with (folder / "mm.log").open("w", encoding="utf-8", errors="replace") as log:
+        subprocess.run(
+            [str(mm), "--export", "-o", folder.as_posix(), path.as_posix()],
+            cwd=mm.parent, stdout=log, stderr=subprocess.STDOUT, check=False, timeout=7200,
+        )  # fmt: skip
+    return png if png.exists() else None
+
+
 class Search:
     """The two renderers and the translated graph, for one archive."""
 
@@ -119,9 +174,7 @@ class Search:
             ptex = next(built.glob("*.ptex"))
         self.graph = json.loads(ptex.read_text(encoding="utf-8"))
         self.names = {n["name"] for n in self.graph["nodes"]}
-        self.into: dict[str, set[str]] = {}
-        for w in self.graph["connections"]:
-            self.into.setdefault(w["to"], set()).add(w["from"])
+        self.into = wiring(self.graph)
         self.memo: dict[int, bool | None] = {}
         self.corr: dict[int, float] = {}
 
@@ -153,52 +206,15 @@ class Search:
             )  # fmt: skip
         return out if out.exists() else None
 
-    def cone(self, name: str) -> set[str]:
-        """Return ``name`` and every node feeding it."""
-        seen, todo = set(), [name]
-        while todo:
-            n = todo.pop()
-            if n not in seen:
-                seen.add(n)
-                todo += self.into.get(n, ())
-        return seen
-
     def ours(self, node: int) -> Path | None:
         """Export ``node`` alone (with what feeds it) from Material Maker."""
-        src = f"n{node}"
-        g = copy.deepcopy(self.graph)
-        keep = self.cone(src) | {"Material"}
-        g["nodes"] = [
-            n for n in g["nodes"] if n["name"] in keep or n["type"] == "remote"
-        ]
-        for n in g["nodes"]:
-            if n["type"] == "remote":  # its widgets may point at pruned nodes
-                for wd in n["widgets"]:
-                    wd["linked_widgets"] = [
-                        lw for lw in wd["linked_widgets"] if lw["node"] in keep
-                    ]
-        g["connections"] = [
-            w for w in g["connections"]
-            if w["to"] != "Material" and w["from"] in keep and w["to"] in keep
-        ]  # fmt: skip
-        g["connections"].append(
-            {"from": src, "from_port": 0, "to": "Material", "to_port": 0}
-        )
-        folder = self.work / "ours" / src
-        folder.mkdir(exist_ok=True)
-        path = folder / f"{src}.ptex"
-        path.write_text(json.dumps(g), encoding="utf-8")
-        png = folder / f"{src}_albedo.png"
-        png.unlink(missing_ok=True)
-        with (folder / "mm.log").open("w", encoding="utf-8", errors="replace") as log:
-            subprocess.run(
-                [str(self.args.mm), "--export", "-o", folder.as_posix(), path.as_posix()],
-                cwd=self.args.mm.parent, stdout=log, stderr=subprocess.STDOUT,
-                check=False, timeout=7200,
-            )  # fmt: skip
-        if not png.exists():
+        folder = self.work / "ours" / f"n{node}"
+        png = export(self.graph, self.into, f"n{node}", self.args.mm, folder)
+        if png is None:
             # Without the image the search cannot tell this node from a match.
-            sys.exit(f"Material Maker made no image for {src}: see {folder / 'mm.log'}")
+            sys.exit(
+                f"Material Maker made no image for n{node}: see {folder / 'mm.log'}"
+            )
         return png
 
     def matches(self, node: int) -> bool | None:
