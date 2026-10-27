@@ -219,9 +219,9 @@ def read_settings(node: Node, *, color: bool) -> Settings:
     else:
         out.seed_code = words[k] + BASE if k < len(words) else None
         k += 1
-    if k < len(words) and is_offset(words[k]):
-        out.setup_code = words[k] + BASE
-    k += 1  # the setup's code
+    if words[0] >> 16 & 3:  # a setup function; without one its slot is absent
+        out.setup_code = words[k] + BASE if k < len(words) else None
+        k += 1
     sizes = (
         ("background", 4 if color else 1),
         ("hurst", 1),
