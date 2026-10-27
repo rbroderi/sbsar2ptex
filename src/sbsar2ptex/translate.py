@@ -24,6 +24,7 @@ import math
 import re
 import struct
 from collections.abc import Iterable
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
@@ -321,6 +322,8 @@ def _rand(a: str, k: int) -> str:
 
 RAND = 0x32
 """The function bytecode op of rand."""
+SETVAR = 0x07
+"""The function bytecode op setting a variable."""
 
 
 def _seed_glsl() -> str:
@@ -331,8 +334,13 @@ def _seed_glsl() -> str:
     return "0"
 
 
-def dynamic(node: Node, offset: int) -> GLExpr:
-    """Return the value of the function block at file ``offset`` in ``node``."""
+def dynamic(node: Node, offset: int, before: Sequence[int] = ()) -> GLExpr:
+    """Return the value of the function block at file ``offset`` in ``node``.
+
+    The blocks at ``before`` (a pixel processor's parameters) run first, once
+    per node in Substance, with the node's value generator; the variables
+    they set are the block's to read.
+    """
     block = decode(node.at(offset, (node.end - offset) // 4))
     _CTX.count += 1
     prefix = f"f{_CTX.count}"
@@ -350,9 +358,35 @@ def dynamic(node: Node, offset: int) -> GLExpr:
             raise UnsupportedError(msg)
         return builtin_glsl[ident]
 
+    def param(uid: int, *_: int) -> str:
+        return _param_for(uid)
+
+    shared: dict[int, tuple[str, str]] = {}
+    first: list[str] = []
     try:
+        for at in before:
+            pre = decode(node.at(at, (node.end - at) // 4))
+            sets = [i for i in pre.instrs if i.op == SETVAR]
+            if not sets:
+                continue
+            for i in sets:
+                shared.setdefault(
+                    i.operands[1],
+                    (f"{prefix}_pv{i.operands[1]}", glsl_type(i.type, i.width)),
+                )
+            _CTX.count += 1
+            pre_lines, _ = to_glsl(
+                pre, f"f{_CTX.count}", param, builtins, None,
+                lambda a, _k: f"sbs_value_rng_next(rng, float({a}))", shared,
+            )  # fmt: skip
+            if any(i.op == RAND for i in pre.instrs):
+                pre_lines.insert(0, f"uint rng = uint({_CTX.value_seed});")
+                if VALUE_RNG_GLSL not in _CTX.globals:
+                    _CTX.globals.append(VALUE_RNG_GLSL)
+            first += ["{", *pre_lines, "}"]
+        first[:0] = [f"{t} {v} = {t}(0);" for v, t in shared.values()]
         lines, result = to_glsl(
-            block, prefix, lambda uid, *_: _param_for(uid), builtins, _sample, _rand
+            block, prefix, param, builtins, _sample, _rand, shared or None
         )
         values = {
             uid: [float(x) for x in gi.default] or [0.0]
@@ -375,7 +409,7 @@ def dynamic(node: Node, offset: int) -> GLExpr:
         lines.insert(0, f"uint rng = uint({_CTX.value_seed});")
         if VALUE_RNG_GLSL not in _CTX.globals:
             _CTX.globals.append(VALUE_RNG_GLSL)
-    body = "\n\t".join(lines)
+    body = "\n\t".join(first + lines)
     # Material Maker appends seed arguments to instance functions, so they
     # need a parameter list of their own.
     _CTX.helpers.append(
@@ -1349,9 +1383,14 @@ def _pixelprocessor(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """
     count = node.fields[0]
     names = [f"input{n or ''}" for n in range(count)]
+    params = node.code[:-1]
+    if (node.flags >> 6) & 3 == 2:  # noqa: PLR2004 (a seed function: the first block)
+        _CTX.value_seed = "0"
+        _CTX.value_seed = num(dynamic(node, params[0]))
+        params = params[1:]
     _CTX.sampled = names
     try:
-        value = dynamic(node, node.code[-1])
+        value = dynamic(node, node.code[-1], params)
     finally:
         _CTX.sampled = None
     t = "rgba" if color else "f"
