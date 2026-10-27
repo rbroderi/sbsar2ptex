@@ -17,6 +17,11 @@ follows the input that matches worst, and stops at a node whose inputs all
 match: the first node translated wrong. A color node matches when each of
 its red, green and blue channels does.
 
+Material Maker exports 8 bits. A grayscale node whose Substance image spans
+less than NARROW (1st to 99th percentile) is magnified before export,
+(v - median) * k + 0.5 with its spread filling most of the range, and
+Substance's image the same way, so that steps finer than 1/255 count.
+
 The flat graph is built once into the work folder (``--rebuild`` to redo it).
 Side-by-side images (Substance left) go to WORK/vs.
 """
@@ -44,6 +49,8 @@ from sbsar2ptex.sbsasm import Asm
 SBSRENDER = Path("C:/Program Files/Adobe/Adobe Substance 3D Designer/sbsrender.exe")
 SIDE = 512
 """Images are compared at this size."""
+NARROW = 16 / 255
+"""A grayscale image spanning less than this is compared magnified."""
 
 
 def load(path: Path, channels: int = 1) -> np.ndarray:
@@ -128,11 +135,34 @@ def cone(into: dict[str, set[str]], name: str) -> set[str]:
     return seen
 
 
+def magnifier(t: np.ndarray) -> tuple[float, float] | None:
+    """Return (center, gain) to compare a narrow grayscale image by; None if wide.
+
+    The gain spreads its 1st to 99th percentile over 0.1 to 0.9.
+    """
+    lo, mid, hi = np.quantile(t, [0.01, 0.5, 0.99])
+    reach = max(hi - mid, mid - lo)
+    if hi - lo >= NARROW or reach < 1e-6:
+        return None
+    return float(mid), float(min(0.4 / reach, 1024.0))
+
+
+def magnified(t: np.ndarray, center: float, gain: float) -> np.ndarray:
+    """Return ``t`` as the magnifying node renders it."""
+    return np.clip((t - center) * gain + 0.5, 0, 1)
+
+
 def export(
-    graph: dict, into: dict[str, set[str]], src: str, mm: Path, folder: Path
+    graph: dict,
+    into: dict[str, set[str]],
+    src: str,
+    mm: Path,
+    folder: Path,
+    magnify: tuple[float, float] | None = None,
 ) -> Path | None:
     """Export ``src`` alone (with what feeds it) as the albedo; None on failure.
 
+    ``magnify`` (center, gain) exports ``magnified`` of it instead.
     Material Maker's output goes to ``folder``/mm.log.
     """
     g = copy.deepcopy(graph)
@@ -148,8 +178,27 @@ def export(
         w for w in g["connections"]
         if w["to"] != "Material" and w["from"] in keep and w["to"] in keep
     ]  # fmt: skip
+    out = src
+    if magnify:
+        out = f"{src}_magnified"
+        c, k = magnify
+        g["nodes"].append({
+            "name": out, "type": "shader", "node_position": {"x": 0, "y": 0},
+            "parameters": {}, "seed_int": 0,
+            "shader_model": {
+                "name": out, "code": "", "global": "", "parameters": [],
+                "inputs": [{"name": "input", "type": "f", "default": "0.0",
+                            "function": True, "label": "input"}],
+                "instance": (
+                    f"float $(name)_fct(vec2 uv) {{\n  return clamp(($input(uv) - {c!r})"
+                    f" * {k!r} + 0.5, 0.0, 1.0);\n}}\n"
+                ),
+                "outputs": [{"type": "f", "f": "$(name)_fct($uv)"}],
+            },
+        })  # fmt: skip
+        g["connections"].append({"from": src, "from_port": 0, "to": out, "to_port": 0})
     g["connections"].append(
-        {"from": src, "from_port": 0, "to": "Material", "to_port": 0}
+        {"from": out, "from_port": 0, "to": "Material", "to_port": 0}
     )
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{src}.ptex"
@@ -228,10 +277,12 @@ class Search:
             )  # fmt: skip
         return out if out.exists() else None
 
-    def ours(self, node: int) -> Path | None:
+    def ours(
+        self, node: int, magnify: tuple[float, float] | None = None
+    ) -> Path | None:
         """Export ``node`` alone (with what feeds it) from Material Maker."""
-        folder = self.work / "ours" / f"n{node}"
-        png = export(self.graph, self.into, f"n{node}", self.args.mm, folder)
+        folder = self.work / "ours" / (f"n{node}" + ("_magnified" if magnify else ""))
+        png = export(self.graph, self.into, f"n{node}", self.args.mm, folder, magnify)
         if png is None:
             # Without the image the search cannot tell this node from a match.
             sys.exit(
@@ -247,13 +298,20 @@ class Search:
         if f"n{node}" in self.names:
             color = self.nodes[node].op in COLOR_OPS
             output = self.args.color_output if color else self.args.output
-            truth, ours = self.truth(node, output), self.ours(node)
+            truth = self.truth(node, output)
+            t = load(truth, 3 if color else 1) if truth else None
+            magnify = None if color or t is None else magnifier(t)
+            ours = self.ours(node, magnify)
             if truth and ours:
-                t, o = load(truth, 3 if color else 1), load(ours, 3 if color else 1)
+                o = load(ours, 3 if color else 1)
+                if magnify:
+                    t = magnified(t, *magnify)
                 result, text, self.corr[node] = (compare_color if color else compare)(
                     t, o
                 )
                 kind = OPS.get(self.nodes[node].op)
+                if magnify:
+                    kind += " (magnified {1:.0f}x about {0:.4f})".format(*magnify)
                 print(
                     f"  n{node} {kind}: {text} -> {'ok' if result else 'DIFF'}",
                     flush=True,
