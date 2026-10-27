@@ -2,7 +2,7 @@
 
     uv run python scripts/descend.py SBSAR NODE --mm PATH/TO/material_maker.exe
         [--sbsrender PATH] [--work DIR] [--size 10] [--output height]
-        [--color-output basecolor]
+        [--color-output basecolor] [--strict]
 
 NODE is a compiled node index (``sbsasm-dump`` lists them; a graph output's
 node is a good start). Each step renders a node twice: in Substance, by
@@ -15,7 +15,9 @@ spectrum (random placement that differs only by GPU float rounding, such as
 a hash of cos, moves things without changing them). From a differing node it
 follows the input that matches worst, and stops at a node whose inputs all
 match: the first node translated wrong. A color node matches when each of
-its red, green and blue channels does.
+its red, green and blue channels does. ``--strict`` turns placement off,
+for a node fed by one placed elsewhere that a later step (a narrow levels,
+a gradient lookup) magnifies: such an input can be the real difference.
 
 Material Maker exports 8 bits. A grayscale node whose Substance image spans
 less than NARROW (1st to 99th percentile) is magnified before export,
@@ -80,8 +82,13 @@ def spectrum(x: np.ndarray) -> np.ndarray:
     return np.log10(radial[1 : n // 2] + 1e-12)
 
 
-def compare(t: np.ndarray, o: np.ndarray) -> tuple[bool, str, float]:
-    """Return whether two images match, a summary, and their correlation."""
+def compare(
+    t: np.ndarray, o: np.ndarray, *, strict: bool = False
+) -> tuple[bool, str, float]:
+    """Return whether two images match, a summary, and their correlation.
+
+    ``strict``: content placed elsewhere does not match.
+    """
     flat_t, flat_o = t.std() < 1e-4, o.std() < 1e-4
     if flat_t or flat_o:
         # A flat image matches only one that is flat to within 8-bit
@@ -102,15 +109,17 @@ def compare(t: np.ndarray, o: np.ndarray) -> tuple[bool, str, float]:
     moved = gap < 12 and spec > 0.95
     text = f"corr {c:.3f} err {err:.1f} quantile gap {gap:.1f} spectrum {spec:.3f}"
     return (
-        same or moved,
+        same or (moved and not strict),
         text + (" (placed elsewhere)" if moved and not same else ""),
         c,
     )
 
 
-def compare_color(t: np.ndarray, o: np.ndarray) -> tuple[bool, str, float]:
+def compare_color(
+    t: np.ndarray, o: np.ndarray, *, strict: bool = False
+) -> tuple[bool, str, float]:
     """Return ``compare`` over the red, green and blue channels: the worst one."""
-    per = [compare(t[..., c], o[..., c]) for c in range(3)]
+    per = [compare(t[..., c], o[..., c], strict=strict) for c in range(3)]
     k = min(range(3), key=lambda c: (per[c][0], per[c][2]))
     _, text, c = per[k]
     return all(p[0] for p in per), f"{'rgb'[k]}: {text}", c
@@ -307,7 +316,7 @@ class Search:
                 if magnify:
                     t = magnified(t, *magnify)
                 result, text, self.corr[node] = (compare_color if color else compare)(
-                    t, o
+                    t, o, strict=self.args.strict
                 )
                 kind = OPS.get(self.nodes[node].op)
                 if magnify:
@@ -343,6 +352,9 @@ def main() -> None:
         "--color-output", default="basecolor", help="a color graph output"
     )
     parser.add_argument("--rebuild", action="store_true", help="rebuild the flat graph")
+    parser.add_argument(
+        "--strict", action="store_true", help="content placed elsewhere does not match"
+    )
     args = parser.parse_args()
     search = Search(args)
     n = args.node
