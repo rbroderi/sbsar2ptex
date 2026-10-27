@@ -190,11 +190,16 @@ class Search:
         path.write_text(json.dumps(g), encoding="utf-8")
         png = folder / f"{src}_albedo.png"
         png.unlink(missing_ok=True)
-        subprocess.run(
-            [str(self.args.mm), "--export", "-o", folder.as_posix(), path.as_posix()],
-            cwd=self.args.mm.parent, capture_output=True, check=False, timeout=7200,
-        )  # fmt: skip
-        return png if png.exists() else None
+        with (folder / "mm.log").open("w", encoding="utf-8", errors="replace") as log:
+            subprocess.run(
+                [str(self.args.mm), "--export", "-o", folder.as_posix(), path.as_posix()],
+                cwd=self.args.mm.parent, stdout=log, stderr=subprocess.STDOUT,
+                check=False, timeout=7200,
+            )  # fmt: skip
+        if not png.exists():
+            # Without the image the search cannot tell this node from a match.
+            sys.exit(f"Material Maker made no image for {src}: see {folder / 'mm.log'}")
+        return png
 
     def matches(self, node: int) -> bool | None:
         """Return whether ``node`` matches Substance; None if not compared."""
