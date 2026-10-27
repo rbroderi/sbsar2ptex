@@ -850,14 +850,16 @@ def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
         f"{g} hi = {vec(p['in_high'], n)};",
         f"{g} m = {vec(p['in_mid'], n)};",
         # an empty input range thresholds, strictly, on the input as Substance
-        # stored it: in 8 bits a computed 0.5 is 128/255, above a 0.5 threshold
+        # stored it: in 8 bits a computed 0.5 is 127/255, below a 0.5
+        # threshold (ties break down, as on NVIDIA, whose renders match
+        # Adobe's baked maps; an AMD GPU rounds them up)
         (
             "x = mix(clamp((x - lo) / max(hi - lo, 1e-9), 0.0, 1.0),"
-            " 1.0 - step(floor(x * 255.0 + 0.5) / 255.0, lo),"
+            " 1.0 - step(ceil(x * 255.0 - 0.5) / 255.0, lo),"
             " step(hi - lo, vec4(1e-6)));"
             if color
             else (
-                "x = hi - lo <= 1e-6 ? 1.0 - step(floor(x * 255.0 + 0.5) / 255.0, lo)"
+                "x = hi - lo <= 1e-6 ? 1.0 - step(ceil(x * 255.0 - 0.5) / 255.0, lo)"
                 " : clamp((x - lo) / (hi - lo), 0.0, 1.0);"
             )
         ),

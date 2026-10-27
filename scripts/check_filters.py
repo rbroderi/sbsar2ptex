@@ -86,13 +86,15 @@ def cases() -> list[tuple]:
                 )
                 for i, edges in enumerate(("0.5 0.5 0.5 0.5", "0 0.25 0.75 1"))
             ),
-            # A computed 0.5 (half of min(2 v, 1), from v = 0.5 up) clears a
-            # 0.5 threshold: stored in 8 bits it rounds to 128 / 255 (on
-            # Direct3D and Vulkan here; a GPU may break the tie down).
+            # A computed 0.5 (half of min(2 v, 1), from v = 0.5 up) misses a
+            # 0.5 threshold: stored in 8 bits it is 127 / 255 on NVIDIA, as
+            # in Adobe's baked maps. An AMD GPU rounds the tie up, so render
+            # on the CPU engine, which lands below the threshold everywhere.
             {
                 "tag": f"levels_step_stored_{k}",
                 "filter": "levels",
                 "kind": kind,
+                "engine": "sse2",
                 "params": (
                     ("levelinlow", F4, "0.5 0.5 0.5 0.5"),
                     ("levelinhigh", F4, "0.5 0.5 0.5 0.5"),
@@ -703,7 +705,7 @@ def case(c: tuple | dict) -> dict:
 
     Keys: tag, filter, kind, params, arrays, format16, floats (graph float
     inputs and defaults) and set (input values to render with, in both
-    Substance and Material Maker).
+    Substance and Material Maker); optionally engine (sbsrender's).
     """
     if isinstance(c, dict):
         return {"arrays": "", "format16": False, "floats": {}, "set": {}, **c}
@@ -764,6 +766,7 @@ def main() -> None:
                 "--set-entry", f"input_c@{images['c']}",
                 "--set-value", f"$outputsize@{SIZE},{SIZE}",
                 *(a for k, v in c["set"].items() for a in ("--set-value", f"{k}@{v}")),
+                *(("--engine", c["engine"]) if "engine" in c else ()),
                 "--output-path", str(out), "--output-name", f"ref_{tag}",
                 "--output-bit-depth", "16", "--no-report",
             ],
