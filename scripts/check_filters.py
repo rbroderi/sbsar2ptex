@@ -245,8 +245,19 @@ def function_cases() -> list[dict]:
     )  # fmt: skip
     hue = (("hue", "dynamicValue", dyn(pa)),)
     blur = (("intensity", "dynamicValue", dyn(fn("mul", a=pa, b=const(8.0)))),)
+    # distinct components, so a gray uniform shows which one it takes
+    rg = fn(
+        "vector2", FLOAT2, componentsin=pa, componentslast=fn("mul", a=pb, b=const(0.6))
+    )
+    rgb = fn("vector3", FLOAT3, componentsin=rg, componentslast=const(0.2))
+    color = (
+        ("outputcolor", "dynamicValue",
+         dyn(fn("vector4", FLOAT4, componentsin=rgb, componentslast=const(0.9)))),
+    )  # fmt: skip
     out = []
     for tag, filt, kind, params, values in (
+        ("fn_uniform", "uniform", GRAY, color, {"pa": 0.8}),
+        ("fn_uniform_c", "uniform", COLOR, color, {"pa": 0.8, "pb": 0.1}),
         ("fn_levels", "levels", GRAY, levels, {"pa": 0.4}),
         ("fn_blend", "blend", GRAY, opacity, {"pa": 1.2}),
         ("fn_transform", "transformation", GRAY, offset, {"pa": 0.1, "pb": 0.9}),

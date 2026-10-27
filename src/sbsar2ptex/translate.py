@@ -821,7 +821,15 @@ Made = tuple[dict[str, Any], list[str]] | Sub
 
 
 def _uniform(node: Node, name: str, *, color: bool, size: int) -> Made:
-    vals = [f32(w) for w in node.inline]  # none: the default, opaque black
+    # The value's state is node word bits 24-25: 0 none (the default, opaque
+    # black), 1 inline, 2 a function, its inline word the block's offset.
+    if (node.flags >> 8) & 3 == 2:  # noqa: PLR2004
+        offset, _ = _dynamic_offset(node, node.inline, 0)
+        value = dynamic(node, offset)
+        if color:
+            return shader(name, [], "rgba", f"return {vec(value, 4)};"), []
+        return shader(name, [], "f", f"return {vec(value, 1)};"), []
+    vals = [f32(w) for w in node.inline]
     if color:
         c = knob("color", "Color", vals[:4] or [0.0, 0.0, 0.0, 1.0])
         return shader(name, [], "rgba", f"return {vec(c)};"), []
