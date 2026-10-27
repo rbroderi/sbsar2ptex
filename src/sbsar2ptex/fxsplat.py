@@ -49,6 +49,10 @@ class TooBig(Exception):  # noqa: N818
     """The tree draws more splats than MAX_SPLATS."""
 
 
+class RegionError(Exception):
+    """A render or tiling region the splats cannot follow."""
+
+
 @dataclass
 class Splat:
     """One pattern as drawn: where, how big, how turned, which, how strong."""
@@ -127,6 +131,15 @@ def splats(
     if settings.setup_code is not None:
         n_px = [n, n]
         run(settings.setup_code, 0, "frameoffset", {1: n_px, 3: [float(size)] * 2})
+    rois = []
+    for roi in (settings.render_roi, settings.tiling_roi):
+        if isinstance(roi, int):  # a function, of the setup's variables
+            roi = [float(v) for v in run(roi, 0, "frameoffset", {})]  # noqa: PLW2901
+        rois.append(roi)
+    render, tiling = rois
+    if tiling is not None and tiling != (render or [0.0, 1.0, 0.0, 1.0]):
+        msg = f"FX-Map tiling region {tiling} is not its render region {render}"
+        raise RegionError(msg)
     out: list[Splat] = []
 
     def enter(
@@ -206,6 +219,16 @@ def splats(
             enter(t.if_true if value else t.if_false, e, pos, cell, depth, number)
 
     enter(tree, root & UINT32_MASK, (0.5, 0.5), 1.0, 0, 0.0)
+    if render is not None:  # the region drawn fills the image
+        x0, x1, y0, y1 = render
+        w, h = x1 - x0, y1 - y0
+        if w != h and any(s.angle % math.pi for s in out):
+            # stretching a turned pattern shears it: no splat can draw that
+            msg = f"FX-Map render region {render} stretches turned patterns"
+            raise RegionError(msg)
+        for s in out:
+            s.x, s.y = (s.x - x0) / w, (s.y - y0) / h
+            s.hx, s.hy = s.hx / w, s.hy / h
     return out
 
 

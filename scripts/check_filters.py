@@ -422,6 +422,14 @@ def fxmap_cases() -> list[dict]:
         for tag, root in rand_trees
         for seed in (0, 7)
     ]  # fmt: skip
+    # A render region, x0 x1 y0 y1 of pattern space, fills the image (and
+    # wraps, as its tiling region): Biomech's grid FX-Maps draw -3 to 4.
+    roi = "-0.5 1.5 -0.25 1.75"
+    out.append(
+        {"tag": "fx_roi_g", "filter": "fxmaps", "kind": GRAY,
+         "params": (("renderroi", F4, roi), ("tilingroi", F4, roi)),
+         "extra": fxmap_graph(many), "connect": 0, "format16": True}
+    )  # fmt: skip
     # Functions sharing a variable and sampling the input: recorded.
     x = get("x")
     step = fn(

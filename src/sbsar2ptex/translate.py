@@ -1779,6 +1779,8 @@ def _fx_splats(
     }
     try:
         spl = fxsplat.splats(node, tree, st, defaults, color=color, size=size)
+    except fxsplat.RegionError as e:
+        raise UnsupportedError(str(e)) from e
     except Exception as e:
         if fxsplat.evaluable(e):
             return None
@@ -1907,6 +1909,12 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     stateful = fxsplat.stateful(node, tree, st)
     reaches = {} if stateful else _fx_reach(node, tree, size)
     splats = _fx_splats(node, tree, st, color=color, size=size)
+    if splats is None and any(
+        roi not in (None, [0.0, 1.0, 0.0, 1.0])
+        for roi in (st.render_roi, st.tiling_roi)
+    ):
+        msg = "an FX-Map's render or tiling region, drawn per pixel"
+        raise UnsupportedError(msg)
     recording = stateful and splats is None
 
     def emit(tree: fxmap.Tree | None) -> str | None:

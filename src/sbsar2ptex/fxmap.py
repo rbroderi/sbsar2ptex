@@ -190,6 +190,11 @@ class Settings:
     """A function run before the tree (its output size's, in a plain FX-Map):
     library FX-Maps set variables there (regions from $outputsize) that the
     tree's functions read."""
+    render_roi: list[float] | int | None = None
+    """The region of pattern space drawn into the image, x0 x1 y0 y1: inline
+    values, or its function's code (file offset). None: the image, 0 1 0 1."""
+    tiling_roi: list[float] | int | None = None
+    """The region that wraps, the same way."""
 
 
 def _float(w: int) -> float:
@@ -217,15 +222,24 @@ def read_settings(node: Node, *, color: bool) -> Settings:
     if k < len(words) and is_offset(words[k]):
         out.setup_code = words[k] + BASE
     k += 1  # the setup's code
-    sizes = (("background", 4 if color else 1), ("hurst", 1), ("opacity", 1))
+    sizes = (
+        ("background", 4 if color else 1),
+        ("hurst", 1),
+        ("opacity", 1),
+        ("render_roi", 4),
+        ("tiling_roi", 4),
+    )
     for n, (name, size) in enumerate(sizes):
         state = states >> 2 * n & 3
         if state == INLINE:
             vals = [_float(w) for w in words[k : k + size]]
-            setattr(out, name, vals if name == "background" else vals[0])
+            setattr(out, name, vals if size > 1 else vals[0])
             k += size
         elif state == INPUT and name == "background":
             out.background = words[k]
+            k += 1
+        elif state == CODE and name.endswith("_roi"):
+            setattr(out, name, words[k] + BASE)
             k += 1
         elif state:
             k += 1  # a function: left at its default
