@@ -2366,6 +2366,61 @@ TRANSLATORS = {
 """Each op's translator: (node, MM node name, *, color, size log2) -> Made."""
 
 
+def _bspline(name: str, size: int, t: str) -> dict[str, Any]:
+    """Return a shader reading its input through a cubic B-spline.
+
+    The input is a buffer ``size`` in log2 pixels; four linear fetches, each
+    placed between two texels so that it weighs them as the spline does.
+    """
+    n = num(float(1 << size))
+    g = "vec4" if t == "rgba" else "float"
+    lines = [
+        f"vec2 p = uv * {n} - 0.5;",
+        "vec2 i = floor(p);",
+        "vec2 f = p - i;",
+        "vec2 w0 = (1.0 - f) * (1.0 - f) * (1.0 - f) / 6.0;",
+        "vec2 w1 = (4.0 - 6.0 * f * f + 3.0 * f * f * f) / 6.0;",
+        "vec2 w3 = f * f * f / 6.0;",
+        "vec2 w2 = 1.0 - w0 - w1 - w3;",
+        "vec2 g0 = w0 + w1;",
+        "vec2 g1 = w2 + w3;",
+        f"vec2 h0 = (i - 1.0 + w1 / g0 + 0.5) / {n};",
+        f"vec2 h1 = (i + 1.0 + w3 / g1 + 0.5) / {n};",
+        f"{g} a = $input(fract(h0)), b = $input(fract(vec2(h1.x, h0.y)));",
+        f"{g} c = $input(fract(vec2(h0.x, h1.y))), d = $input(fract(h1));",
+        "return g0.y * (g0.x * a + g1.x * b) + g1.y * (g0.x * c + g1.x * d);",
+    ]
+    return shader(name, [("input", t)], t, "\n".join(lines))
+
+
+def _output_size(node: Node, size: int) -> int:
+    """Return ``node``'s output size (log2), ``size`` unless its function says.
+
+    The size function is the node's first code block, or the block its first
+    inline word points at (node_shader drops that word); a gradient's or a
+    curve's first block is its data instead. Square sizes only, one pixel
+    at least.
+    """
+    if node.op in (0, 1, 44, 45):
+        return size
+    offsets = list(node.code[:1])
+    if not offsets and node.inline and node.start < node.inline[0] + BASE < node.end:
+        offsets = [node.inline[0] + BASE]
+    defaults = {
+        uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
+    }
+    builtins = {1: [float(1 << size)] * 2, 3: [float(size)] * 2}
+    for off in offsets:
+        try:
+            block = decode(node.at(off, (node.end - off) // 4))
+            v = evaluate(block, defaults, builtins, lambda a: a / 2, {})
+        except (FunctionError, KeyError, IndexError):
+            return size
+        if len(v) == 2 and v[0] == v[1] and float(v[0]).is_integer():  # noqa: PLR2004
+            return max(int(v[0]), 0)  # one pixel at least
+    return size
+
+
 def node_shader(node: Node, name: str, size: int = 11) -> Made:
     """Return the shader node for ``node`` and its input names, in port order."""
     translate = TRANSLATORS.get(node.op)
@@ -2453,6 +2508,40 @@ def translate_graph(
     mm: list[dict[str, Any]] = []
     wires: list[dict[str, Any]] = []
     out_of: dict[int, str] = {}
+    # A node's own output size: a smaller one is rendered into a buffer that
+    # size, which larger nodes read through a cubic B-spline (Substance's
+    # enlargement; bilinear leaves its texels' corners).
+    sizes = {k: _output_size(nodes[k], size) for k in need}
+    levels: dict[tuple[int, int], str] = {}
+    smooth: dict[int, str] = {}
+
+    def fed(m: int, own: int) -> str:
+        """Return input ``m`` as a node ``own`` in size reads it.
+
+        Smaller, it is enlarged (_bspline). Larger, it is averaged down: each
+        halving buffer samples the one above at its texels' shared corners,
+        so linear filtering averages them two by two (a mipmap).
+        """
+        if sizes[m] < own:
+            if m not in smooth:
+                smooth[m] = f"n{m}_smooth"
+                t = "rgba" if nodes[m].op in COLOR_OPS else "f"
+                mm.append(_bspline(smooth[m], sizes[m], t))
+                wires.append(wire(out_of[m], smooth[m]))
+            return smooth[m]
+        if sizes[m] == own:
+            return out_of[m]
+        src = out_of[m]
+        # the top level is the input itself, rendered (once) at its size
+        top = sizes[m] if sizes[m] == size else sizes[m] - 1
+        for s in range(top, own - 1, -1):
+            if (m, s) not in levels:
+                levels[m, s] = f"n{m}_level{s}"
+                mm.append(buffer(levels[m, s], s))
+                wires.append(wire(src, levels[m, s]))
+            src = levels[m, s]
+        return src
+
     for k in sorted(need):
         node = nodes[k]
         name = f"n{k}"
@@ -2473,18 +2562,23 @@ def translate_graph(
             if origins is not None:
                 origins[name] = k
             continue
-        made = node_shader(node, name, size)
+        own = sizes[k]
+        made = node_shader(node, name, own)
         if not isinstance(made, Sub):
             shader_node, names = made
             made = Sub(
                 [shader_node], [], [(n, name, i) for i, n in enumerate(names)], name
             )
+        if own != size:
+            made.nodes.append(buffer(f"{name}_size", own))
+            made.wires.append(wire(made.output, f"{name}_size"))
+            made.output = f"{name}_size"
         mm += made.nodes
         if origins is not None:
             origins.update((n["name"], k) for n in made.nodes)
         wires += made.wires
         wires += [
-            wire(out_of[node.inputs[inp]], to, port) for inp, to, port in made.ports
+            wire(fed(node.inputs[inp], own), to, port) for inp, to, port in made.ports
         ]
         out_of[k] = made.output
     mm, wires = merge_buffers(mm, wires)

@@ -309,7 +309,35 @@ def function_cases() -> list[dict]:
             "floats": floats,
         }
     )
-    return out + pixel_cases() + distance_cases() + fxmap_cases()
+    return out + pixel_cases() + distance_cases() + fxmap_cases() + size_cases()
+
+
+def size_cases() -> list[dict]:
+    """Return cases with a node smaller than the graph, read back at full size.
+
+    Input A reaches an identity transformation the graph's size through a
+    node (pre) smaller than the graph by a relative output size (relativeTo
+    1: to the parent; 2 would be to the input): rendered from A averaged
+    down (a mipmap), then read bilinearly. 16-bit: in 8 bits each halving
+    is stored truncated, which darkens a deep one (not emulated).
+    """
+
+    def outputsize(rel: int) -> str:
+        return (
+            '<parameter><name v="outputsize"/><relativeTo v="1"/><paramValue>'
+            f'<constantValueInt2 v="{rel} {rel}"/></paramValue></parameter>'
+        )
+
+    full = (
+        ("offset", "constantValueFloat2", "0 0"),
+        ("outputsize", "constantValueInt2", "0 0", "1"),  # the parent's size
+    )
+    return [
+        {"tag": f"size_{pre}{-rel}_g", "filter": "transformation", "kind": GRAY,
+         "params": full, "chain": (pre, outputsize(rel)), "format16": True}
+        # deep enough that averaging, not point sampling, shows on test images
+        for pre, rel in (("transformation", -6), ("transformation", -11), ("levels", -5))
+    ]  # fmt: skip
 
 
 def fxmap_cases() -> list[dict]:
