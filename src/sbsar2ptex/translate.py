@@ -2378,6 +2378,11 @@ def translate_graph(
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
     _CTX = _Context(size=size, inputs=dict(inputs or {}), data_dir=data_dir)
+    # Functions reading $outputsize see the size the graph renders at, not
+    # the archive's default for it.
+    for uid, gi in _CTX.inputs.items():
+        if gi.identifier == "$outputsize":
+            _CTX.inputs[uid] = replace(gi, default=[size, size])
     need: set[int] = set()
     todo = list(outputs.values())
     while todo:

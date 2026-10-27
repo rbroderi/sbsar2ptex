@@ -17,6 +17,7 @@ from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import _distance
 from sbsar2ptex.translate import _gradient_keys
+from sbsar2ptex.translate import graph_inputs
 from sbsar2ptex.translate import translate_graph
 
 DATA = Path(__file__).parent / "data"
@@ -32,6 +33,26 @@ def translated(name: str):
         {"output": asm.output_nodes[0][1]},
         {u: f"{u}.png" for u in uids},
     )
+
+
+def test_outputsize_is_the_render_size() -> None:
+    # A function reading $outputsize sees the size the graph renders at, not
+    # the archive's default for it (8 here).
+    files = read_archive(DATA / "pp_reads_outputsize.sbsar")
+    asm = Asm(member(files, ".sbsasm"))
+    inputs = graph_inputs(asm, member(files, ".xml").decode("utf-8"))
+    assert [gi.default for gi in inputs.values() if gi.identifier == "$outputsize"] == [
+        [8, 8]
+    ]
+    xml = member(files, ".xml").decode("utf-8")
+    images = {
+        int(u): f"{u}.png" for u in re.findall(r'uid="(\d+)" identifier="input_', xml)
+    }
+    nodes, _, _ = translate_graph(
+        asm.nodes(), {"output": asm.output_nodes[0][1]}, images, size=10, inputs=inputs
+    )
+    params = {k: v for n in nodes for k, v in n.get("parameters", {}).items()}
+    assert params["p_outputsize_x"] == params["p_outputsize_y"] == 10
 
 
 def test_uniform_color() -> None:
