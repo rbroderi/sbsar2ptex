@@ -77,7 +77,11 @@ def compare(t: np.ndarray, o: np.ndarray) -> tuple[bool, str, float]:
     """Return whether two images match, a summary, and their correlation."""
     flat_t, flat_o = t.std() < 1e-4, o.std() < 1e-4
     if flat_t or flat_o:
-        c = 1.0 if abs(t.mean() - o.mean()) < 0.02 else 0.0
+        # A flat image matches only one that is flat to within 8-bit
+        # rounding: a sparse mask (a few pixels off a constant) moves the
+        # mean too little to tell.
+        flat = max(t.std(), o.std()) < 1 / 255
+        c = 1.0 if flat and abs(t.mean() - o.mean()) < 0.02 else 0.0
     else:
         c = float(np.corrcoef(t.ravel(), o.ravel())[0, 1])
     err = float(np.abs(t - o).mean()) * 255
