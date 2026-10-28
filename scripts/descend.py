@@ -2,7 +2,7 @@
 
     uv run python scripts/descend.py SBSAR NODE --mm PATH/TO/material_maker.exe
         [--sbsrender PATH] [--work DIR] [--size 10] [--strict]
-        [--bisect [PROBES]] [--pin NODES]
+        [--bisect [PROBES]] [--pin NODES] [--exact]
 
 NODE is a compiled node index (``sbsasm-dump`` lists them; a graph output's
 node is a good start). A node is rendered twice: in Substance, by
@@ -34,6 +34,11 @@ it ends on.
 for one known to differ for reasons no translation can fix (Biomech's n17
 hashes with cos, which Substance's own engines round differently): the
 nodes it feeds are then compared from the same input.
+
+``--exact`` (strict) matches only images the same in EXACT of their pixels,
+in 8 bits, unmagnified: for a loop of thresholds (Biomech's reaction
+diffusion), where a sub-step difference in a few pixels is what later
+flips whole regions, so the first such difference is the one to find.
 
 Material Maker exports 8 bits. A grayscale node whose Substance image spans
 less than NARROW (1st to 99th percentile) is magnified before export,
@@ -77,6 +82,8 @@ NARROW = 16 / 255
 """A grayscale image spanning less than this is compared magnified."""
 MAX_EXPORTS = 40
 """Graphs one Material Maker run exports (its command line has a limit)."""
+EXACT = 0.999
+"""Share of pixels (8-bit) two images must agree in to match, with --exact."""
 
 
 def load(path: Path, channels: int = 1) -> np.ndarray:
@@ -107,12 +114,23 @@ def spectrum(x: np.ndarray) -> np.ndarray:
 
 
 def compare(
-    t: np.ndarray, o: np.ndarray, *, strict: bool = False
+    t: np.ndarray, o: np.ndarray, *, strict: bool = False, exact: bool = False
 ) -> tuple[bool, str, float]:
     """Return whether two images match, a summary, and their correlation.
 
-    ``strict``: content placed elsewhere does not match.
+    ``strict``: content placed elsewhere does not match; ``exact``: only
+    images the same in at least EXACT of their pixels (8-bit) match.
     """
+    identical = float((np.abs(t - o) <= 0.5 / 255).mean())
+    if exact:
+        c = (
+            float(np.corrcoef(t.ravel(), o.ravel())[0, 1])
+            if t.std() and o.std()
+            else 1.0
+        )
+        err = float(np.abs(t - o).mean()) * 255
+        text = f"identical {identical:.2%} corr {c:.3f} err {err:.2f}"
+        return identical >= EXACT, text, c
     flat_t, flat_o = t.std() < 1e-4, o.std() < 1e-4
     if flat_t or flat_o:
         # A flat image matches only one that is flat to within 8-bit
@@ -131,7 +149,10 @@ def compare(
         spec = float(np.corrcoef(spectrum(t), spectrum(o))[0, 1])
     same = c > 0.97 and err < 6
     moved = gap < 12 and spec > 0.95
-    text = f"corr {c:.3f} err {err:.1f} quantile gap {gap:.1f} spectrum {spec:.3f}"
+    text = (
+        f"corr {c:.3f} err {err:.1f} quantile gap {gap:.1f} spectrum {spec:.3f}"
+        f" identical {identical:.1%}"
+    )
     return (
         same or (moved and not strict),
         text + (" (placed elsewhere)" if moved and not same else ""),
@@ -140,11 +161,11 @@ def compare(
 
 
 def compare_color(
-    t: np.ndarray, o: np.ndarray, *, strict: bool = False
+    t: np.ndarray, o: np.ndarray, *, strict: bool = False, exact: bool = False
 ) -> tuple[bool, str, float]:
     """Return ``compare`` over the channels (red, green, blue[, alpha]): the worst."""
     n = t.shape[-1]
-    per = [compare(t[..., c], o[..., c], strict=strict) for c in range(n)]
+    per = [compare(t[..., c], o[..., c], strict=strict, exact=exact) for c in range(n)]
     k = min(range(n), key=lambda c: (per[c][0], per[c][2]))
     _, text, c = per[k]
     return all(p[0] for p in per), f"{'rgba'[k]}: {text}", c
@@ -496,7 +517,7 @@ class Search:
                 self.memo[n, alpha] = None
                 continue
             t = load(truth[n], 4 if alpha else 3 if color else 1)
-            magnify = None if color else magnifier(t)
+            magnify = None if color or self.args.exact else magnifier(t)
             jobs[n, alpha] = t, magnify
             stems = [f"n{n}_magnified" if magnify else f"n{n}"]
             stems += [f"n{n}_alpha"] if alpha else []
@@ -538,7 +559,7 @@ class Search:
         if magnify:
             t = magnified(t, *magnify)
         result, text, self.corr[node] = (compare_color if color else compare)(
-            t, o, strict=self.args.strict
+            t, o, strict=self.args.strict, exact=self.args.exact
         )
         kind = OPS.get(self.nodes[node].op)
         if magnify:
@@ -641,6 +662,10 @@ def main() -> None:
         "--strict", action="store_true", help="content placed elsewhere does not match"
     )
     parser.add_argument(
+        "--exact", action="store_true",
+        help=f"only images the same in {EXACT:.1%} of pixels match (implies --strict)",
+    )  # fmt: skip
+    parser.add_argument(
         "--bisect", type=int, nargs="?", const=3, default=0, metavar="PROBES",
         help="bisect paths, PROBES nodes a round (3; implies --strict)",
     )  # fmt: skip
@@ -649,7 +674,7 @@ def main() -> None:
         help="nodes (comma-separated) to give Substance's render of (see Search.pin)",
     )  # fmt: skip
     args = parser.parse_args()
-    args.strict = args.strict or bool(args.bisect)
+    args.strict = args.strict or bool(args.bisect) or args.exact
     search = Search(args)
     start = (args.node, False)
     first = search.check([start])[start]
