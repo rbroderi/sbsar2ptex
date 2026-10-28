@@ -12,15 +12,24 @@ Matching walks back from a candidate root: ops must be equal (image type
 included), and so the named inputs, recursively; a template's graph inputs
 match any node (consistently). FX-Maps compare their trees' shapes and
 pixel processors their functions' ops, not values: instances differ in
-parameters, which cooking folds into constants. A template with fewer than
-MIN_NODES nodes is too common to mean anything. ``resembler`` names what
-no template matches exactly after the template it most resembles.
+parameters, which cooking folds into constants. Cooking also drops a blend
+whose opacity the author left constant at 0 or 1: library graphs choose a
+quality, a mode, a blade count with such switches, their opacity a function
+of the parameter in the template. So matching may skip a template blend
+whose opacity is a function, to the input it would pass on; the author's
+choice was constant, so no knob is lost. A match folded below MIN_SHARE of
+its template is not evidence of it, and of overlapping matches the one
+with the most nodes matched, less half those skipped, wins. A template with
+fewer than MIN_NODES nodes is too common to mean anything. ``resembler``
+names what no template matches after the template it most resembles.
 """
 
 import math
+import os
 import re
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -29,12 +38,25 @@ from sbsar2ptex import fxmap
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.function import decode
+from sbsar2ptex.sbsasm import BLEND_OPACITY
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
 
 MIN_NODES = 3
+MIN_SHARE = 0.45
+"""Least share of its template a match must keep (the rest skipped switches)."""
+BUDGET = (40, 500)
+"""Walk steps a match may take: so many per template node, and more
+(skipping a switch backtracks; a match that fails late is costly)."""
+PARALLEL_FROM = 64
+"""Fewer templates than this are tried in this process."""
+SKIP_DEPTH = 4
+"""How many switches deep an instance's root may sit in its template."""
 FXMAP_OPS = (8, 9)
 INPUT_OPS = (32, 33)
+BLEND_OPS = (2, 3)
+FUNCTION_OPACITY = 0x20
+"""A blend's opacity state (BLEND_OPACITY bits): a function."""
 
 
 @dataclass
@@ -134,66 +156,168 @@ def templates(sbsar: Path) -> list[Template]:
     return out
 
 
+class _OverBudgetError(Exception):
+    """A match took more than BUDGET steps."""
+
+
+def skippable(node: Node) -> tuple[str, ...]:
+    """Return the inputs a template node may be skipped to (a switch blend)."""
+    if (
+        node.op in BLEND_OPS
+        and node.fields
+        and node.fields[0] & BLEND_OPACITY == FUNCTION_OPACITY
+    ):
+        return tuple(k for k in ("destination", "source") if k in node.inputs)
+    return ()
+
+
 def match_at(t: Template, nodes: list[Node], root: int, shapes: dict) -> Match | None:
-    """Return the template's instance rooted at graph node ``root``, if any."""
+    """Return the template's instance rooted at graph node ``root``, if any.
+
+    Template switch blends may be skipped (``skippable``); a match that
+    takes more than BUDGET steps is given up.
+    """
     members: dict[int, int] = {}
     inputs: dict[int, int] = {}
+    used: set[int] = set()
+    trail: list[tuple[bool, int]] = []  # (a member, not an input; template node)
+    steps = 0
 
-    def shape(ns: list[Node], k: int, cache: dict) -> tuple:
+    def shape(ns: list[Node], k: int) -> tuple:
+        cache = shapes.setdefault(id(ns), {})
         if k not in cache:
             cache[k] = _shape(ns[k])
         return cache[k]
 
+    def undo(mark: int) -> None:
+        while len(trail) > mark:
+            is_member, k = trail.pop()
+            if is_member:
+                used.discard(members.pop(k))
+            else:
+                inputs.pop(k)
+
+    limit = BUDGET[0] * len(t.nodes) + BUDGET[1]
+
     def walk(tk: int, gk: int) -> bool:  # noqa: PLR0911
+        nonlocal steps
+        steps += 1
+        if steps > limit:
+            raise _OverBudgetError
         tn = t.nodes[tk]
         if tn.op in INPUT_OPS:
             if tk in inputs:
                 return inputs[tk] == gk
             inputs[tk] = gk
+            trail.append((False, tk))
             return True
         if tk in members:
             return members[tk] == gk
         if not 0 <= gk < len(nodes):
             return False
-        if shape(t.nodes, tk, shapes.setdefault(id(t.nodes), {})) != shape(
-            nodes, gk, shapes.setdefault(id(nodes), {})
-        ):
-            return False
-        if gk in members.values():
-            return False
-        members[tk] = gk
-        gn = nodes[gk]
-        return all(walk(tn.inputs[name], gn.inputs[name]) for name in tn.inputs)
+        mark = len(trail)
+        if gk not in used and shape(t.nodes, tk) == shape(nodes, gk):
+            members[tk] = gk
+            used.add(gk)
+            trail.append((True, tk))
+            gn = nodes[gk]
+            if all(walk(tn.inputs[name], gn.inputs[name]) for name in tn.inputs):
+                return True
+            undo(mark)
+        for name in skippable(tn):
+            if walk(tn.inputs[name], gk):
+                return True
+            undo(mark)
+        return False
 
-    if walk(t.root, root):
-        return Match(t, root, members, inputs)
-    return None
+    try:
+        found = walk(t.root, root)
+    except _OverBudgetError:
+        return None
+    return Match(t, root, members, inputs) if found else None
 
 
-def recognize(nodes: list[Node], library: list[Template]) -> list[Match]:
-    """Return library instances in ``nodes``: the biggest first, not overlapping.
+def heads(t: Template, k: int, depth: int = 0) -> list[int]:
+    """Return the template nodes an instance's root can match: ``k``, or a switch's."""
+    out = [k]
+    if depth < SKIP_DEPTH:
+        for name in skippable(t.nodes[k]):
+            child = t.nodes[k].inputs[name]
+            if t.nodes[child].op not in INPUT_OPS:
+                out += heads(t, child, depth + 1)
+    return out
 
-    An instance's inner nodes (all but its root) must not feed nodes outside
-    it, or it is not one node's insides.
+
+def score(m: Match) -> float:
+    """Return a match's weight: nodes matched, less half those it skipped.
+
+    A big template skipped down to a fragment loses to a small one matched
+    whole.
     """
+    return len(m.members) - 0.5 * (len(m.template.members) - len(m.members))
+
+
+_WORK: tuple[list[Node], list[Template]] = ([], [])
+"""A worker's graph and library (set once per process)."""
+
+
+def _start_worker(nodes: list[Node], library: list[Template]) -> None:
+    global _WORK  # noqa: PLW0603 (one graph a worker)
+    _WORK = (nodes, library)
+
+
+def _found_by(which: list[int]) -> list[tuple[int, int, dict, dict]]:
+    """Return the instances of library templates ``which`` (indices) in the graph.
+
+    As (template index, root, members, inputs): an instance's inner nodes
+    (all but its root) must not feed nodes outside it, or it is not one
+    node's insides.
+    """
+    nodes, library = _WORK
     users: dict[int, set[int]] = {}
     for n in nodes:
         for v in n.inputs.values():
             users.setdefault(v, set()).add(n.index)
-    by_root: dict[tuple, list[Template]] = {}
-    for t in library:
-        by_root.setdefault(_shape(t.nodes[t.root]), []).append(t)
+    by_root: dict[tuple, list[int]] = {}
+    for i in which:
+        t = library[i]
+        for key in {_shape(t.nodes[h]) for h in heads(t, t.root)}:
+            by_root.setdefault(key, []).append(i)
     shapes: dict = {}
-    found: list[Match] = []
+    found = []
     for n in nodes:
-        for t in by_root.get(_shape(n), []):
+        for i in by_root.get(_shape(n), []):
+            t = library[i]
             m = match_at(t, nodes, n.index, shapes)
-            if m is None:
+            if m is None or len(m.members) < max(MIN_NODES, MIN_SHARE * len(t.members)):
                 continue
-            inner = set(m.members.values()) - {m.root}
-            if all(users.get(k, set()) <= set(m.members.values()) for k in inner):
-                found.append(m)
-    found.sort(key=lambda m: -len(m.members))
+            mine = set(m.members.values())
+            if all(users.get(k, set()) <= mine for k in mine - {m.root}):
+                found.append((i, m.root, m.members, m.inputs))
+    return found
+
+
+def recognize(
+    nodes: list[Node], library: list[Template], jobs: int | None = None
+) -> list[Match]:
+    """Return library instances in ``nodes``: the weightiest first, not overlapping.
+
+    Templates are tried in ``jobs`` processes (all the CPU's by default; one
+    for a small library).
+    """
+    jobs = jobs or os.cpu_count() or 1
+    if jobs == 1 or len(library) < PARALLEL_FROM:
+        _start_worker(nodes, library)
+        raw = _found_by(list(range(len(library))))
+    else:
+        chunks = [list(range(k, len(library), jobs)) for k in range(jobs)]
+        with ProcessPoolExecutor(
+            jobs, initializer=_start_worker, initargs=(nodes, library)
+        ) as pool:
+            raw = [m for part in pool.map(_found_by, chunks) for m in part]
+    found = [Match(library[i], root, members, ins) for i, root, members, ins in raw]
+    # Ties: the smaller template, then a published graph over a helper.
+    found.sort(key=lambda m: (-score(m), len(m.template.members), not m.template.label))
     taken: set[int] = set()
     kept = []
     for m in found:

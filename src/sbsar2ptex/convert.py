@@ -508,7 +508,13 @@ def procedural_main(
             print("no Substance library to name nodes by (no Designer found)")
     try:
         made = procedural.build(
-            files, graph, data, size=args.size, library=templates, flat=args.flat
+            files,
+            graph,
+            data,
+            size=args.size,
+            library=templates,
+            flat=args.flat,
+            matches=(args.library or library.cache_dir()) / "matches",
         )
     except ValueError as e:  # bytecode this decoder cannot read
         sys.exit(f"{args.sbsar}: {e}")

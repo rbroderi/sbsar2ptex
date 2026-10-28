@@ -20,8 +20,8 @@ from sbsar2ptex.archive import member
 from sbsar2ptex.convert import SLOTS
 from sbsar2ptex.convert import Graph
 from sbsar2ptex.convert import choose
+from sbsar2ptex.library import recognized
 from sbsar2ptex.recognize import Template
-from sbsar2ptex.recognize import recognize
 from sbsar2ptex.recognize import resembler
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import Asm
@@ -107,13 +107,15 @@ def build(
     library: list[Template] | None = None,
     flat: bool = False,
     aliases: dict[str, str] | None = None,
+    matches: Path | None = None,
 ) -> dict[str, Any]:
     """Return the Material Maker graph translating ``graph``.
 
     ``files`` is the archive's contents; ``data`` the folder for files the
     graph uses; ``library`` the templates for naming library nodes (none:
     groups are named by content); ``flat``: no subgraphs; ``aliases`` is
-    filled as translate_graph fills it.
+    filled as translate_graph fills it; ``matches`` a folder keeping the
+    library nodes found (library.recognized).
     """
     xml = member(files, ".xml").decode("utf-8")
     asm = Asm(member(files, ".sbsasm"))
@@ -137,7 +139,11 @@ def build(
         aliases=aliases,
     )
     if not flat:
-        found = recognize(nodes, library) if library else []
+        found = (
+            recognized(member(files, ".sbsasm"), nodes, library, matches)
+            if library
+            else []
+        )
         instances = [
             (list(m.members.values()), m.template.label or m.template.graph)
             for m in found

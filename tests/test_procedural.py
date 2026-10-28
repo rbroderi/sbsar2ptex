@@ -45,6 +45,21 @@ def test_library_cooked_another_way_is_cooked_again(tmp_path) -> None:
     assert not (tmp_path / library.FAILED).exists()
 
 
+def test_matches_are_kept_per_graph_and_library(tmp_path, monkeypatch) -> None:
+    calls = []
+
+    def recognize(nodes, lib):
+        calls.append(nodes)
+        return []
+
+    monkeypatch.setattr(library, "recognize", recognize)
+    assert library.recognized(b"graph", [], [], tmp_path) == []
+    assert library.recognized(b"graph", [], [], tmp_path) == []
+    assert len(calls) == 1  # the second from the cache
+    library.recognized(b"another graph", [], [], tmp_path)
+    assert len(calls) == 2
+
+
 def test_excluded_graphs_are_published() -> None:
     hidden = (
         '<graph><identifier v="old"/><graphOutputs><graphoutput><identifier v="o"/>'

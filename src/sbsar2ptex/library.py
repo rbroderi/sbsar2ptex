@@ -11,6 +11,7 @@ XDG_CACHE_HOME (or ~/.cache)/sbsar2ptex/library; ``--library`` picks
 another.
 """
 
+import hashlib
 import os
 import pickle
 import re
@@ -20,8 +21,11 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from sbsar2ptex.recognize import Match
 from sbsar2ptex.recognize import Template
+from sbsar2ptex.recognize import recognize
 from sbsar2ptex.recognize import templates
+from sbsar2ptex.sbsasm import Node
 
 COOKER_PLACES = (
     Path("C:/Program Files/Adobe/Adobe Substance 3D Designer"),
@@ -38,6 +42,8 @@ FAILED = "failed.txt"
 """Packages that would not cook, one name a line."""
 VERSION = 2
 """Bump when Template or the matching changes, to rebuild cached pickles."""
+MATCH_VERSION = 1
+"""Bump when recognize's rules change, to match materials again."""
 COOKED = "cooked.txt"
 """The COOK_VERSION the cached packages were cooked at."""
 COOK_VERSION = 2
@@ -181,3 +187,34 @@ def load(
         with stored.open("wb") as f:
             pickle.dump((VERSION, out), f)
     return out
+
+
+def recognized(
+    sbsasm: bytes, nodes: list[Node], library: list[Template], cache: Path | None
+) -> list[Match]:
+    """Return recognize's instances in a compiled graph, kept in ``cache``.
+
+    Matching a material against the whole library takes minutes; the result
+    is kept per compiled graph (by its bytes) and library (VERSION and its
+    templates), so a material converted again is matched at once.
+    """
+    if cache is None:
+        return recognize(nodes, library)
+    by_key = {_key(t): t for t in library}
+    ident = hashlib.sha256(sbsasm)
+    ident.update(repr((VERSION, MATCH_VERSION, sorted(by_key))).encode())
+    stored = cache / f"{ident.hexdigest()[:32]}.pickle"
+    if stored.exists():
+        with stored.open("rb") as f:
+            kept = pickle.load(f)  # noqa: S301 (our own cache)
+        return [Match(by_key[key], *rest) for key, *rest in kept]
+    found = recognize(nodes, library)
+    stored.parent.mkdir(parents=True, exist_ok=True)
+    with stored.open("wb") as f:
+        pickle.dump([(_key(m.template), m.root, m.members, m.inputs) for m in found], f)
+    return found
+
+
+def _key(t: Template) -> tuple[str, str, str, int]:
+    """Return what tells a template from the library's others."""
+    return (t.package, t.graph, t.output, t.root)
