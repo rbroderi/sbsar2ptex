@@ -588,7 +588,7 @@ def shader(
                     if __import__("os").environ.get("SBS_Q8") == "down"
                     else "floor($(name)_raw(uv) * 255.0 + 0.5) / 255.0; }\n"
                 )
-            ) if __import__("os").environ.get("SBS_Q8") else f"{helpers}{ret} $(name)_fct(vec2 uv) {{\n{body}\n}}\n",
+            ) if __import__("os").environ.get("SBS_Q8") in ("up", "down") else f"{helpers}{ret} $(name)_fct(vec2 uv) {{\n{body}\n}}\n",
             "outputs": [{"type": out_type, out_type: "$(name)_fct($uv)"}],
             "parameters": params,
         },
@@ -2735,6 +2735,19 @@ def translate_graph(
             made = Sub(
                 [shader_node], [], [(n, name, i) for i, n in enumerate(names)], name
             )
+        store = (node.flags >> 4) & 3
+        if __import__("os").environ.get("SBS_Q8") == "fmt" and store < 2:
+            # EXPERIMENT: the node's output as its format stores it: 8 bits
+            # (ties down, NVIDIA) or 16 (to the nearest 1/65535)
+            t = "rgba" if node.op in COLOR_OPS else "f"
+            steps = "255.0" if store == 0 else "65535.0"
+            q = (f"ceil(v * {steps} - 0.5) / {steps}" if store == 0
+                 else f"floor(v * {steps} + 0.5) / {steps}")
+            g = "vec4" if t == "rgba" else "float"
+            made.nodes.append(shader(f"{name}_store", [("input", t)], t,
+                                     f"{g} v = clamp($input(uv), 0.0, 1.0);\nreturn {q};"))
+            made.wires.append(wire(made.output, f"{name}_store"))
+            made.output = f"{name}_store"
         if own != size:
             made.nodes.append(buffer(f"{name}_size", own))
             made.wires.append(wire(made.output, f"{name}_size"))
