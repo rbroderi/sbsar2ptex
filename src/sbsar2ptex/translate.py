@@ -580,7 +580,15 @@ def shader(
                 }
                 for i, t in inputs
             ],
-            "instance": f"{helpers}{ret} $(name)_fct(vec2 uv) {{\n{body}\n}}\n",
+            "instance": (  # EXPERIMENT (branch exp-q8 only): 8-bit node storage
+                f"{helpers}{ret} $(name)_raw(vec2 uv) {{\n{body}\n}}\n"
+                f"{ret} $(name)_fct(vec2 uv) {{ return "
+                + (
+                    "ceil($(name)_raw(uv) * 255.0 - 0.5) / 255.0; }\n"
+                    if __import__("os").environ.get("SBS_Q8") == "down"
+                    else "floor($(name)_raw(uv) * 255.0 + 0.5) / 255.0; }\n"
+                )
+            ) if __import__("os").environ.get("SBS_Q8") else f"{helpers}{ret} $(name)_fct(vec2 uv) {{\n{body}\n}}\n",
             "outputs": [{"type": out_type, out_type: "$(name)_fct($uv)"}],
             "parameters": params,
         },
