@@ -609,7 +609,9 @@ def buffer(
     graph is computed once, not once per tap. 16-bit float (images need no
     more), or 32-bit when ``precise`` (what slopes are taken of: half
     floats' steps would show in a normal map) or unfiltered (positions);
-    linear filtering unless not ``filtering``.
+    linear filtering unless not ``filtering``. Version 2: the version-1
+    buffer Material Maker reads otherwise ignores both (always filtered,
+    always 16-bit).
     """
     return {
         "name": name,
@@ -622,6 +624,7 @@ def buffer(
             "mipmap": False,
         },
         "seed_int": 0,
+        "version": 2,
     }
 
 
