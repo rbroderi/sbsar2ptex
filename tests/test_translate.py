@@ -15,10 +15,16 @@ from sbsar2ptex.archive import read_archive
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import UnsupportedError
+from sbsar2ptex.translate import _blur
 from sbsar2ptex.translate import _distance
 from sbsar2ptex.translate import _gradient_keys
+from sbsar2ptex.translate import buffer
+from sbsar2ptex.translate import drop_copies
 from sbsar2ptex.translate import graph_inputs
+from sbsar2ptex.translate import merge_same
+from sbsar2ptex.translate import shader
 from sbsar2ptex.translate import translate_graph
+from sbsar2ptex.translate import wire
 
 DATA = Path(__file__).parent / "data"
 
@@ -152,3 +158,50 @@ def test_neighborhood_filters_sample_buffers() -> None:
     (control,) = inner["gen_parameters"]["widgets"]
     assert control["name"] == "intensity"
     assert {w["node"] for w in control["linked_widgets"]} == {"pass_x", "pass_y"}
+
+
+def test_identical_nodes_merge() -> None:
+    # Two copies of a node of one input, and a node reading each: both pairs
+    # merge (the second once the first has); a different one stays.
+    mm = [
+        shader("a", [], "f", "return uv.x;"),
+        shader("b1", [("in", "f")], "f", "return $in(uv) * 0.5;"),
+        shader("b2", [("in", "f")], "f", "return $in(uv) * 0.5;"),
+        shader("c1", [("in", "f")], "f", "return 1.0 - $in(uv);"),
+        shader("c2", [("in", "f")], "f", "return 1.0 - $in(uv);"),
+        shader("d", [("in", "f")], "f", "return $in(uv) * 0.25;"),
+    ]
+    wires = [wire("a", "b1"), wire("a", "b2"), wire("b1", "c1"), wire("b2", "c2")]
+    wires += [wire("a", "d")]
+    nodes, out, merged = merge_same(mm, wires)
+    assert merged == {"b2": "b1", "c2": "c1"}
+    assert {n["name"] for n in nodes} == {"a", "b1", "c1", "d"}
+    assert out == [wire("a", "b1"), wire("b1", "c1"), wire("a", "d")]
+
+
+def test_buffers_copying_a_buffer_go() -> None:
+    # A buffer of a buffer of its size and filtering is the same image; a
+    # 16-bit one of a 32-bit one is not, nor an unfiltered one of a
+    # filtered one. A blur fed by a buffer drops its own first buffer.
+    blur = _blur(Node(index=0, start=0, end=4), "blur", color=False, size=8)
+    mm = [
+        shader("src", [], "f", "return uv.x;"),
+        buffer("first", 8),
+        buffer("copy", 8),
+        buffer("coarse", 8, filtering=False),
+        buffer("wide", 8, precise=True),
+        buffer("narrow", 8),
+        shader("read", [("in", "f")], "f", "return $in(uv);"),
+        *blur.nodes,
+    ]
+    wires = [
+        wire("src", "first"), wire("first", "copy"), wire("copy", "read"),
+        wire("first", "coarse"), wire("src", "wide"), wire("wide", "narrow"),
+        wire("first", "blur"),
+    ]  # fmt: skip
+    nodes, out, moved = drop_copies(mm, wires)
+    assert moved == {"copy": "first"}
+    assert wire("first", "read") in out
+    inner = {n["name"] for n in next(n for n in nodes if n["name"] == "blur")["nodes"]}
+    assert "buf_x" not in inner
+    assert "buf_y" in inner

@@ -106,12 +106,14 @@ def build(
     size: int = 11,
     library: list[Template] | None = None,
     flat: bool = False,
+    aliases: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return the Material Maker graph translating ``graph``.
 
     ``files`` is the archive's contents; ``data`` the folder for files the
     graph uses; ``library`` the templates for naming library nodes (none:
-    groups are named by content); ``flat``: no subgraphs.
+    groups are named by content); ``flat``: no subgraphs; ``aliases`` is
+    filled as translate_graph fills it.
     """
     xml = member(files, ".xml").decode("utf-8")
     asm = Asm(member(files, ".sbsasm"))
@@ -132,6 +134,7 @@ def build(
         inputs=graph_inputs(asm, xml),
         data_dir=data / "fxmaps",
         origins=origins,
+        aliases=aliases,
     )
     if not flat:
         found = recognize(nodes, library) if library else []

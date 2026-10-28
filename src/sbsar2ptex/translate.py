@@ -20,6 +20,7 @@ functions, including Substance's context-specific random generators.
 """
 
 import itertools
+import json
 import math
 import re
 import struct
@@ -728,6 +729,158 @@ def merge_buffers(
             w = {**w, "from": gone[w["from"]]}  # noqa: PLW2901
         out_wires.append(w)
     return [n for n in mm if n["name"] not in gone], out_wires
+
+
+def _forget(gone: dict[str, str], origins: dict[str, int] | None) -> None:
+    """Point the graph's exposed parameters at the nodes ``gone`` keeps instead."""
+    for p, users in _CTX.exposed.items():
+        _CTX.exposed[p] = list(dict.fromkeys(gone.get(u, u) for u in users))
+    if origins is not None:
+        for name in gone:
+            origins.pop(name, None)
+
+
+def merge_same(
+    mm: list[dict[str, Any]],
+    wires: list[dict[str, Any]],
+    origins: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """Return ``mm`` and ``wires`` with identical nodes merged, and what went where.
+
+    Substance graphs repeat work (a library node's copies of one transform of
+    one input, an FX-Map's pattern inputs all one image); nodes of the same
+    code and parameters reading the same inputs compute the same image, so
+    one is kept and read in their place. Taken from the inputs on, so that
+    nodes reading merged ones merge too.
+    """
+    into: dict[str, list[dict[str, Any]]] = {}
+    for w in wires:
+        into.setdefault(w["to"], []).append(w)
+    rep: dict[str, str] = {}
+    seen: dict[tuple[str, tuple], str] = {}
+    done: set[str] = set()
+    by_name = {n["name"]: n for n in mm}
+    for start in by_name:
+        todo = [start]
+        while todo:  # inputs first, iteratively: graphs run thousands deep
+            name = todo[-1]
+            if name in done:
+                todo.pop()
+                continue
+            pending = [w["from"] for w in into.get(name, []) if w["from"] not in done]
+            if pending:
+                todo += pending
+                continue
+            todo.pop()
+            done.add(name)
+            node = by_name[name]
+            body = {k: v for k, v in node.items() if k not in ("name", "node_position")}
+            if "shader_model" in body:
+                body["shader_model"] = {
+                    k: v for k, v in body["shader_model"].items() if k != "name"
+                }
+            ins = tuple(
+                sorted(
+                    (w["to_port"], rep.get(w["from"], w["from"]), w["from_port"])
+                    for w in into.get(name, [])
+                )
+            )
+            key = (json.dumps(body, sort_keys=True), ins)
+            if key in seen:
+                rep[name] = seen[key]
+            else:
+                seen[key] = name
+    out_wires = []
+    for w in wires:
+        if w["to"] in rep:
+            continue
+        if w["from"] in rep:
+            w = {**w, "from": rep[w["from"]]}  # noqa: PLW2901
+        out_wires.append(w)
+    _forget(rep, origins)
+    return [n for n in mm if n["name"] not in rep], out_wires, rep
+
+
+def _copies(buffer_node: dict[str, Any], source: dict[str, Any]) -> bool:
+    """Whether ``buffer_node``, reading buffer ``source``, holds the same image.
+
+    Rendered at the same size it samples each texel at its center: the same
+    values, if it is no less precise; read the same way if it filters alike.
+    """
+    b, s = buffer_node["parameters"], source["parameters"]
+    return (
+        b["size"] == s["size"]
+        and b["filter"] == s["filter"]
+        and (b["f32"] or not s["f32"])
+    )
+
+
+def drop_copies(
+    mm: list[dict[str, Any]],
+    wires: list[dict[str, Any]],
+    origins: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """Return ``mm`` and ``wires`` without buffers copying a buffer (_copies).
+
+    A filter buffers its input, and the input is often a buffer already (a
+    cache, another filter's): its readers read that one instead. Inside a
+    subgraph too (a blur's first buffer, when what feeds the blur is one).
+    """
+    by_name = {n["name"]: n for n in mm}
+    src: dict[str, list[dict[str, Any]]] = {}
+    for w in wires:
+        src.setdefault(w["to"], []).append(w)
+
+    def buffer_at(name: str) -> dict[str, Any] | None:
+        node = by_name.get(name)
+        return node if node is not None and node["type"] == "buffer" else None
+
+    gone: dict[str, str] = {}
+    for name, node in by_name.items():
+        ws = src.get(name, [])
+        if node["type"] == "buffer" and len(ws) == 1:
+            first = buffer_at(gone.get(ws[0]["from"], ws[0]["from"]))
+            if first is not None and _copies(node, first):
+                gone[name] = first["name"]
+        elif node["type"] == "graph":
+            for w in ws:
+                first = buffer_at(gone.get(w["from"], w["from"]))
+                if first is not None:
+                    _drop_inner_copy(node, w["to_port"], first)
+
+    def final(name: str) -> str:
+        while name in gone:
+            name = gone[name]
+        return name
+
+    out_wires = []
+    for w in wires:
+        if w["to"] in gone:
+            continue
+        if w["from"] in gone:
+            w = {**w, "from": final(w["from"])}  # noqa: PLW2901
+        out_wires.append(w)
+    moved = {k: final(k) for k in gone}
+    _forget(moved, origins)
+    return [n for n in mm if n["name"] not in gone], out_wires, moved
+
+
+def _drop_inner_copy(graph: dict[str, Any], port: int, source: dict[str, Any]) -> None:
+    """Drop ``graph``'s first buffer on input ``port`` if it copies ``source``."""
+    inner = {n["name"]: n for n in graph["nodes"]}
+    links = graph["connections"]
+    outs = [w for w in links if w["from"] == "gen_inputs" and w["from_port"] == port]
+    if len(outs) != 1 or inner.get(outs[0]["to"], {}).get("type") != "buffer":
+        return
+    buf = outs[0]["to"]
+    if not _copies(inner[buf], source):
+        return
+    graph["nodes"] = [n for n in graph["nodes"] if n["name"] != buf]
+    graph["connections"] = [
+        {**w, "from": "gen_inputs", "from_port": port} if w["from"] == buf else w
+        for w in links
+        if w["to"] != buf
+    ]
 
 
 def wire(src: str, dst: str, port: int = 0) -> dict[str, Any]:
@@ -2484,6 +2637,7 @@ def translate_graph(
     inputs: dict[int, GraphInput] | None = None,
     data_dir: Path | None = None,
     origins: dict[str, int] | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -2492,7 +2646,8 @@ def translate_graph(
     they become parameters of the shaders that use them, exposed together on
     a "parameters" remote node. Only the nodes the outputs need are
     translated. ``origins``, if given, is filled with each Material Maker
-    node's Substance node (by name).
+    node's Substance node (by name); ``aliases`` with each node merged away
+    (merge_same, drop_copies) and the one computing its image now.
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
     _CTX = _Context(size=size, inputs=dict(inputs or {}), data_dir=data_dir)
@@ -2586,6 +2741,15 @@ def translate_graph(
         out_of[k] = made.output
     mm, wires = merge_buffers(mm, wires)
     mm, wires = cache_shared(mm, wires, size, origins)
+    # After caching: a node read inline by each of its copies' readers stays
+    # read inline, at full precision, not through a (16-bit) cache.
+    mm, wires, merged = merge_same(mm, wires, origins)
+    out_of = {k: merged.get(v, v) for k, v in out_of.items()}
+    mm, wires, moved = drop_copies(mm, wires, origins)
+    out_of = {k: moved.get(v, v) for k, v in out_of.items()}
+    if aliases is not None:
+        aliases.update({k: moved.get(v, v) for k, v in merged.items()})
+        aliases.update(moved)
     for row, made in enumerate(mm):
         made["node_position"] = {"x": 220 * (row % 12), "y": 180 * (row // 12)}
     if _CTX.exposed:
