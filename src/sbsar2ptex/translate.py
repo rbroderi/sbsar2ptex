@@ -2983,8 +2983,12 @@ def stored(made: Sub, node: Node) -> bool:
     Substance keeps every node's image in the node's format, so an 8-bit
     node's value is rounded to 1/255 before anything reads it, a 16-bit
     one's to 1/65535 (thresholds downstream turn the difference into whole
-    pixels). Ties between 8-bit steps break down, as on NVIDIA GPUs (see
-    _levels). The output shader computes the unrounded value as
+    pixels). An 8-bit store is NVIDIA's (whose renders Adobe's baked maps
+    match): truncated to 12 bits, then the nearest 8-bit step, ties down
+    (measured on an RTX 3090: of the pair-mean ties k + 0.5 exactly those
+    whose 12-bit truncation lands above the midpoint round up). A value read
+    through the GPU's filtering comes in as NVIDIA's filter makes it, as in
+    Substance. The output shader computes the unrounded value as
     ``$(name)_raw`` and its function returns that rounded. Returns whether
     it does (exact_buffers keeps such values exact in buffers).
     """
@@ -3003,8 +3007,8 @@ def stored(made: Sub, node: Node) -> bool:
         return False
     ret, g = ("vec4", "vec4") if kind == "rgba" else ("float", "float")
     k = num(float(steps))
-    tie = (
-        f"ceil(v * {k} - 0.5) / {k}"
+    tie = (  # 12 bits, then 8 (exact in float32: X·255 + 2047 < 2^20)
+        f"floor((floor(v * 4096.0) * {k} + 2047.0) / 4096.0) / {k}"
         if steps == 255  # noqa: PLR2004
         else f"floor(v * {k} + 0.5) / {k}"
     )
