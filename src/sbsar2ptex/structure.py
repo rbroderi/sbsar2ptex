@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 
+from sbsar2ptex.fuse import fuse
 from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import GRAPH_PARAM
@@ -57,6 +58,8 @@ class Group:
     outputs: dict[tuple[str, int], int] = field(default_factory=dict)
     """Source inside -> this group's output port."""
     output_types: list[str] = field(default_factory=list)
+    whole: bool = False
+    """A library node or a repeated unit (not a stretch): its nodes are fused."""
 
 
 def crossings(nodes: list[Node], order: list[int]) -> list[int]:
@@ -276,7 +279,7 @@ def groups(
                 i0, i1, label = items[t]
                 if label is None:
                     continue
-                inner = Group(order[i0:i1], label, parent=region)
+                inner = Group(order[i0:i1], label, parent=region, whole=True)
                 region.children.append(inner)
                 for k in inner.members:
                     owner[k] = inner
@@ -441,6 +444,8 @@ def nest(
 
     def build(g: Group) -> dict[str, Any]:
         inner = [build(c) for c in g.children] + g.mm
+        if g.whole:
+            inner, g.wires = fuse(inner, g.wires)
         exposed: dict[str, list[str]] = {}
         for n in inner:
             for p in params_of(n):

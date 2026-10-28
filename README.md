@@ -69,6 +69,10 @@ nodes found in it. Naming them needs Substance's library cooked: the first
 run cooks Designer's `resources/packages` with its `sbscooker` into a cache
 (a few minutes, once; LOCALAPPDATA/sbsar2ptex/library on Windows, else
 ~/.cache/sbsar2ptex/library).
+Inside a library node (or a unit the author repeated), a node only one other
+reads becomes that node's helper function: the same shader code, so the same
+pixels, with every setting still a parameter (Biomech: 6,351 shaders become
+3,777).
 
 - `--flat` leaves the graph flat (one node per atomic node);
 - `--no-library` groups it without naming library nodes (no Designer needed);
