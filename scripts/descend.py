@@ -59,8 +59,10 @@ import numpy as np
 import py7zr
 from PIL import Image
 
+from sbsar2ptex import procedural
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
+from sbsar2ptex.convert import describe
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Asm
@@ -349,20 +351,30 @@ class Search:
         if not self.slots[False] or not self.slots[True]:
             sys.exit(f"need a grayscale and a color graph output: {self.outputs}")
         built = self.work / "graph"
-        ptex = next(built.glob("*.ptex"), None)
-        if ptex is None or args.rebuild:
-            subprocess.run(
-                [sys.executable, "-m", "sbsar2ptex.convert", str(args.sbsar), "-o", str(built),
-                 "--size", str(args.size), "--procedural", "--flat"],
-                check=True,
+        ptex, known = built / f"{args.sbsar.stem}.ptex", built / "aliases.json"
+        if not ptex.exists() or not known.exists() or args.rebuild:
+            aliases: dict[str, str] = {}
+            made = procedural.build(
+                self.files, describe(member(self.files, ".xml"))[0],
+                built / f"{args.sbsar.stem}_data", size=args.size, flat=True,
+                aliases=aliases,
             )  # fmt: skip
-            ptex = next(built.glob("*.ptex"))
+            built.mkdir(parents=True, exist_ok=True)
+            ptex.write_text(json.dumps(made, indent=1), encoding="utf-8")
+            known.write_text(json.dumps(aliases, indent=1), encoding="utf-8")
         self.graph = json.loads(ptex.read_text(encoding="utf-8"))
+        # Nodes merged away (identical to another, or a copy of a buffer)
+        # are compared by the one computing their image.
+        self.aliases: dict[str, str] = json.loads(known.read_text(encoding="utf-8"))
         self.names = {n["name"] for n in self.graph["nodes"]}
         self.memo: dict[Probe, bool | None] = {}
         self.corr: dict[int, float] = {}
         self.pin([int(n) for n in args.pin.split(",") if n])
         self.into = wiring(self.graph)
+
+    def mm_name(self, node: int) -> str:
+        """Return the translated graph's node computing Substance node ``node``."""
+        return self.aliases.get(f"n{node}", f"n{node}")
 
     def pin(self, nodes: list[int]) -> None:
         """Replace ``nodes`` in the translated graph by Substance's renders of them.
@@ -373,7 +385,7 @@ class Search:
         """
         truth = self.truths(nodes)
         for n in nodes:
-            name, path = f"n{n}", truth[n]
+            name, path = self.mm_name(n), truth[n]
             if path is None or name not in self.names:
                 sys.exit(f"cannot pin n{n}: no Substance render or no such node")
             color = self.nodes[n].op in COLOR_OPS
@@ -463,7 +475,7 @@ class Search:
         probes = [(n, a and self.nodes[n].op in COLOR_OPS) for n, a in probes]
         new = [p for p in dict.fromkeys(probes) if p not in self.memo]
         for p in new:
-            if f"n{p[0]}" not in self.names:
+            if self.mm_name(p[0]) not in self.names:
                 self.memo[p] = None
         new = [p for p in new if p not in self.memo]
         truth = self.truths([n for n, _ in new])
@@ -485,7 +497,7 @@ class Search:
                 (folder / f"{stem}_albedo.png").unlink(missing_ok=True)
                 if path not in paths:
                     paths.append(path)
-                    build(self.graph, self.into, f"n{n}", path,
+                    build(self.graph, self.into, self.mm_name(n), path,
                           magnify if stem.endswith("_magnified") else None,
                           alpha=stem.endswith("_alpha"))  # fmt: skip
         if paths:
@@ -559,7 +571,7 @@ class Search:
         while ins := self.inputs(out[-1]):
             m = max(ins, key=self.upstream)
             out.append((m, ins[m]))
-        return [p for p in out if f"n{p[0]}" in self.names]
+        return [p for p in out if self.mm_name(p[0]) in self.names]
 
     def verdict(self, probe: Probe) -> Probe | None:
         """Return ``probe``'s worst differing input; None if they all match."""
