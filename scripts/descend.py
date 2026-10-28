@@ -84,12 +84,21 @@ MAX_EXPORTS = 40
 """Graphs one Material Maker run exports (its command line has a limit)."""
 EXACT = 0.999
 """Share of pixels (8-bit) two images must agree in to match, with --exact."""
+SAME = 0.6
+"""How far apart (8-bit steps) a pixel of ours and Substance's may be and
+still be the same: half a step for our 8-bit export's rounding, and up to a
+sixteenth for the 16-bit float it passes through (in [0.5, 1) its steps
+are an eighth of an 8-bit one), so a 16-bit value near a tie may land on
+either side. An 8-bit value differs by whole steps or not at all."""
+MM_EXPORT_SIZE = 11
+"""log2 of the size Material Maker 1.7's command line exports at."""
 
 
-def load(path: Path, channels: int = 1) -> np.ndarray:
+def load(path: Path, channels: int = 1, side: int | None = SIDE) -> np.ndarray:
     """Return an image's first ``channels`` channels as floats in [0, 1].
 
-    Each is SIDE square; with more than one, they are the last axis.
+    Each is ``side`` square (None: as it is); with more than one, they are
+    the last axis.
     """
     im = Image.open(path)
     a = np.asarray(im).astype(float)
@@ -98,9 +107,22 @@ def load(path: Path, channels: int = 1) -> np.ndarray:
     out = []
     for c in range(channels):
         ch = a[..., min(c, a.shape[2] - 1)]
-        im = Image.fromarray((np.clip(ch, 0, 1) * 65535).astype(np.uint16))
-        out.append(np.asarray(im.resize((SIDE, SIDE), Image.BILINEAR)) / 65535)
+        if side is not None:
+            im = Image.fromarray((np.clip(ch, 0, 1) * 65535).astype(np.uint16))
+            ch = np.asarray(im.resize((side, side), Image.BILINEAR)) / 65535
+        out.append(ch)
     return out[0] if channels == 1 else np.stack(out, axis=-1)
+
+
+def split16(path: Path, hi: Path, lo: Path) -> None:
+    """Write a 16-bit image's high and low bytes as two 8-bit RGBA images.
+
+    Material Maker loads images in 8 bits; a pinned 16-bit render is passed
+    in so and joined again in its shader (see Search.pin).
+    """
+    a = np.rint(load(path, 4, side=None) * 65535).astype(np.uint16)
+    Image.fromarray((a >> 8).astype(np.uint8), "RGBA").save(hi)
+    Image.fromarray((a & 0xFF).astype(np.uint8), "RGBA").save(lo)
 
 
 def spectrum(x: np.ndarray) -> np.ndarray:
@@ -121,7 +143,7 @@ def compare(
     ``strict``: content placed elsewhere does not match; ``exact``: only
     images the same in at least EXACT of their pixels (8-bit) match.
     """
-    identical = float((np.abs(t - o) <= 0.5 / 255).mean())
+    identical = float((np.abs(t - o) <= SAME / 255).mean())
     if exact:
         c = (
             float(np.corrcoef(t.ravel(), o.ravel())[0, 1])
@@ -356,6 +378,8 @@ class Search:
         """Read the archive and build (or reuse) the flat translated graph."""
         self.args = args
         self.work = args.work
+        # Exact comparisons are of the images as they are: no resampling.
+        self.side = None if args.exact else SIDE
         for sub in ("truth", "ours", "vs"):
             (self.work / sub).mkdir(parents=True, exist_ok=True)
         self.files = read_archive(args.sbsar)
@@ -418,30 +442,50 @@ class Search:
             if path is None or name not in self.names:
                 sys.exit(f"cannot pin n{n}: no Substance render or no such node")
             color = self.nodes[n].op in COLOR_OPS
-            image = f"{name}_substance"
+            t = "rgba" if color else "f"
+            # Material Maker loads images in 8 bits: the 16-bit render comes in
+            # as its high and low bytes, joined at the image's own pixels into
+            # a 32-bit buffer that what the node feeds samples.
+            hi, lo = (path.with_name(f"{path.stem}_{b}.png") for b in ("hi", "lo"))
+            split16(path, hi, lo)
+            pos = {"x": 0, "y": 0}
+            images = [
+                {"name": f"{name}_{b}", "type": "image", "node_position": pos,
+                 "parameters": {"image": p.resolve().as_posix()}, "seed_int": 0}
+                for b, p in (("hi", hi), ("lo", lo))
+            ]  # fmt: skip
+            join = {
+                "name": f"{name}_join", "type": "shader", "node_position": pos,
+                "parameters": {}, "seed_int": 0,
+                "shader_model": {
+                    "name": f"{name}_join", "code": "", "global": "", "parameters": [],
+                    "inputs": [{"name": b, "type": "rgba", "default": "vec4(0.0)",
+                                "function": True, "label": b} for b in ("hi", "lo")],
+                    "instance": (
+                        f"{'vec4' if color else 'float'} $(name)_fct(vec2 uv) {{\n"
+                        "  vec4 v = (floor($hi(uv) * 255.0 + 0.5) * 256.0"
+                        " + floor($lo(uv) * 255.0 + 0.5)) / 65535.0;\n"
+                        f"  return v{'' if color else '.r'};\n}}\n"
+                    ),
+                    "outputs": [{"type": t, t: "$(name)_fct($uv)"}],
+                },
+            }  # fmt: skip
+            store = {
+                "name": name, "type": "buffer", "node_position": pos, "seed_int": 0,
+                "parameters": {"size": self.args.size, "f32": True, "filter": True,
+                               "mipmap": False},
+                "version": 2,
+            }  # fmt: skip
             self.graph["nodes"] = [
                 x for x in self.graph["nodes"] if x["name"] != name
-            ] + [
-                {"name": image, "type": "image", "node_position": {"x": 0, "y": 0},
-                 "parameters": {"image": path.resolve().as_posix()}, "seed_int": 0},
-                {"name": name, "type": "shader", "node_position": {"x": 0, "y": 0},
-                 "parameters": {}, "seed_int": 0,
-                 "shader_model": {
-                     "name": name, "code": "", "global": "", "parameters": [],
-                     "inputs": [{"name": "input", "type": "rgba",
-                                 "default": "vec4(0.0)", "function": True,
-                                 "label": "input"}],
-                     "instance": (
-                         f"{'vec4' if color else 'float'} $(name)_fct(vec2 uv) {{\n"
-                         f"  return $input(uv){'' if color else '.r'};\n}}\n"
-                     ),
-                     "outputs": [{"type": "rgba" if color else "f",
-                                  "f": "$(name)_fct($uv)"}],
-                 }},
-            ]  # fmt: skip
+            ] + [*images, join, store]
             self.graph["connections"] = [
                 w for w in self.graph["connections"] if w["to"] != name
-            ] + [{"from": image, "from_port": 0, "to": name, "to_port": 0}]
+            ] + [
+                {"from": f"{name}_hi", "from_port": 0, "to": f"{name}_join", "to_port": 0},
+                {"from": f"{name}_lo", "from_port": 0, "to": f"{name}_join", "to_port": 1},
+                {"from": f"{name}_join", "from_port": 0, "to": name, "to_port": 0},
+            ]  # fmt: skip
 
     def truths(self, nodes: list[int]) -> dict[int, Path | None]:
         """Render ``nodes`` in Substance, by retargeting graph outputs to them.
@@ -516,7 +560,7 @@ class Search:
                 print(f"  n{n}: no Substance image", flush=True)
                 self.memo[n, alpha] = None
                 continue
-            t = load(truth[n], 4 if alpha else 3 if color else 1)
+            t = load(truth[n], 4 if alpha else 3 if color else 1, self.side)
             magnify = None if color or self.args.exact else magnifier(t)
             jobs[n, alpha] = t, magnify
             stems = [f"n{n}_magnified" if magnify else f"n{n}"]
@@ -553,9 +597,9 @@ class Search:
             sys.exit(
                 f"Material Maker made no image for n{node}: see {folder / 'mm.log'}"
             )
-        o = load(png, 3 if color else 1)
+        o = load(png, 3 if color else 1, self.side)
         if alpha:
-            o = np.concatenate([o, load(alpha_png)[..., None]], axis=-1)
+            o = np.concatenate([o, load(alpha_png, 1, self.side)[..., None]], axis=-1)
         if magnify:
             t = magnified(t, *magnify)
         result, text, self.corr[node] = (compare_color if color else compare)(
@@ -675,6 +719,11 @@ def main() -> None:
     )  # fmt: skip
     args = parser.parse_args()
     args.strict = args.strict or bool(args.bisect) or args.exact
+    if args.exact and args.size != MM_EXPORT_SIZE:
+        # Material Maker exports at 2048 px: a graph of another size is
+        # sampled between its pixels, which no exact comparison survives.
+        print(f"--exact: building at size {MM_EXPORT_SIZE} (Material Maker's export)")
+        args.size = MM_EXPORT_SIZE
     search = Search(args)
     start = (args.node, False)
     first = search.check([start])[start]
