@@ -2,7 +2,7 @@
 
     uv run python scripts/descend.py SBSAR NODE --mm PATH/TO/material_maker.exe
         [--sbsrender PATH] [--work DIR] [--size 10] [--strict]
-        [--bisect [PROBES]]
+        [--bisect [PROBES]] [--pin NODES]
 
 NODE is a compiled node index (``sbsasm-dump`` lists them; a graph output's
 node is a good start). A node is rendered twice: in Substance, by
@@ -29,6 +29,11 @@ a gradient lookup) magnifies: such an input can be the real difference.
 path up from the differing node instead of comparing every input of every
 node on the way (see ``bisect``), and still checks every input of the node
 it ends on.
+
+``--pin`` takes Substance's render of a node in place of its translation,
+for one known to differ for reasons no translation can fix (Biomech's n17
+hashes with cos, which Substance's own engines round differently): the
+nodes it feeds are then compared from the same input.
 
 Material Maker exports 8 bits. A grayscale node whose Substance image spans
 less than NARROW (1st to 99th percentile) is magnified before export,
@@ -354,9 +359,48 @@ class Search:
             ptex = next(built.glob("*.ptex"))
         self.graph = json.loads(ptex.read_text(encoding="utf-8"))
         self.names = {n["name"] for n in self.graph["nodes"]}
-        self.into = wiring(self.graph)
         self.memo: dict[Probe, bool | None] = {}
         self.corr: dict[int, float] = {}
+        self.pin([int(n) for n in args.pin.split(",") if n])
+        self.into = wiring(self.graph)
+
+    def pin(self, nodes: list[int]) -> None:
+        """Replace ``nodes`` in the translated graph by Substance's renders of them.
+
+        For a node whose difference is known and not a translation's (a hash
+        of cos that each GPU rounds its own way): what it feeds is then judged
+        on its own, from the same input as Substance's.
+        """
+        truth = self.truths(nodes)
+        for n in nodes:
+            name, path = f"n{n}", truth[n]
+            if path is None or name not in self.names:
+                sys.exit(f"cannot pin n{n}: no Substance render or no such node")
+            color = self.nodes[n].op in COLOR_OPS
+            image = f"{name}_substance"
+            self.graph["nodes"] = [
+                x for x in self.graph["nodes"] if x["name"] != name
+            ] + [
+                {"name": image, "type": "image", "node_position": {"x": 0, "y": 0},
+                 "parameters": {"image": path.resolve().as_posix()}, "seed_int": 0},
+                {"name": name, "type": "shader", "node_position": {"x": 0, "y": 0},
+                 "parameters": {}, "seed_int": 0,
+                 "shader_model": {
+                     "name": name, "code": "", "global": "", "parameters": [],
+                     "inputs": [{"name": "input", "type": "rgba",
+                                 "default": "vec4(0.0)", "function": True,
+                                 "label": "input"}],
+                     "instance": (
+                         f"{'vec4' if color else 'float'} $(name)_fct(vec2 uv) {{\n"
+                         f"  return $input(uv){'' if color else '.r'};\n}}\n"
+                     ),
+                     "outputs": [{"type": "rgba" if color else "f",
+                                  "f": "$(name)_fct($uv)"}],
+                 }},
+            ]  # fmt: skip
+            self.graph["connections"] = [
+                w for w in self.graph["connections"] if w["to"] != name
+            ] + [{"from": image, "from_port": 0, "to": name, "to_port": 0}]
 
     def truths(self, nodes: list[int]) -> dict[int, Path | None]:
         """Render ``nodes`` in Substance, by retargeting graph outputs to them.
@@ -578,6 +622,10 @@ def main() -> None:
     parser.add_argument(
         "--bisect", type=int, nargs="?", const=3, default=0, metavar="PROBES",
         help="bisect paths, PROBES nodes a round (3; implies --strict)",
+    )  # fmt: skip
+    parser.add_argument(
+        "--pin", default="", metavar="NODES",
+        help="nodes (comma-separated) to give Substance's render of (see Search.pin)",
     )  # fmt: skip
     args = parser.parse_args()
     args.strict = args.strict or bool(args.bisect)
