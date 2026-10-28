@@ -1402,9 +1402,16 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     return Sub([group], [], [("input", name, 0)], name)
 
 
-def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
-    """Directional motion blur: the box along (cos, sin) of the angle (turns)."""
-    t = "rgba" if color else "f"
+def _dmb_setup(node: Node, size: int) -> str:
+    """Return GLSL deriving a directional motion blur's geometry from its knobs.
+
+    Declares the intensity and angle knobs of the next shader (each of the
+    blur's shaders has them, one control on the blur's subgraph), and
+    computes from them, in the shader: ``N`` (texels), ``ymaj`` (steps go
+    along y), the slope ``t`` (minor-axis texels per step), the radius
+    ``R`` in steps, the tap count ``n`` either side, the end taps' weight
+    ``f``, and ``X0``, the image center the frame is sheared about.
+    """
     p = flag_params(
         node.fields[0],
         node.inline,
@@ -1414,15 +1421,188 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     )
     k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
     turn = knob("angle", "Angle", p["angle"])
-    a = f"6.28318531 * {num(turn)}"
-    made = shader(
-        name, [("input", t)], t,
-        box_glsl_live(
-            t, f"vec2(cos({a}), sin({a}))", f"{num(k)} * {num((1 << size) / 256)}",
-            size,
-        ),
+    return "\n".join(
+        [
+            f"float N = {num(float(1 << size))};",
+            f"float A = {num(turn)};",
+            "float ang = 6.28318531 * A;",
+            "float cs = cos(ang);",
+            "float sn = sin(ang);",
+            "bool ymaj = abs(sn) > abs(cs);",
+            "float t = ymaj ? cs / sn : sn / cs;",
+            # The diagonals: Substance's rounding picks the axis (measured).
+            "float a8 = abs(A) * 8.0;",
+            "float m8 = floor(a8 + 0.5);",
+            "if (abs(a8 - m8) < 1e-5 && mod(m8, 2.0) == 1.0) {",
+            "\tymaj = mod(m8, 4.0) == 1.0;",
+            "\tt = cs * sn > 0.0 ? 1.0 : -1.0;",
+            "}",
+            "if (abs(t) < 1e-6) t = 0.0;",
+            f"float R = 0.5 + ({num(k)} * N / 256.0 - 0.5) * max(abs(cs), abs(sn));",
+            "int n = int(ceil(R - 0.5));",
+            "float f = R + 0.5 - float(n);",
+            "float X0 = 0.5 * (N - 1.0);",
+        ]
+    )
+
+
+_DMB_Q = "float $(name)_q(float u) {\n\treturn floor(u * 256.0 + 0.5) / 256.0;\n}\n"
+"""A bilinear fraction rounded to 1/256, as the texture filter rounds it."""
+
+
+def _dmb_image_reads(g: str, size: int) -> str:
+    """Return GLSL reading the blur's input (an unfiltered buffer) by texel.
+
+    ``_p(i, j, ymaj)`` is the texel at major-axis index i, minor j;
+    ``_read(i, y, ymaj)`` reads at integer i and fractional y, linearly in
+    y with the fraction rounded to 1/256. Indices wrap.
+    """
+    n = num(float(1 << size))
+    return (
+        _DMB_Q + f"{g} $(name)_p(float i, float j, bool ymaj) {{\n"
+        "\tvec2 xy = ymaj ? vec2(j, i) : vec2(i, j);\n"
+        f"\treturn $input((mod(xy, {n}) + 0.5) / {n});\n"
+        "}\n"
+        f"{g} $(name)_read(float i, float y, bool ymaj) {{\n"
+        "\tfloat y0 = floor(y);\n"
+        "\tfloat w = $(name)_q(y - y0);\n"
+        "\treturn mix($(name)_p(i, y0, ymaj), $(name)_p(i, y0 + 1.0, ymaj), w);\n"
+        "}\n"
+    )
+
+
+def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Directional motion blur: a box of half-width R steps along the angle.
+
+    The angle (turns) picks the major axis, the one its direction moves
+    along more; a step is one texel along it and t texels across. R is
+    0.5 + (intensity N / 256 - 0.5) max(|cos|, |sin|) steps: n = ceil(R -
+    0.5) taps either side, the end ones weighted R + 0.5 - n, the sum
+    divided by 2R. Up to R = 0.5 the image is kept; up to 1.5 it is three
+    reads, linear across the major axis. Past that the image is sheared
+    into a frame whose column c is the line minor = c + (major - X0) t
+    (pass "frame"), boxed along the columns ("box": rows past the image's
+    edge read the frame's own row, a fractional column over), and read
+    back linearly across the columns ("output"). At 0 and 90 degrees the
+    box's partial end tap and its neighbor are one read, so their weights
+    move by the read's rounding, at one end or the other by the parity of
+    the major-axis index (both when n = 2). Every linear read rounds its
+    fraction to 1/256, as the GPU's texture filter does; buffers are
+    32-bit and unfiltered, texels read at their centers.
+
+    Intensity and angle are live: everything is computed from them in the
+    shaders, so the tap loops run to a bound counted per pixel.
+    """
+    t = "rgba" if color else "f"
+    g = "vec4" if color else "float"
+    n = num(float(1 << size))
+    texel = f"vec2 px = floor(uv * {n});"
+
+    frame = shader(
+        f"{name}_frame", [("input", t)], t,
+        "\n".join([
+            _dmb_setup(node, size),
+            f"if (n <= 1) return {g}(0.0);",
+            texel,
+            "return $(name)_read(px.x, px.y + (px.x - X0) * t, ymaj);",
+        ]),
     )  # fmt: skip
-    return buffered(made, ["input"], {"input"}, size)
+    frame["shader_model"]["instance"] = (
+        _dmb_image_reads(g, size) + frame["shader_model"]["instance"]
+    )
+
+    box = shader(
+        f"{name}_box", [("input", t)], t,
+        "\n".join([
+            _dmb_setup(node, size),
+            f"if (n <= 1) return {g}(0.0);",
+            texel,
+            # Merged end reads (t = 0 only): the +n end when the first whole
+            # tap's index is even, the -n end when odd; both when n = 2.
+            "float E = 0.0;",
+            "bool mp = false;",
+            "bool mm = false;",
+            "if (t == 0.0) {",
+            "\tfloat h = f / (1.0 + f);",
+            "\tE = (1.0 + f) * ($(name)_q(h) - h);",
+            "\tfloat par = mod(px.x - float(n - 1), 2.0);",
+            "\tmp = n == 2 || par < 0.5;",
+            "\tmm = n == 2 || par > 0.5;",
+            "}",
+            f"{g} acc = {g}(0.0);",
+            "for (int k = -n; k <= n; k++) {",
+            "\tfloat w = abs(k) == n ? f : 1.0;",
+            "\tif ((k == n && mp) || (k == -n && mm)) w += E;",
+            "\tif ((k == n - 1 && mp) || (k == 1 - n && mm)) w -= E;",
+            "\tacc += w * $(name)_frame(px.y, px.x + float(k), t);",
+            "}",
+            "return acc;",
+        ]),
+    )  # fmt: skip
+    box["shader_model"]["instance"] = (
+        _DMB_Q + f"{g} $(name)_col(float c, float r) {{\n"
+        f"\treturn $input((vec2(r, mod(c, {n})) + 0.5) / {n});\n"
+        "}\n"
+        # Frame column c, any row r: a row past the edge is the frame's own
+        # row, read a fractional column over (the frame's seam).
+        f"{g} $(name)_frame(float c, float r, float t) {{\n"
+        f"\tfloat k = floor(r / {n});\n"
+        "\tif (k == 0.0) return $(name)_col(c, r);\n"
+        f"\tfloat cf = c + k * {n} * t;\n"
+        "\tfloat c0 = floor(cf);\n"
+        f"\tfloat rm = r - k * {n};\n"
+        "\treturn mix($(name)_col(c0, rm), $(name)_col(c0 + 1.0, rm),"
+        " $(name)_q(cf - c0));\n"
+        "}\n" + box["shader_model"]["instance"]
+    )
+
+    out = shader(
+        name, [("box", t), ("input", t)], t,
+        "\n".join([
+            _dmb_setup(node, size),
+            texel,
+            "vec2 pq = ymaj ? px.yx : px;",
+            "if (R <= 0.5) return $(name)_p(pq.x, pq.y, ymaj);",
+            "if (n <= 1) {",
+            "\treturn (f * $(name)_read(pq.x - 1.0, pq.y - t, ymaj)",
+            "\t\t+ $(name)_read(pq.x, pq.y, ymaj)",
+            "\t\t+ f * $(name)_read(pq.x + 1.0, pq.y + t, ymaj)) / (2.0 * R);",
+            "}",
+            "float ch = pq.y - (pq.x - X0) * t;",
+            "float c0 = floor(ch);",
+            f"vec2 at = (vec2(pq.x, mod(c0, {n})) + 0.5) / {n};",
+            f"vec2 at1 = (vec2(pq.x, mod(c0 + 1.0, {n})) + 0.5) / {n};",
+            "return mix($box(at), $box(at1), $(name)_q(ch - c0)) / (2.0 * R);",
+        ]),
+    )  # fmt: skip
+    out["shader_model"]["instance"] = (
+        _dmb_image_reads(g, size) + out["shader_model"]["instance"]
+    )
+
+    frame["name"], box["name"], out["name"] = "frame", "box", "output"
+    group = subgraph(
+        name,
+        "Directional motion blur",
+        [
+            buffer("buf_in", size, filtering=False),
+            frame,
+            buffer("buf_frame", size, filtering=False),
+            box,
+            buffer("buf_box", size, filtering=False),
+            out,
+        ],
+        [
+            wire("buf_in", "frame"),
+            wire("frame", "buf_frame"),
+            wire("buf_frame", "box"),
+            wire("box", "buf_box"),
+            wire("buf_box", "output"),
+            wire("buf_in", "output", 1),
+        ],
+        [(t, "buf_in", 0)],
+        ("output", 0, t),
+    )
+    return Sub([group], [], [("input", name, 0)], name)
 
 
 def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:

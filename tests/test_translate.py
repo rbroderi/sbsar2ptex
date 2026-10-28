@@ -16,6 +16,7 @@ from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import _blur
+from sbsar2ptex.translate import _dirmotionblur
 from sbsar2ptex.translate import _distance
 from sbsar2ptex.translate import _gradient_keys
 from sbsar2ptex.translate import buffer
@@ -205,3 +206,29 @@ def test_buffers_copying_a_buffer_go() -> None:
     inner = {n["name"] for n in next(n for n in nodes if n["name"] == "blur")["nodes"]}
     assert "buf_x" not in inner
     assert "buf_y" in inner
+
+
+def test_directional_blur_knobs_stay_live() -> None:
+    # Intensity and angle, inline in the node, are one control each on the
+    # blur's subgraph, linked into all three passes, and never constants in
+    # their GLSL; the passes read unfiltered 32-bit buffers.
+    words = [struct.unpack("<I", struct.pack("<f", v))[0] for v in (5.86, 0.0625)]
+    node = Node(index=0, start=0, end=4, op=22, fields=[1 | 1 << 2], inline=words)
+    made = _dirmotionblur(node, "dmb", color=False, size=8)
+    (group,) = made.nodes
+    inner = {n["name"]: n for n in group["nodes"]}
+    shaders = [n for n in inner.values() if n["type"] == "shader"]
+    assert {n["name"] for n in shaders} == {"frame", "box", "output"}
+    for n in shaders:
+        assert n["parameters"] == pytest.approx({"intensity": 5.86, "angle": 0.0625})
+        code = n["shader_model"]["instance"]
+        assert "$intensity" in code
+        assert "$angle" in code
+        assert "5.86" not in code
+        assert "0.0625" not in code
+    for name in ("buf_in", "buf_frame", "buf_box"):
+        assert inner[name]["parameters"]["filter"] is False
+        assert inner[name]["parameters"]["f32"] is True
+    widgets = {w["name"]: w for w in inner["gen_parameters"]["widgets"]}
+    assert len(widgets["intensity"]["linked_widgets"]) == 3
+    assert len(widgets["angle"]["linked_widgets"]) == 3

@@ -239,7 +239,29 @@ def cases() -> list[tuple]:
             True,
         ),
     ]
-    return out + function_cases()
+    return out + dmb_cases() + function_cases()
+
+
+def dmb_cases() -> list[dict]:
+    """Return directional motion blurs: angles (turns) by intensities, 16 and 8 bits.
+
+    At 2048 px both intensities take the large path (R past 1.5 texels);
+    intensity 0.15 (R 1.2 at most) the small one.
+    """
+    angles = ("0", "0.0625", "0.125", "0.4375")
+    grid = [(a, i) for a in angles for i in ("0.7326", "5.86")]
+    grid += [("0", "0.15"), ("0.0625", "0.15")]
+    return [
+        {
+            "tag": f"dmb_{angle}_{intensity}_{bits}".replace(".", "p"),
+            "filter": "dirmotionblur",
+            "kind": GRAY,
+            "params": (("intensity", F1, intensity), ("mblurangle", F1, angle)),
+            "format16": bits == 16,
+        }
+        for angle, intensity in grid
+        for bits in (16, 8)
+    ]
 
 
 def function_cases() -> list[dict]:
