@@ -459,6 +459,7 @@ class Search:
         The nodes not compared before are rendered together: one sbsrender
         run per graph-output's worth, one Material Maker run for them all.
         """
+        asked = probes  # answered as asked: a grayscale node's alpha is no probe
         probes = [(n, a and self.nodes[n].op in COLOR_OPS) for n, a in probes]
         new = [p for p in dict.fromkeys(probes) if p not in self.memo]
         for p in new:
@@ -491,7 +492,7 @@ class Search:
             mm_export(self.args.mm, folder, paths)
         for (n, alpha), (t, magnify) in jobs.items():
             self.memo[n, alpha] = self.compare(n, alpha, t, magnify)
-        return {p: self.memo[p] for p in probes}
+        return {a: self.memo[p] for a, p in zip(asked, probes, strict=True)}
 
     def compare(
         self,
