@@ -5,7 +5,8 @@ GLSL reproduces the filter; ``translate_graph`` wires them as the compiled
 graph is wired. The formulas were fitted against sbsrender renders of
 single-filter graphs (see tests/test_translate.py and sbsasm-probe):
 
-- levels: v = clamp((x - in_low) / (in_high - in_low)); v = pow(v, g(mid)),
+- levels: v = clamp((x - in_low) / (in_high - in_low)), the range at least
+  1e-4 wide; v = pow(v, g(mid)),
   g = 1 + 16 (mid - 0.5) above 0.5, 1 / (1 + 16 (0.5 - mid)) below; out =
   mix(out_low, out_high, v).
 - blend: out = clamp(d + (f(s, d) - d) * o), o = opacity (times the opacity
@@ -1023,20 +1024,15 @@ def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
         f"{g} lo = {vec(p['in_low'], n)};",
         f"{g} hi = {vec(p['in_high'], n)};",
         f"{g} m = {vec(p['in_mid'], n)};",
-        # an empty input range thresholds, strictly, on the input as Substance
-        # stored it: in 8 bits a computed 0.5 is 127/255, below a 0.5
-        # threshold (ties break down, as on NVIDIA, whose renders match
-        # Adobe's baked maps; an AMD GPU rounds them up)
+        # an input range narrower than 1e-4 is 1e-4 wide: an empty one ramps
+        # over the 1e-4 above in_low, which a 16-bit input lands on
+        f"{g} d = hi - lo;",
         (
-            "x = mix(clamp((x - lo) / max(hi - lo, 1e-9), 0.0, 1.0),"
-            " 1.0 - step(ceil(x * 255.0 - 0.5) / 255.0, lo),"
-            " step(hi - lo, vec4(1e-6)));"
+            "d = mix(d, vec4(1e-4), step(abs(d), vec4(1e-4)));"
             if color
-            else (
-                "x = hi - lo <= 1e-6 ? 1.0 - step(ceil(x * 255.0 - 0.5) / 255.0, lo)"
-                " : clamp((x - lo) / (hi - lo), 0.0, 1.0);"
-            )
+            else "d = abs(d) <= 1e-4 ? 1e-4 : d;"
         ),
+        "x = clamp((x - lo) / d, 0.0, 1.0);",
         (
             "x = pow(x, mix(1.0 / (1.0 + 16.0 * (0.5 - m)),"
             " 1.0 + 16.0 * (m - 0.5), step(0.5, m)));"

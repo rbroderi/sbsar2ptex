@@ -84,12 +84,12 @@ MAX_EXPORTS = 40
 """Graphs one Material Maker run exports (its command line has a limit)."""
 EXACT = 0.999
 """Share of pixels (8-bit) two images must agree in to match, with --exact."""
-SAME = 0.6
+SAME = 0.63
 """How far apart (8-bit steps) a pixel of ours and Substance's may be and
-still be the same: half a step for our 8-bit export's rounding, and up to a
-sixteenth for the 16-bit float it passes through (in [0.5, 1) its steps
-are an eighth of an 8-bit one), so a 16-bit value near a tie may land on
-either side. An 8-bit value differs by whole steps or not at all."""
+still be the same: our 8-bit export truncates to a 16-bit float, then
+rounds, and in [0.5, 1) that float's steps are an eighth of an 8-bit one,
+so a 16-bit value can export up to 0.625 steps from Substance's. An 8-bit
+value differs by whole steps or not at all."""
 MM_EXPORT_SIZE = 11
 """log2 of the size Material Maker 1.7's command line exports at."""
 

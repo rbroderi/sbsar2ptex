@@ -19,6 +19,7 @@ from sbsar2ptex.translate import _blur
 from sbsar2ptex.translate import _dirmotionblur
 from sbsar2ptex.translate import _distance
 from sbsar2ptex.translate import _gradient_keys
+from sbsar2ptex.translate import _levels
 from sbsar2ptex.translate import buffer
 from sbsar2ptex.translate import drop_copies
 from sbsar2ptex.translate import graph_inputs
@@ -83,7 +84,19 @@ def test_levels_wiring() -> None:
     assert levels["parameters"]["in_low"] == pytest.approx(0.1)
 
 
-def test_blend_ports_and_opacity() -> None:
+@pytest.mark.parametrize("color", [False, True])
+def test_empty_levels_range_ramps(color: bool) -> None:
+    # in_low == in_high ramps over 1e-4, as Substance's renders of a 16-bit
+    # input near the edge show, rather than stepping; the knobs stay live.
+    edge = struct.unpack("<I", struct.pack("<f", 0.5))[0]
+    node = Node(
+        index=0, start=0, end=4, op=1, fields=[1 | 1 << 2], inline=[edge, edge]
+    )
+    sh, _ = _levels(node, "levels", color=color, size=8)
+    code = sh["shader_model"]["instance"]
+    assert "1e-4" in code
+    assert "step(ceil" not in code
+    assert "x = clamp((x - lo) / d, 0.0, 1.0);" in code
     nodes, wires, outs = translated("blend_gray")
     blend = outs["output"][0]
     by_port = {w["to_port"]: w["from"] for w in wires if w["to"] == blend}
