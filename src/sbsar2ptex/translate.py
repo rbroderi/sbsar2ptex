@@ -2582,7 +2582,7 @@ STORE_STEPS = {0: 255, 1: 65535}
 8 and 16 bits; the float formats (2, 3) keep what they are given."""
 
 
-def stored(made: Sub, node: Node) -> None:
+def stored(made: Sub, node: Node) -> bool:
     """Make ``made``'s output read as Substance stores ``node``'s: in its format.
 
     Substance keeps every node's image in the node's format, so an 8-bit
@@ -2590,7 +2590,8 @@ def stored(made: Sub, node: Node) -> None:
     one's to 1/65535 (thresholds downstream turn the difference into whole
     pixels). Ties between 8-bit steps break down, as on NVIDIA GPUs (see
     _levels). The output shader computes the unrounded value as
-    ``$(name)_raw`` and its function returns that rounded.
+    ``$(name)_raw`` and its function returns that rounded. Returns whether
+    it does (exact_buffers keeps such values exact in buffers).
     """
     steps = STORE_STEPS.get(node.flags >> 4 & 3)
     out = next((n for n in made.nodes if n["name"] == made.output), None)
@@ -2600,11 +2601,11 @@ def stored(made: Sub, node: Node) -> None:
         )
         out = next((n for n in out["nodes"] if n["name"] == last), None)
     if steps is None or out is None or out.get("type") != "shader":
-        return
+        return False
     m = out["shader_model"]
     kind = m["outputs"][0]["type"]
     if m.get("code") or m["outputs"][0].get(kind) != "$(name)_fct($uv)":
-        return
+        return False
     ret, g = ("vec4", "vec4") if kind == "rgba" else ("float", "float")
     k = num(float(steps))
     tie = (
@@ -2616,6 +2617,24 @@ def stored(made: Sub, node: Node) -> None:
         f"{ret} $(name)_fct(vec2 uv) {{\n"
         f"{g} v = clamp($(name)_raw(uv), 0.0, 1.0);\nreturn {tie};\n}}\n"
     )
+    return True
+
+
+def exact_buffers(
+    mm: list[dict[str, Any]], wires: list[dict[str, Any]], rounded: set[str]
+) -> None:
+    """Make the buffers of ``rounded`` nodes' outputs 32-bit.
+
+    A 16-bit float holds k / 255 only nearly: half-opacity blends of such
+    values land on 8-bit ties, which then round by the sign of that error
+    instead of down (Biomech's reaction-diffusion loop drifts from its
+    first Highpass). A 32-bit float holds them exactly enough.
+    """
+    by_name = {n["name"]: n for n in mm}
+    for w in wires:
+        target = by_name.get(w["to"])
+        if w["from"] in rounded and target is not None and target["type"] == "buffer":
+            target["parameters"]["f32"] = True
 
 
 def _seed_block(node: Node) -> int:
@@ -2727,6 +2746,7 @@ def translate_graph(
     # enlargement; bilinear leaves its texels' corners).
     sizes = {k: _output_size(nodes[k], size) for k in need}
     levels: dict[tuple[int, int], str] = {}
+    rounded: set[str] = set()  # outputs stored in 8 or 16 bits (stored)
     smooth: dict[int, str] = {}
 
     def fed(m: int, own: int) -> str:
@@ -2783,7 +2803,8 @@ def translate_graph(
             made = Sub(
                 [shader_node], [], [(n, name, i) for i, n in enumerate(names)], name
             )
-        stored(made, node)
+        if stored(made, node):
+            rounded.add(made.output)
         if own != size:
             made.nodes.append(buffer(f"{name}_size", own))
             made.wires.append(wire(made.output, f"{name}_size"))
@@ -2804,6 +2825,7 @@ def translate_graph(
     out_of = {k: merged.get(v, v) for k, v in out_of.items()}
     mm, wires, moved = drop_copies(mm, wires, origins)
     out_of = {k: moved.get(v, v) for k, v in out_of.items()}
+    exact_buffers(mm, wires, {merged.get(n, n) for n in rounded})
     if aliases is not None:
         aliases.update({k: moved.get(v, v) for k, v in merged.items()})
         aliases.update(moved)
