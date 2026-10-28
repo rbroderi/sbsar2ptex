@@ -192,6 +192,29 @@ def s8(v: np.ndarray) -> np.ndarray:
     return (k / 255).astype(F32)
 
 
+def s8n(v: np.ndarray, c: float) -> np.ndarray:
+    """Return the 8-bit store on NVIDIA GPUs: 1/4096 truncation, 1/255 ties down.
+
+    ``c`` (in 4096ths) is 0 for sums the shader computes, 0.03 for values
+    straight from a bilinear read, which the texture filter returns a hair
+    high.
+    """
+    v = np.clip(np.asarray(v, F32), F32(0), F32(1)).astype(np.float64)
+    x = np.floor(v * 4096 + c)
+    return (np.floor((x * 255 + 2047) / 4096) / 255).astype(F32)
+
+
+NVIDIA = [True]
+"""Whether the 8-bit model stores as NVIDIA GPUs do (s8n), else as AMD's (s8)."""
+SUM, READ = 0.0, 0.03
+"""s8n's offsets: a computed sum; a bilinear read's value."""
+
+
+def store(v: np.ndarray, c: float) -> np.ndarray:
+    """Return the 8-bit store of ``v``, a value from source ``c`` (SUM, READ)."""
+    return s8n(v, c) if NVIDIA[0] else s8(v)
+
+
 def read32(img: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """Return read_minor in float32 (the 8-bit graph's arithmetic)."""
     n = img.shape[0]
@@ -210,7 +233,7 @@ def pyramid(rows: np.ndarray) -> list[np.ndarray]:
     levels = [rows]
     while levels[-1].shape[1] > 1:
         a = levels[-1]
-        levels.append(s8((a[:, 0::2] + a[:, 1::2]) / F32(2)))
+        levels.append(store((a[:, 0::2] + a[:, 1::2]) / F32(2), READ))
     return levels
 
 
@@ -266,7 +289,7 @@ def axis8(img: np.ndarray, radius: float) -> np.ndarray:
                 acc = acc + merged(start, start + 1)
             else:
                 acc = acc + ff * col(start)
-        out[:, x] = s8(acc / F32(2 * radius))
+        out[:, x] = store(acc / F32(2 * radius), SUM)
     return out
 
 
@@ -281,7 +304,7 @@ def rotated8(img: np.ndarray, t: float, radius: float) -> np.ndarray:
     f = F32(radius + 0.5 - n)
     x0 = (n_px - 1) / 2
     y, x = np.mgrid[0:n_px, 0:n_px].astype(np.float64)
-    frame = s8(read32(img, x, y + (x - x0) * t))  # frame[c, r]
+    frame = store(read32(img, x, y + (x - x0) * t), READ)  # frame[c, r]
     levels = pyramid(frame)
     cvec = np.arange(n_px, dtype=np.float64)
 
@@ -313,12 +336,14 @@ def rotated8(img: np.ndarray, t: float, radius: float) -> np.ndarray:
             acc = acc + lev(0, start)
             start += 1
         acc = acc + f * lev(0, start)
-        box[:, r] = s8(acc / F32(2 * radius) + F32(1 / 512))
+        box[:, r] = store(acc / F32(2 * radius) + F32(1 / 512), SUM)
     chat = y - (x - x0) * t
     c0 = np.floor(chat)
     g = q(chat - c0).astype(F32)
     c0i, xi = c0.astype(np.int64), x.astype(np.int64)
-    return s8((F32(1) - g) * box[c0i % n_px, xi] + g * box[(c0i + 1) % n_px, xi])
+    return store(
+        (F32(1) - g) * box[c0i % n_px, xi] + g * box[(c0i + 1) % n_px, xi], READ
+    )
 
 
 def blur8(img: np.ndarray, intensity: float, angle: float) -> np.ndarray:
@@ -334,7 +359,7 @@ def blur8(img: np.ndarray, intensity: float, angle: float) -> np.ndarray:
         y, x = np.mgrid[0 : img.shape[0], 0 : img.shape[0]].astype(np.float64)
         m, p = read32(img, x - 1, y - t), read32(img, x + 1, y + t)
         ws, wc = F32(f / (2 * radius)), F32(1 / (2 * radius))
-        out = s8((m * ws + p * ws) + img * wc)
+        out = store((m * ws + p * ws) + img * wc, SUM)
     elif t == 0:
         out = axis8(img, radius)
     else:
@@ -366,7 +391,13 @@ def main() -> None:
     parser.add_argument(
         "--intensities", type=float, nargs="*", default=list(INTENSITIES)
     )
+    parser.add_argument(
+        "--amd",
+        action="store_true",
+        help="8-bit stores as AMD GPUs make them (s8), not NVIDIA's (s8n)",
+    )
     args = parser.parse_args()
+    NVIDIA[0] = not args.amd
     if args.eight:
         main8(args)
         return

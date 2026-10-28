@@ -1476,19 +1476,23 @@ def _dmb_image_reads(g: str, size: int, *, eight: bool) -> str:
     )
 
 
-def _dmb_s8(g: str) -> str:
-    """Return GLSL for Substance's 8-bit store: half-float truncation, then 1/255.
+_DMB_SUM, _DMB_READ = "0.0", "0.03"
+"""The 8-bit store's offset (in 4096ths) for a sum the shader computes, and
+for a value straight from a bilinear read (NVIDIA's filter returns it a
+hair high)."""
 
-    Clamped, truncated toward zero to 11 significant bits (the low 13 of a
-    float's mantissa cleared), rounded to the nearest 255th, halves up:
-    values at or a hair above a midpoint round down (except 0.5).
+
+def _dmb_s8(g: str) -> str:
+    """Return GLSL for Substance's 8-bit store, as on NVIDIA GPUs.
+
+    Clamped, truncated to 1/4096 (after the offset ``c``: _DMB_SUM or
+    _DMB_READ by where the value comes from), then the nearest 255th, ties
+    down. Exact in float32: X 255 + 2047 stays below 2^20.
     """
-    u = "uvec4" if g == "vec4" else "uint"
     return (
-        f"{g} $(name)_s8({g} v) {{\n"
-        "\tv = clamp(v, 0.0, 1.0);\n"
-        f"\tv = uintBitsToFloat(floatBitsToUint(v) & {u}(0xFFFFE000u));\n"
-        "\treturn floor(v * 255.0 + 0.5) / 255.0;\n"
+        f"{g} $(name)_s8({g} v, float c) {{\n"
+        f"\t{g} x = floor(clamp(v, 0.0, 1.0) * 4096.0 + c);\n"
+        "\treturn floor((x * 255.0 + 2047.0) / 4096.0) / 255.0;\n"
         "}\n"
         # floor(log2(m)) and the power of two dividing s (s = 0: any).
         "int $(name)_msb(int m) {\n"
@@ -1552,7 +1556,7 @@ def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
         f"\t\t{g} v = $(name)_p(s0 + float(j), mn, ymaj);\n"
         "\t\tint l = 0;\n"
         "\t\tfor (int jj = j; (jj & 1) == 1; jj >>= 1) {\n"
-        "\t\t\tv = $(name)_s8((st[l] + v) / 2.0);\n"
+        "\t\t\tv = $(name)_s8((st[l] + v) / 2.0, " + _DMB_READ + ");\n"
         "\t\t\tl++;\n"
         "\t\t}\n"
         "\t\tst[l] = v;\n"
@@ -1577,15 +1581,18 @@ def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
         "\t\tfloat w = $(name)_q(y - y0);\n"
         f"\t\t{g} p1 = $(name)_p(r, y0 + 1.0, ymaj);\n"
         f"\t\t{g} p2 = $(name)_p(r, y0 + 2.0, ymaj);\n"
-        f"\t\t{g} v0 = $(name)_s8(mix($(name)_p(r, y0, ymaj), p1, w));\n"
-        f"\t\t{g} v1 = $(name)_s8(mix(p1, p2, w));\n"
-        f"\t\t{g} v2 = seam ? $(name)_s8(mix(p2, $(name)_p(r, y0 + 3.0, ymaj), w))"
+        f"\t\t{g} v0 = $(name)_s8(mix($(name)_p(r, y0, ymaj), p1, w), "
+        + _DMB_READ
+        + ");\n"
+        f"\t\t{g} v1 = $(name)_s8(mix(p1, p2, w), " + _DMB_READ + ");\n"
+        f"\t\t{g} v2 = seam ? $(name)_s8(mix(p2, $(name)_p(r, y0 + 3.0, ymaj), w),"
+        " " + _DMB_READ + ")"
         f" : {g}(0.0);\n"
         "\t\tint l = 0;\n"
         "\t\tfor (int jj = j; (jj & 1) == 1; jj >>= 1) {\n"
-        "\t\t\tv0 = $(name)_s8((s0a[l] + v0) / 2.0);\n"
-        "\t\t\tv1 = $(name)_s8((s1a[l] + v1) / 2.0);\n"
-        "\t\t\tif (seam) v2 = $(name)_s8((s2a[l] + v2) / 2.0);\n"
+        "\t\t\tv0 = $(name)_s8((s0a[l] + v0) / 2.0, " + _DMB_READ + ");\n"
+        "\t\t\tv1 = $(name)_s8((s1a[l] + v1) / 2.0, " + _DMB_READ + ");\n"
+        "\t\t\tif (seam) v2 = $(name)_s8((s2a[l] + v2) / 2.0, " + _DMB_READ + ");\n"
         "\t\t\tl++;\n"
         "\t\t}\n"
         "\t\ts0a[l] = v0; s1a[l] = v1; s2a[l] = v2;\n"
@@ -1626,7 +1633,7 @@ def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
         "\t} else {",
         "\t\tacc += f * $(name)_p(float(start), mn, ymaj);",
         "\t}",
-        "\treturn $(name)_s8(acc / (2.0 * R));",
+        "\treturn $(name)_s8(acc / (2.0 * R), " + _DMB_SUM + ");",
         "}",
     ]
     call = "$(name)_blk2(c0, float({at}), {lv}, t, X0, ymaj, a, b);"
@@ -1657,9 +1664,9 @@ def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
         "}",
         call.format(at="start", lv="0"),
         "accA += f * a; accB += f * b;",
-        f"{g} gA = $(name)_s8(accA / (2.0 * R) + 1.0 / 512.0);",
-        f"{g} gB = $(name)_s8(accB / (2.0 * R) + 1.0 / 512.0);",
-        "return $(name)_s8(mix(gA, gB, $(name)_q(ch - c0)));",
+        f"{g} gA = $(name)_s8(accA / (2.0 * R) + 1.0 / 512.0, " + _DMB_SUM + ");",
+        f"{g} gB = $(name)_s8(accB / (2.0 * R) + 1.0 / 512.0, " + _DMB_SUM + ");",
+        "return $(name)_s8(mix(gA, gB, $(name)_q(ch - c0)), " + _DMB_READ + ");",
     ]
     return helpers, axis + rotated
 
@@ -1713,7 +1720,7 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
             f"\t{g} m = $(name)_read(pq.x - 1.0, pq.y - t, ymaj);",
             f"\t{g} p = $(name)_read(pq.x + 1.0, pq.y + t, ymaj);",
             f"\t{g} c = $(name)_p(pq.x, pq.y, ymaj);",
-            "\treturn $(name)_s8((m * ws + p * ws) + c * wc);",
+            "\treturn $(name)_s8((m * ws + p * ws) + c * wc, " + _DMB_SUM + ");",
             "}",
             *large,
         ]
