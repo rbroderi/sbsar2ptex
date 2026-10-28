@@ -79,8 +79,10 @@ class Instr:
     def aligned(self) -> list[int]:
         """Return the operands without the alignment padding before u32s."""
         n = len(self.operands)
-        if self.op in (0x00, 0x02) and n % 2 and self.type != BOOL:
-            return self.operands[1:]  # bools take one u16 a component, no padding
+        # A bool constant takes one u16 a component, no padding; a graph
+        # input, bool or not, is read by its u32 uid.
+        if n % 2 and (self.op == 0x02 or (self.op == 0x00 and self.type != BOOL)):  # noqa: PLR2004
+            return self.operands[1:]
         return self.operands
 
     def u32s(self) -> list[int]:

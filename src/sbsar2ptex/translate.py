@@ -2577,6 +2577,21 @@ def _output_size(node: Node, size: int) -> int:
     return size
 
 
+def _seed_block(node: Node) -> int:
+    """Return the offset of the code block computing ``node``'s random seed.
+
+    The seed function returns one integer. A node with a dynamic output size
+    too has that function's block as well (two integers), after the seed's
+    or before it.
+    """
+    for offset in reversed(node.code):
+        last = decode(node.at(offset, (node.end - offset) // 4)).instrs[-1]
+        if last.type != FUNC_FLOAT and last.width == 1:
+            return offset
+    msg = f"no seed function in node {node.index}"
+    raise UnsupportedError(msg)
+
+
 def node_shader(node: Node, name: str, size: int = 11) -> Made:
     """Return the shader node for ``node`` and its input names, in port order."""
     translate = TRANSLATORS.get(node.op)
@@ -2591,7 +2606,7 @@ def node_shader(node: Node, name: str, size: int = 11) -> Made:
         translated = replace(node, inline=node.inline[1:])
     elif seed_state == 2:  # noqa: PLR2004
         _CTX.value_seed = "0"  # not the last node's, inside the seed's function
-        _CTX.value_seed = num(dynamic(node, node.code[-1]))
+        _CTX.value_seed = num(dynamic(node, _seed_block(node)))
     else:
         _CTX.value_seed = "0"
     if translated.inline:
