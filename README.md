@@ -38,7 +38,8 @@ folders, or give `--sbsrender PATH`.
 
 - `--list` prints the material's outputs and parameters;
 - `--set NAME=VALUE` changes a parameter before rendering (repeatable);
-- `--size 11` is the resolution as log2 (11 = 2048 px);
+- `--size 11` is the resolution as log2 (11 = 2048 px); by default the material's
+  own (its `$outputsize`, usually 8 = 256 px);
 - `--embedded` also saves the bitmaps baked into the archive.
 
 Without `sbsrender`, export the maps yourself (Substance Player, Painter or Designer)
@@ -74,7 +75,9 @@ run cooks Designer's `resources/packages` with its `sbscooker` into a cache
 - `--library DIR` keeps the cooked library elsewhere, `--sbscooker PATH`
   names the cooker, `--refresh-library` re-reads the cache;
 - `--size` is the resolution the graph is built for (FX-Map textures, blur
-  widths in texels).
+  widths in texels); the material's own by default, as Substance renders it.
+  Material Maker keeps every buffer in GPU memory, so a large graph built at
+  2048 px can need more than a graphics card has.
 
 ## Decompile
 

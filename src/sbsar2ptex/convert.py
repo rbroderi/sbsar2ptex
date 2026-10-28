@@ -1,6 +1,6 @@
 """Turn a Substance archive (.sbsar) into a Material Maker graph (.ptex).
 
-    sbsar2ptex MATERIAL.sbsar [-o OUT_DIR] [--size 11] [--set NAME=VALUE ...]
+    sbsar2ptex MATERIAL.sbsar [-o OUT_DIR] [--size 8] [--set NAME=VALUE ...]
         [--maps DIR [--normal opengl|directx]] [--sbsrender PATH] [--embedded]
     sbsar2ptex MATERIAL.sbsar --procedural [--flat] [--no-library]
         [--library DIR] [--sbscooker PATH] [--refresh-library]
@@ -151,6 +151,18 @@ def choose(graph: Graph) -> dict[str, Output]:
                 chosen[slot] = found[0]
                 break
     return chosen
+
+
+def default_size(graph: Graph) -> int:
+    """Return the size (log2 pixels) the graph renders at unless told otherwise.
+
+    Its $outputsize input's default (the width), or Substance's own default,
+    8 (256 pixels), when it has none.
+    """
+    for i in graph.inputs:
+        if i["identifier"] == "$outputsize" and i["default"]:
+            return int(i["default"].split(",")[0])
+    return 8
 
 
 def find_sbsrender(given: str | None) -> Path | None:
@@ -340,7 +352,11 @@ def main() -> None:
     parser.add_argument(
         "--graph", help="which graph, by pkg:// url (default: the first)"
     )
-    parser.add_argument("--size", type=int, default=11, help="log2 pixels (11 = 2048)")
+    parser.add_argument(
+        "--size",
+        type=int,
+        help="log2 pixels (11 = 2048; default: the graph's own, often 8 = 256)",
+    )
     parser.add_argument(
         "--set",
         action="append",
@@ -399,6 +415,8 @@ def main() -> None:
     if graph is None:
         sys.exit(f"no graph {args.graph}; have: {', '.join(g.url for g in graphs)}")
     chosen = choose(graph)
+    if args.size is None:
+        args.size = default_size(graph)
 
     if args.list:
         print(f"{graph.url}  {graph.label}")

@@ -6,6 +6,7 @@ import pytest
 
 from sbsar2ptex.convert import SLOTS
 from sbsar2ptex.convert import choose
+from sbsar2ptex.convert import default_size
 from sbsar2ptex.convert import describe
 from sbsar2ptex.convert import match
 from sbsar2ptex.convert import ptex
@@ -50,6 +51,14 @@ def test_describe(graph) -> None:
     assert graph.inputs == [
         {"identifier": "Amount", "type": "float", "default": "0.5", "label": "Amount"}
     ]
+
+
+def test_default_size_is_the_graphs_own(graph) -> None:
+    assert default_size(graph) == 8  # none given: Substance's default
+    graph.inputs.append(
+        {"identifier": "$outputsize", "type": "int2", "default": "9,9", "label": ""}
+    )
+    assert default_size(graph) == 9
 
 
 def test_choose_prefers_single_channel_and_opengl(graph) -> None:
