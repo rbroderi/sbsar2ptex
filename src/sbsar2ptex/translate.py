@@ -2577,6 +2577,47 @@ def _output_size(node: Node, size: int) -> int:
     return size
 
 
+STORE_STEPS = {0: 255, 1: 65535}
+"""A node's output format (node word flag bits 4-5) -> its integer steps:
+8 and 16 bits; the float formats (2, 3) keep what they are given."""
+
+
+def stored(made: Sub, node: Node) -> None:
+    """Make ``made``'s output read as Substance stores ``node``'s: in its format.
+
+    Substance keeps every node's image in the node's format, so an 8-bit
+    node's value is rounded to 1/255 before anything reads it, a 16-bit
+    one's to 1/65535 (thresholds downstream turn the difference into whole
+    pixels). Ties between 8-bit steps break down, as on NVIDIA GPUs (see
+    _levels). The output shader computes the unrounded value as
+    ``$(name)_raw`` and its function returns that rounded.
+    """
+    steps = STORE_STEPS.get(node.flags >> 4 & 3)
+    out = next((n for n in made.nodes if n["name"] == made.output), None)
+    if out is not None and out.get("type") == "graph":  # its output's shader
+        last = next(
+            (w["from"] for w in out["connections"] if w["to"] == "gen_outputs"), None
+        )
+        out = next((n for n in out["nodes"] if n["name"] == last), None)
+    if steps is None or out is None or out.get("type") != "shader":
+        return
+    m = out["shader_model"]
+    kind = m["outputs"][0]["type"]
+    if m.get("code") or m["outputs"][0].get(kind) != "$(name)_fct($uv)":
+        return
+    ret, g = ("vec4", "vec4") if kind == "rgba" else ("float", "float")
+    k = num(float(steps))
+    tie = (
+        f"ceil(v * {k} - 0.5) / {k}"
+        if steps == 255  # noqa: PLR2004
+        else f"floor(v * {k} + 0.5) / {k}"
+    )
+    m["instance"] = m["instance"].replace("$(name)_fct(", "$(name)_raw(") + (
+        f"{ret} $(name)_fct(vec2 uv) {{\n"
+        f"{g} v = clamp($(name)_raw(uv), 0.0, 1.0);\nreturn {tie};\n}}\n"
+    )
+
+
 def _seed_block(node: Node) -> int:
     """Return the offset of the code block computing ``node``'s random seed.
 
@@ -2742,6 +2783,7 @@ def translate_graph(
             made = Sub(
                 [shader_node], [], [(n, name, i) for i, n in enumerate(names)], name
             )
+        stored(made, node)
         if own != size:
             made.nodes.append(buffer(f"{name}_size", own))
             made.wires.append(wire(made.output, f"{name}_size"))
