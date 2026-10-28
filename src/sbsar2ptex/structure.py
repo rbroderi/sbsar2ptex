@@ -32,6 +32,7 @@ from sbsar2ptex.fuse import fuse
 from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import GRAPH_PARAM
+from sbsar2ptex.translate import INSTANCE_PARAM
 from sbsar2ptex.translate import declared_params
 
 PART = (300, 1200)
@@ -430,16 +431,21 @@ def nest(
         new_outs[name] = src
     declared = declared_params(mm)
 
-    def params_of(n: dict[str, Any]) -> list[str]:
-        """Return the graph inputs a node reads (its own knobs stay on it)."""
+    def params_of(n: dict[str, Any], *, whole: bool = False) -> list[str]:
+        """Return the graph inputs a node reads (its own knobs stay on it).
+
+        And for a library node's group (``whole``), the instance's
+        parameters (INSTANCE_PARAM): its knobs, shown on it alone.
+        """
+        shared = (GRAPH_PARAM, INSTANCE_PARAM) if whole else (GRAPH_PARAM,)
         if n["type"] == "shader":
             return [
                 p["name"]
                 for p in n["shader_model"]["parameters"]
-                if p["name"].startswith(GRAPH_PARAM)
+                if p["name"].startswith(shared)
             ]
         if n["type"] == "graph":
-            return [p for p in n["parameters"] if p.startswith(GRAPH_PARAM)]
+            return [p for p in n["parameters"] if p.startswith(shared)]
         return []
 
     def build(g: Group) -> dict[str, Any]:
@@ -448,7 +454,7 @@ def nest(
             inner, g.wires = fuse(inner, g.wires)
         exposed: dict[str, list[str]] = {}
         for n in inner:
-            for p in params_of(n):
+            for p in params_of(n, whole=g.whole):
                 exposed.setdefault(p, []).append(n["name"])
         ios = [
             _ios("gen_inputs", g.input_types),

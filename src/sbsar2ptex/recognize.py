@@ -41,6 +41,8 @@ from sbsar2ptex.function import decode
 from sbsar2ptex.sbsasm import BLEND_OPACITY
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.translate import GraphInput
+from sbsar2ptex.translate import graph_inputs
 
 MIN_NODES = 3
 MIN_SHARE = 0.45
@@ -72,6 +74,9 @@ class Template:
     members: list[int] = field(default_factory=list)
     """Its nodes (indices into ``nodes``), graph inputs excluded."""
     label: str = ""
+    inputs: dict[int, GraphInput] = field(default_factory=dict)
+    """The package's (non-image) inputs by uid: the library node's parameters,
+    which its nodes' functions read."""
 
 
 @dataclass
@@ -136,11 +141,13 @@ def templates(sbsar: Path) -> list[Template]:
         label = re.search(r'label="([^"]*)"', graph.group(2))
         for uid in re.findall(r'<output uid="(\d+)"', graph.group(2)):
             owner[int(uid)] = (graph.group(1), label.group(1) if label else "")
+    inputs = graph_inputs(asm, xml)
     out = []
     for uid, (_, root) in zip(asm.output_uids, asm.output_nodes, strict=True):
         graph, label = owner.get(uid, ("?", ""))
         t = Template(sbsar.stem, graph, names.get(uid, str(uid)), nodes, root)
         t.label = label
+        t.inputs = inputs
         seen: set[int] = set()
         todo = [root]
         while todo:

@@ -40,7 +40,7 @@ COOKER_PLACES = (
 PICKLE = "templates.pickle"
 FAILED = "failed.txt"
 """Packages that would not cook, one name a line."""
-VERSION = 2
+VERSION = 3
 """Bump when Template or the matching changes, to rebuild cached pickles."""
 MATCH_VERSION = 1
 """Bump when recognize's rules change, to match materials again."""

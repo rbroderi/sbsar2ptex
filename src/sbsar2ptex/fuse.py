@@ -7,13 +7,18 @@ same pixels, one node fewer. Inside a recognized library node (or one of the
 author's repeated units) that changes nothing a user could edit in Substance
 either, which shows such a node as one; every knob stays a live parameter of
 the fused node (renamed with a prefix, labelled as before), and the graph's
-inputs keep their names, so what drives them still does.
+inputs and the instance's parameters keep their names, so what drives them
+still does.
 """
 
 import re
 from typing import Any
 
 from sbsar2ptex.translate import GRAPH_PARAM
+from sbsar2ptex.translate import INSTANCE_PARAM
+
+SHARED = (GRAPH_PARAM, INSTANCE_PARAM)
+"""Parameters shared by name across nodes: never renamed."""
 
 
 def _plain(node: dict[str, Any]) -> bool:
@@ -65,7 +70,7 @@ def fuse_into(
     port_in = rm["inputs"][port]
     if shared is None or port_in["type"] != im["outputs"][0]["type"]:
         return None
-    own = [p["name"] for p in im["parameters"] if not p["name"].startswith(GRAPH_PARAM)]
+    own = [p["name"] for p in im["parameters"] if not p["name"].startswith(SHARED)]
     ins = [i["name"] for i in im["inputs"]]
     tag = prefix.rstrip("_")
     body = im["instance"].replace("$(name)", f"$(name)_{tag}")
@@ -80,7 +85,7 @@ def fuse_into(
     have = {p["name"] for p in params}
     values = dict(reader["parameters"])
     for p in im["parameters"]:
-        name = p["name"] if p["name"].startswith(GRAPH_PARAM) else prefix + p["name"]
+        name = p["name"] if p["name"].startswith(SHARED) else prefix + p["name"]
         if name not in have:
             params.append({**p, "name": name})
             have.add(name)

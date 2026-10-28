@@ -68,6 +68,12 @@ class GraphInput:
     """The .sbsasm type: 0 float, 1 float2, 2 float3, 3 float4, 4 int, ..."""
     default: list[float | int]
     label: str = ""
+    scope: str = ""
+    """A library node instance's (libparams.knobs): its parameter is the
+    instance's, INSTANCE_PARAM-named, not the graph's."""
+    fixed: bool = False
+    """Read as its default, a constant, not a parameter (one the cooked
+    graph's structure was made for)."""
 
 
 @dataclass
@@ -197,6 +203,9 @@ def _float_param(name: str, label: str, default: float, *, integer: bool) -> Non
 
 GRAPH_PARAM = "p_"
 """Graph inputs' parameter names start so; a node's own knobs do not."""
+INSTANCE_PARAM = "i_"
+"""A library node instance's parameters' names start so (GraphInput.scope):
+shared by the instance's nodes, shown on the instance, not the graph."""
 
 
 def knob(
@@ -264,9 +273,18 @@ def _param_for(uid: int) -> str:
     if gi is None:
         msg = f"function reads unknown input {uid:#x}"
         raise UnsupportedError(msg)
-    name = param_name(gi.identifier)
-    label = gi.label or gi.identifier
     integer = gi.type >= IN_INT
+    if gi.fixed:
+        width = _INPUT_GLSL.get(gi.type, 1)
+        parts = [str(int(v)) if integer else num(float(v)) for v in gi.default[:width]]
+        if width == 1:
+            return parts[0]
+        kind = "ivec" if gi.type >= IN_INT2 else "vec"
+        return f"{kind}{width}({', '.join(parts)})"
+    name = param_name(gi.identifier)
+    if gi.scope:
+        name = INSTANCE_PARAM + gi.scope + "_" + name.removeprefix(GRAPH_PARAM)
+    label = gi.label or gi.identifier
     if gi.type == IN_FLOAT4:
         r, g, b, a = (list(gi.default) + [0.0] * 4)[:4]
         _CTX.params[name] = {
@@ -2652,8 +2670,16 @@ def _seed_block(node: Node) -> int:
     raise UnsupportedError(msg)
 
 
-def node_shader(node: Node, name: str, size: int = 11) -> Made:
-    """Return the shader node for ``node`` and its input names, in port order."""
+def node_shader(
+    node: Node, name: str, size: int = 11, template: Node | None = None
+) -> Made:
+    """Return the shader node for ``node`` and its input names, in port order.
+
+    With ``template``, a library graph's node ``node`` is an instance of:
+    its settings are read from it (functions of the library node's
+    parameters: translate_graph's ``library``), the seed and the wiring are
+    ``node``'s.
+    """
     translate = TRANSLATORS.get(node.op)
     if translate is None:
         msg = f"op {node.op}"
@@ -2669,6 +2695,10 @@ def node_shader(node: Node, name: str, size: int = 11) -> Made:
         _CTX.value_seed = num(dynamic(node, _seed_block(node)))
     else:
         _CTX.value_seed = "0"
+    if template is not None:
+        translated = replace(template, index=node.index, inputs=node.inputs)
+        if (template.flags >> 6) & 3 == 1:  # its own seed, inline
+            translated = replace(translated, inline=template.inline[1:])
     if translated.inline:
         target = translated.inline[0] + BASE
         if translated.start < target < translated.end:
@@ -2713,6 +2743,7 @@ def translate_graph(
     data_dir: Path | None = None,
     origins: dict[str, int] | None = None,
     aliases: dict[str, str] | None = None,
+    library: dict[int, tuple[Node, dict[int, GraphInput]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -2723,6 +2754,10 @@ def translate_graph(
     translated. ``origins``, if given, is filled with each Material Maker
     node's Substance node (by name); ``aliases`` with each node merged away
     (merge_same, drop_copies) and the one computing its image now.
+    ``library`` gives the nodes of library node instances whose settings
+    were recovered (libparams) their template node and the inputs its
+    functions read: they are translated from it (node_shader), the
+    library node's parameters live knobs of the instance.
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
     _CTX = _Context(size=size, inputs=dict(inputs or {}), data_dir=data_dir)
@@ -2797,7 +2832,21 @@ def translate_graph(
                 origins[name] = k
             continue
         own = sizes[k]
-        made = node_shader(node, name, own)
+        if library and k in library:
+            template, knobs = library[k]
+            graph_wide = _CTX.inputs
+            # the template's $outputsize and $randomseed are the graph's own
+            by_id = {gi.identifier: gi for gi in graph_wide.values()}
+            _CTX.inputs = graph_wide | {
+                uid: by_id.get(gi.identifier, gi) if gi.identifier[:1] == "$" else gi
+                for uid, gi in knobs.items()
+            }
+            try:
+                made = node_shader(node, name, own, template)
+            finally:
+                _CTX.inputs = graph_wide
+        else:
+            made = node_shader(node, name, own)
         if not isinstance(made, Sub):
             shader_node, names = made
             made = Sub(

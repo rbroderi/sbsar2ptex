@@ -20,12 +20,17 @@ from sbsar2ptex.archive import member
 from sbsar2ptex.convert import SLOTS
 from sbsar2ptex.convert import Graph
 from sbsar2ptex.convert import choose
+from sbsar2ptex.libparams import knobs
+from sbsar2ptex.libparams import solve
 from sbsar2ptex.library import recognized
+from sbsar2ptex.recognize import Match
 from sbsar2ptex.recognize import Template
 from sbsar2ptex.recognize import resembler
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import Asm
+from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.structure import nest
+from sbsar2ptex.translate import GraphInput
 from sbsar2ptex.translate import graph_inputs
 from sbsar2ptex.translate import translate_graph
 
@@ -98,6 +103,26 @@ def material(
     return nodes, wires
 
 
+def library_nodes(
+    found: list[Match], nodes: list[Node], inputs: dict[int, GraphInput], size: int
+) -> dict[int, tuple[Node, dict[int, GraphInput]]]:
+    """Return translate_graph's ``library``: instances' nodes and their templates'.
+
+    For each instance whose library parameters are recovered (libparams):
+    its every node's template node, and the inputs those read, the
+    parameters the instance's own.
+    """
+    out: dict[int, tuple[Node, dict[int, GraphInput]]] = {}
+    for m in found:
+        solved = solve(m, nodes, [size, size])
+        if solved is None:
+            continue
+        reads = knobs(m, solved, inputs)
+        for tk, gk in m.members.items():
+            out[gk] = (m.template.nodes[tk], reads)
+    return out
+
+
 def build(
     files: dict[str, bytes],
     graph: Graph,
@@ -128,22 +153,24 @@ def build(
     chosen = choose(graph)
     wanted = {o.identifier: node_of[o.identifier] for o in chosen.values()}
     origins: dict[str, int] = {}
+    inputs = graph_inputs(asm, xml)
+    found = (
+        recognized(member(files, ".sbsasm"), nodes, library, matches)
+        if library and not flat
+        else []
+    )
     mm, wires, outs = translate_graph(
         nodes,
         wanted,
         bitmaps(asm, data / "bitmaps"),
         size=size,
-        inputs=graph_inputs(asm, xml),
+        inputs=inputs,
         data_dir=data / "fxmaps",
         origins=origins,
         aliases=aliases,
+        library=library_nodes(found, nodes, inputs, size),
     )
     if not flat:
-        found = (
-            recognized(member(files, ".sbsasm"), nodes, library, matches)
-            if library
-            else []
-        )
         instances = [
             (list(m.members.values()), m.template.label or m.template.graph)
             for m in found

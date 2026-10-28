@@ -73,6 +73,11 @@ Inside a library node (or a unit the author repeated), a node only one other
 reads becomes that node's helper function: the same shader code, so the same
 pixels, with every setting still a parameter (Biomech: 6,351 shaders become
 3,777).
+A library node gets its own knobs back, as Designer shows them (Highpass's
+Radius, Blur HQ's Intensity): the values its cooked constants were made
+from are recovered exactly, and its nodes compute their settings from the
+knobs as the library graph does (Biomech: 276 of its 393 library nodes;
+the rest keep their constants).
 
 - `--flat` leaves the graph flat (one node per atomic node);
 - `--no-library` groups it without naming library nodes (no Designer needed);
