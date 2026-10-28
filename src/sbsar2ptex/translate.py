@@ -1450,18 +1450,23 @@ _DMB_Q = "float $(name)_q(float u) {\n\treturn floor(u * 256.0 + 0.5) / 256.0;\n
 """A bilinear fraction rounded to 1/256, as the texture filter rounds it."""
 
 
-def _dmb_image_reads(g: str, size: int) -> str:
-    """Return GLSL reading the blur's input (an unfiltered buffer) by texel.
+def _dmb_image_reads(g: str, size: int, *, eight: bool) -> str:
+    """Return GLSL reading the blur's input buffer by texel.
 
-    ``_p(i, j, ymaj)`` is the texel at major-axis index i, minor j;
-    ``_read(i, y, ymaj)`` reads at integer i and fractional y, linearly in
-    y with the fraction rounded to 1/256. Indices wrap.
+    ``_p(i, j, ymaj)`` is the texel at major-axis index i, minor j (its
+    center: no filtering); ``_read(i, y, ymaj)`` reads at integer i and
+    fractional y, linearly in y with the fraction rounded to 1/256. Indices
+    wrap. In an 8-bit graph the input holds k / 255, which the (16-bit
+    float) buffer keeps only nearly: texels are rounded back to it.
     """
     n = num(float(1 << size))
+    texel = f"$input((mod(xy, {n}) + 0.5) / {n})"
+    if eight:
+        texel = f"floor({texel} * 255.0 + 0.5) / 255.0"
     return (
         _DMB_Q + f"{g} $(name)_p(float i, float j, bool ymaj) {{\n"
         "\tvec2 xy = ymaj ? vec2(j, i) : vec2(i, j);\n"
-        f"\treturn $input((mod(xy, {n}) + 0.5) / {n});\n"
+        f"\treturn {texel};\n"
         "}\n"
         f"{g} $(name)_read(float i, float y, bool ymaj) {{\n"
         "\tfloat y0 = floor(y);\n"
@@ -1469,6 +1474,194 @@ def _dmb_image_reads(g: str, size: int) -> str:
         "\treturn mix($(name)_p(i, y0, ymaj), $(name)_p(i, y0 + 1.0, ymaj), w);\n"
         "}\n"
     )
+
+
+def _dmb_s8(g: str) -> str:
+    """Return GLSL for Substance's 8-bit store: half-float truncation, then 1/255.
+
+    Clamped, truncated toward zero to 11 significant bits (the low 13 of a
+    float's mantissa cleared), rounded to the nearest 255th, halves up:
+    values at or a hair above a midpoint round down (except 0.5).
+    """
+    u = "uvec4" if g == "vec4" else "uint"
+    return (
+        f"{g} $(name)_s8({g} v) {{\n"
+        "\tv = clamp(v, 0.0, 1.0);\n"
+        f"\tv = uintBitsToFloat(floatBitsToUint(v) & {u}(0xFFFFE000u));\n"
+        "\treturn floor(v * 255.0 + 0.5) / 255.0;\n"
+        "}\n"
+        # floor(log2(m)) and the power of two dividing s (s = 0: any).
+        "int $(name)_msb(int m) {\n"
+        "\tint l = 0;\n"
+        "\twhile ((2 << l) <= m) l++;\n"
+        "\treturn l;\n"
+        "}\n"
+        "int $(name)_lsb(int s) {\n"
+        "\tif (s == 0) return 99;\n"
+        "\tint l = 0;\n"
+        "\twhile (((s >> l) & 1) == 0) l++;\n"
+        "\treturn l;\n"
+        "}\n"
+    )
+
+
+def _dmb_blocks(size: int, use: str) -> list[str]:
+    """Return GLSL adding the box's aligned blocks from ``start`` to ``end``.
+
+    Greedy, as Substance's pyramid holds them: each the largest power of
+    two that fits and divides its start (modulo the period), of two at
+    least. ``use`` is GLSL adding block (``start``, level ``L``).
+    """
+    n = 1 << size
+    return [
+        "for (int it = 0; it < 64 && end - start >= 2; it++) {",
+        f"\tint s = start & {n - 1};",
+        "\tint L = min($(name)_msb(end - start), $(name)_lsb(s));",
+        "\tif (L < 1) break;",
+        f"\t{use}",
+        "\tstart += 1 << L;",
+        "}",
+    ]
+
+
+def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
+    """Return an 8-bit graph's large paths: GLSL helpers and body lines.
+
+    Substance stores every intermediate texture in 8 bits (_dmb_s8) and
+    boxes with a pyramid of stored pair means, recursive, along the major
+    axis: a block's value is a tree of stored means of its texels, here
+    rebuilt per pixel. At 0 and 90 degrees the box runs on the input, its
+    partial end taps merged with their neighbors as in 16 bits, but by the
+    aligned blocks (both ends when n = 2). Otherwise every value is the
+    stored frame's (blocks a fractional column over past its seam), with no
+    merging, the box stored with 1/512 added, then the read back stored.
+    """
+    n = num(float(1 << size))
+    helpers = (
+        _dmb_s8(g)
+        # A partial end tap (at b) read with its whole neighbor (a) at once.
+        + f"{g} $(name)_mrg(float a, float b, float mn, float qf, float f,"
+        " bool ymaj) {\n"
+        "\treturn (1.0 + f) * ((1.0 - qf) * $(name)_p(a, mn, ymaj)"
+        " + qf * $(name)_p(b, mn, ymaj));\n"
+        "}\n"
+        # Level L at major index s0 along minor index mn: input texels.
+        f"{g} $(name)_blk(float s0, int L, float mn, bool ymaj) {{\n"
+        f"\t{g} st[13];\n"
+        "\tfor (int j = 0; j < (1 << L); j++) {\n"
+        f"\t\t{g} v = $(name)_p(s0 + float(j), mn, ymaj);\n"
+        "\t\tint l = 0;\n"
+        "\t\tfor (int jj = j; (jj & 1) == 1; jj >>= 1) {\n"
+        "\t\t\tv = $(name)_s8((st[l] + v) / 2.0);\n"
+        "\t\t\tl++;\n"
+        "\t\t}\n"
+        "\t\tst[l] = v;\n"
+        "\t}\n"
+        "\treturn st[L];\n"
+        "}\n"
+        # Level L of the stored frame at row s0, columns c and c + 1: both
+        # from three texels a row (the same fraction), past the seam three
+        # columns from four, a fractional column over.
+        f"void $(name)_blk2(float c, float s0, int L, float t, float X0, bool ymaj,"
+        f" out {g} a, out {g} b) {{\n"
+        f"\tfloat k = floor(s0 / {n});\n"
+        f"\tfloat rm = s0 - k * {n};\n"
+        f"\tfloat cf = c + k * {n} * t;\n"
+        "\tfloat ca = floor(cf);\n"
+        "\tbool seam = k != 0.0;\n"
+        f"\t{g} s0a[13]; {g} s1a[13]; {g} s2a[13];\n"
+        "\tfor (int j = 0; j < (1 << L); j++) {\n"
+        "\t\tfloat r = rm + float(j);\n"
+        "\t\tfloat y = ca + (r - X0) * t;\n"
+        "\t\tfloat y0 = floor(y);\n"
+        "\t\tfloat w = $(name)_q(y - y0);\n"
+        f"\t\t{g} p1 = $(name)_p(r, y0 + 1.0, ymaj);\n"
+        f"\t\t{g} p2 = $(name)_p(r, y0 + 2.0, ymaj);\n"
+        f"\t\t{g} v0 = $(name)_s8(mix($(name)_p(r, y0, ymaj), p1, w));\n"
+        f"\t\t{g} v1 = $(name)_s8(mix(p1, p2, w));\n"
+        f"\t\t{g} v2 = seam ? $(name)_s8(mix(p2, $(name)_p(r, y0 + 3.0, ymaj), w))"
+        f" : {g}(0.0);\n"
+        "\t\tint l = 0;\n"
+        "\t\tfor (int jj = j; (jj & 1) == 1; jj >>= 1) {\n"
+        "\t\t\tv0 = $(name)_s8((s0a[l] + v0) / 2.0);\n"
+        "\t\t\tv1 = $(name)_s8((s1a[l] + v1) / 2.0);\n"
+        "\t\t\tif (seam) v2 = $(name)_s8((s2a[l] + v2) / 2.0);\n"
+        "\t\t\tl++;\n"
+        "\t\t}\n"
+        "\t\ts0a[l] = v0; s1a[l] = v1; s2a[l] = v2;\n"
+        "\t}\n"
+        "\tif (!seam) {\n"
+        "\t\ta = s0a[L]; b = s1a[L];\n"
+        "\t\treturn;\n"
+        "\t}\n"
+        "\tfloat phi = $(name)_q(cf - ca);\n"
+        "\ta = mix(s0a[L], s1a[L], phi);\n"
+        "\tb = mix(s1a[L], s2a[L], phi);\n"
+        "}\n"
+    )
+    axis = [
+        "if (t == 0.0) {",
+        "\tfloat Qf = $(name)_q(f / (1.0 + f));",
+        "\tint first = int(pq.x) - (n - 1);",
+        "\tint end = first + 2 * n - 1;",
+        "\tint start = first;",
+        "\tfloat mn = pq.y;",
+        f"\t{g} acc = $(name)_mrg(float(first), float(first - 1), mn, Qf, f, ymaj);",
+        "\tif (n == 2) {",
+        "\t\tacc = acc + $(name)_p(float(first + 1), mn, ymaj);",
+        "\t\tstart = first + 2;",
+        "\t} else if ((first & 1) == 1) {",
+        "\t\tstart = first + 1;",
+        "\t} else {",
+        "\t\tacc = f * $(name)_p(float(first - 1), mn, ymaj);",
+        "\t}",
+        *(
+            "\t" + line
+            for line in _dmb_blocks(
+                size, "acc += float(1 << L) * $(name)_blk(float(start), L, mn, ymaj);"
+            )
+        ),
+        "\tif (end - start == 1) {",
+        "\t\tacc += $(name)_mrg(float(start), float(start + 1), mn, Qf, f, ymaj);",
+        "\t} else {",
+        "\t\tacc += f * $(name)_p(float(start), mn, ymaj);",
+        "\t}",
+        "\treturn $(name)_s8(acc / (2.0 * R));",
+        "}",
+    ]
+    call = "$(name)_blk2(c0, float({at}), {lv}, t, X0, ymaj, a, b);"
+    rotated = [
+        "float ch = pq.y - (pq.x - X0) * t;",
+        "float c0 = floor(ch);",
+        "int first = int(pq.x) - (n - 1);",
+        "int end = first + 2 * n - 1;",
+        "int start = first;",
+        f"{g} a; {g} b;",
+        call.format(at="first - 1", lv="0"),
+        f"{g} accA = f * a;",
+        f"{g} accB = f * b;",
+        "if ((first & 1) == 1) {",
+        "\t" + call.format(at="first", lv="0"),
+        "\taccA += a; accB += b;",
+        "\tstart += 1;",
+        "}",
+        *_dmb_blocks(
+            size,
+            call.format(at="start", lv="L")
+            + " accA += float(1 << L) * a; accB += float(1 << L) * b;",
+        ),
+        "if (end - start == 1) {",
+        "\t" + call.format(at="start", lv="0"),
+        "\taccA += a; accB += b;",
+        "\tstart += 1;",
+        "}",
+        call.format(at="start", lv="0"),
+        "accA += f * a; accB += f * b;",
+        f"{g} gA = $(name)_s8(accA / (2.0 * R) + 1.0 / 512.0);",
+        f"{g} gB = $(name)_s8(accB / (2.0 * R) + 1.0 / 512.0);",
+        "return $(name)_s8(mix(gA, gB, $(name)_q(ch - c0)));",
+    ]
+    return helpers, axis + rotated
 
 
 def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
@@ -1479,130 +1672,127 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     0.5 + (intensity N / 256 - 0.5) max(|cos|, |sin|) steps: n = ceil(R -
     0.5) taps either side, the end ones weighted R + 0.5 - n, the sum
     divided by 2R. Up to R = 0.5 the image is kept; up to 1.5 it is three
-    reads, linear across the major axis. Past that the image is sheared
-    into a frame whose column c is the line minor = c + (major - X0) t
-    (pass "frame"), boxed along the columns ("box": rows past the image's
-    edge read the frame's own row, a fractional column over), and read
-    back linearly across the columns ("output"). At 0 and 90 degrees the
-    box's partial end tap and its neighbor are one read, so their weights
-    move by the read's rounding, at one end or the other by the parity of
-    the major-axis index (both when n = 2). Every linear read rounds its
-    fraction to 1/256, as the GPU's texture filter does; buffers are
-    32-bit and unfiltered, texels read at their centers.
+    reads, linear across the major axis.
+
+    Past that Substance shears the image into a frame whose column c is
+    the line minor = c + (major - X0) t, boxes along the columns and reads
+    the result back linearly across them. One shader does it all: per
+    pixel, the two frame columns either side of it, each boxed over its
+    taps (both from three texels a tap: their reads share the fraction),
+    then mixed. A tap past the image's edge reads the frame's own row a
+    fractional column over (the frame's seam). At 0 and 90 degrees the
+    frame is the image, and Substance's box reads its partial end tap and
+    its neighbor as one, so their weights move by that read's rounding,
+    at one end or the other by the parity of the major-axis index (both
+    when n = 2). Every linear read rounds its fraction to 1/256, as the
+    GPU's texture filter does; texels are read at their centers.
+
+    A node stored in 8 bits follows Substance's 8-bit arithmetic instead
+    (_dmb_eight): its stores, its pyramid, its bias.
 
     Intensity and angle are live: everything is computed from them in the
-    shaders, so the tap loops run to a bound counted per pixel.
+    shader, so the tap loops run to a bound counted per pixel.
     """
     t = "rgba" if color else "f"
     g = "vec4" if color else "float"
     n = num(float(1 << size))
-    texel = f"vec2 px = floor(uv * {n});"
-
-    frame = shader(
-        f"{name}_frame", [("input", t)], t,
-        "\n".join([
-            _dmb_setup(node, size),
-            f"if (n <= 1) return {g}(0.0);",
-            texel,
-            "return $(name)_read(px.x, px.y + (px.x - X0) * t, ymaj);",
-        ]),
-    )  # fmt: skip
-    frame["shader_model"]["instance"] = (
-        _dmb_image_reads(g, size) + frame["shader_model"]["instance"]
-    )
-
-    box = shader(
-        f"{name}_box", [("input", t)], t,
-        "\n".join([
-            _dmb_setup(node, size),
-            f"if (n <= 1) return {g}(0.0);",
-            texel,
-            # Merged end reads (t = 0 only): the +n end when the first whole
-            # tap's index is even, the -n end when odd; both when n = 2.
-            "float E = 0.0;",
-            "bool mp = false;",
-            "bool mm = false;",
-            "if (t == 0.0) {",
-            "\tfloat h = f / (1.0 + f);",
-            "\tE = (1.0 + f) * ($(name)_q(h) - h);",
-            "\tfloat par = mod(px.x - float(n - 1), 2.0);",
-            "\tmp = n == 2 || par < 0.5;",
-            "\tmm = n == 2 || par > 0.5;",
+    eight = (node.flags >> 4 & 3) == 0
+    start = [
+        _dmb_setup(node, size),
+        f"vec2 pq = floor(uv * {n});",
+        "if (ymaj) pq = pq.yx;",
+        "if (R <= 0.5) return $(name)_p(pq.x, pq.y, ymaj);",
+    ]
+    if eight:
+        helpers, large = _dmb_eight(g, size)
+        lines = [
+            *start,
+            "if (n <= 1) {",
+            "\tfloat ws = f / (2.0 * R);",
+            "\tfloat wc = 1.0 / (2.0 * R);",
+            f"\t{g} m = $(name)_read(pq.x - 1.0, pq.y - t, ymaj);",
+            f"\t{g} p = $(name)_read(pq.x + 1.0, pq.y + t, ymaj);",
+            f"\t{g} c = $(name)_p(pq.x, pq.y, ymaj);",
+            "\treturn $(name)_s8((m * ws + p * ws) + c * wc);",
             "}",
-            f"{g} acc = {g}(0.0);",
-            "for (int k = -n; k <= n; k++) {",
-            "\tfloat w = abs(k) == n ? f : 1.0;",
-            "\tif ((k == n && mp) || (k == -n && mm)) w += E;",
-            "\tif ((k == n - 1 && mp) || (k == 1 - n && mm)) w -= E;",
-            "\tacc += w * $(name)_frame(px.y, px.x + float(k), t);",
-            "}",
-            "return acc;",
-        ]),
-    )  # fmt: skip
-    box["shader_model"]["instance"] = (
-        _DMB_Q + f"{g} $(name)_col(float c, float r) {{\n"
-        f"\treturn $input((vec2(r, mod(c, {n})) + 0.5) / {n});\n"
-        "}\n"
-        # Frame column c, any row r: a row past the edge is the frame's own
-        # row, read a fractional column over (the frame's seam).
-        f"{g} $(name)_frame(float c, float r, float t) {{\n"
-        f"\tfloat k = floor(r / {n});\n"
-        "\tif (k == 0.0) return $(name)_col(c, r);\n"
-        f"\tfloat cf = c + k * {n} * t;\n"
-        "\tfloat c0 = floor(cf);\n"
-        f"\tfloat rm = r - k * {n};\n"
-        "\treturn mix($(name)_col(c0, rm), $(name)_col(c0 + 1.0, rm),"
-        " $(name)_q(cf - c0));\n"
-        "}\n" + box["shader_model"]["instance"]
-    )
-
-    out = shader(
-        name, [("box", t), ("input", t)], t,
-        "\n".join([
-            _dmb_setup(node, size),
-            texel,
-            "vec2 pq = ymaj ? px.yx : px;",
-            "if (R <= 0.5) return $(name)_p(pq.x, pq.y, ymaj);",
+            *large,
+        ]
+    else:
+        helpers = (
+            # Frame columns c and c + 1 at row r (any integer): three texels
+            # in the image's row, or past the edge the frame's own row, a
+            # fractional column over (four texels).
+            f"void $(name)_cols(float c, float r, float t, float X0, bool ymaj,"
+            f" out {g} a, out {g} b) {{\n"
+            f"\tfloat k = floor(r / {n});\n"
+            "\tif (k == 0.0) {\n"
+            "\t\tfloat y = c + (r - X0) * t;\n"
+            "\t\tfloat y0 = floor(y);\n"
+            "\t\tfloat w = $(name)_q(y - y0);\n"
+            f"\t\t{g} p1 = $(name)_p(r, y0 + 1.0, ymaj);\n"
+            "\t\ta = mix($(name)_p(r, y0, ymaj), p1, w);\n"
+            "\t\tb = mix(p1, $(name)_p(r, y0 + 2.0, ymaj), w);\n"
+            "\t\treturn;\n"
+            "\t}\n"
+            f"\tfloat rm = r - k * {n};\n"
+            f"\tfloat cf = c + k * {n} * t;\n"
+            "\tfloat ca = floor(cf);\n"
+            "\tfloat phi = $(name)_q(cf - ca);\n"
+            "\tfloat y = ca + (rm - X0) * t;\n"
+            "\tfloat y0 = floor(y);\n"
+            "\tfloat w = $(name)_q(y - y0);\n"
+            f"\t{g} p1 = $(name)_p(rm, y0 + 1.0, ymaj);\n"
+            f"\t{g} p2 = $(name)_p(rm, y0 + 2.0, ymaj);\n"
+            f"\t{g} f0 = mix($(name)_p(rm, y0, ymaj), p1, w);\n"
+            f"\t{g} f1 = mix(p1, p2, w);\n"
+            f"\t{g} f2 = mix(p2, $(name)_p(rm, y0 + 3.0, ymaj), w);\n"
+            "\ta = mix(f0, f1, phi);\n"
+            "\tb = mix(f1, f2, phi);\n"
+            "}\n"
+        )
+        lines = [
+            *start,
             "if (n <= 1) {",
             "\treturn (f * $(name)_read(pq.x - 1.0, pq.y - t, ymaj)",
             "\t\t+ $(name)_read(pq.x, pq.y, ymaj)",
             "\t\t+ f * $(name)_read(pq.x + 1.0, pq.y + t, ymaj)) / (2.0 * R);",
             "}",
+            f"{g} acc = {g}(0.0);",
+            "if (t == 0.0) {",
+            # Merged end reads: the +n end when the first whole tap's
+            # index is even, the -n end when odd; both when n = 2.
+            "\tfloat h = f / (1.0 + f);",
+            "\tfloat E = (1.0 + f) * ($(name)_q(h) - h);",
+            "\tfloat par = mod(pq.x - float(n - 1), 2.0);",
+            "\tbool mp = n == 2 || par < 0.5;",
+            "\tbool mm = n == 2 || par > 0.5;",
+            "\tfor (int k = -n; k <= n; k++) {",
+            "\t\tfloat w = abs(k) == n ? f : 1.0;",
+            "\t\tif ((k == n && mp) || (k == -n && mm)) w += E;",
+            "\t\tif ((k == n - 1 && mp) || (k == 1 - n && mm)) w -= E;",
+            "\t\tacc += w * $(name)_p(pq.x + float(k), pq.y, ymaj);",
+            "\t}",
+            "\treturn acc / (2.0 * R);",
+            "}",
             "float ch = pq.y - (pq.x - X0) * t;",
             "float c0 = floor(ch);",
-            f"vec2 at = (vec2(pq.x, mod(c0, {n})) + 0.5) / {n};",
-            f"vec2 at1 = (vec2(pq.x, mod(c0 + 1.0, {n})) + 0.5) / {n};",
-            "return mix($box(at), $box(at1), $(name)_q(ch - c0)) / (2.0 * R);",
-        ]),
-    )  # fmt: skip
-    out["shader_model"]["instance"] = (
-        _dmb_image_reads(g, size) + out["shader_model"]["instance"]
+            f"{g} acc1 = {g}(0.0);",
+            "for (int k = -n; k <= n; k++) {",
+            "\tfloat w = abs(k) == n ? f : 1.0;",
+            f"\t{g} a; {g} b;",
+            "\t$(name)_cols(c0, pq.x + float(k), t, X0, ymaj, a, b);",
+            "\tacc += w * a;",
+            "\tacc1 += w * b;",
+            "}",
+            "return mix(acc, acc1, $(name)_q(ch - c0)) / (2.0 * R);",
+        ]
+    made = shader(name, [("input", t)], t, "\n".join(lines))
+    made["shader_model"]["instance"] = (
+        _dmb_image_reads(g, size, eight=eight)
+        + helpers
+        + made["shader_model"]["instance"]
     )
-
-    frame["name"], box["name"], out["name"] = "frame", "box", "output"
-    group = subgraph(
-        name,
-        "Directional motion blur",
-        [
-            buffer("buf_in", size, filtering=False),
-            frame,
-            buffer("buf_frame", size, filtering=False),
-            box,
-            buffer("buf_box", size, filtering=False),
-            out,
-        ],
-        [
-            wire("buf_in", "frame"),
-            wire("frame", "buf_frame"),
-            wire("buf_frame", "box"),
-            wire("box", "buf_box"),
-            wire("buf_box", "output"),
-            wire("buf_in", "output", 1),
-        ],
-        [(t, "buf_in", 0)],
-        ("output", 0, t),
-    )
-    return Sub([group], [], [("input", name, 0)], name)
+    return buffered(made, ["input"], {"input"}, size)
 
 
 def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:

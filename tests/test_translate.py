@@ -208,27 +208,25 @@ def test_buffers_copying_a_buffer_go() -> None:
     assert "buf_y" in inner
 
 
-def test_directional_blur_knobs_stay_live() -> None:
-    # Intensity and angle, inline in the node, are one control each on the
-    # blur's subgraph, linked into all three passes, and never constants in
-    # their GLSL; the passes read unfiltered 32-bit buffers.
+@pytest.mark.parametrize("bits", [8, 16])
+def test_directional_blur_knobs_stay_live(bits: int) -> None:
+    # Intensity and angle, inline in the node; its output format in bits 4-5.
     words = [struct.unpack("<I", struct.pack("<f", v))[0] for v in (5.86, 0.0625)]
-    node = Node(index=0, start=0, end=4, op=22, fields=[1 | 1 << 2], inline=words)
+    flags = (bits == 16) << 4
+    node = Node(
+        index=0, start=0, end=4, op=22, flags=flags, fields=[1 | 1 << 2], inline=words
+    )
     made = _dirmotionblur(node, "dmb", color=False, size=8)
-    (group,) = made.nodes
-    inner = {n["name"]: n for n in group["nodes"]}
-    shaders = [n for n in inner.values() if n["type"] == "shader"]
-    assert {n["name"] for n in shaders} == {"frame", "box", "output"}
-    for n in shaders:
-        assert n["parameters"] == pytest.approx({"intensity": 5.86, "angle": 0.0625})
-        code = n["shader_model"]["instance"]
-        assert "$intensity" in code
-        assert "$angle" in code
-        assert "5.86" not in code
-        assert "0.0625" not in code
-    for name in ("buf_in", "buf_frame", "buf_box"):
-        assert inner[name]["parameters"]["filter"] is False
-        assert inner[name]["parameters"]["f32"] is True
-    widgets = {w["name"]: w for w in inner["gen_parameters"]["widgets"]}
-    assert len(widgets["intensity"]["linked_widgets"]) == 3
-    assert len(widgets["angle"]["linked_widgets"]) == 3
+    # One shader, its knobs live (never constants in its GLSL), reading the
+    # input's buffer; in an 8-bit graph, with Substance's 8-bit stores.
+    by_type = {n["type"]: n for n in made.nodes}
+    assert len(made.nodes) == 2
+    assert by_type["buffer"]["parameters"]["filter"] is True
+    sh = by_type["shader"]
+    assert sh["parameters"] == pytest.approx({"intensity": 5.86, "angle": 0.0625})
+    code = sh["shader_model"]["instance"]
+    assert "$intensity" in code
+    assert "$angle" in code
+    assert "5.86" not in code
+    assert "0.0625" not in code
+    assert ("_s8(" in code) == (bits == 8)

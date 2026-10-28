@@ -246,14 +246,19 @@ def dmb_cases() -> list[dict]:
     """Return directional motion blurs: angles (turns) by intensities, 16 and 8 bits.
 
     At 2048 px both intensities take the large path (R past 1.5 texels);
-    intensity 0.15 (R 1.2 at most) the small one.
+    intensity 0.15 (R 1.2 at most) the small one. Biomech's blurs are 1/8
+    turn at 0.7326, in 8 bits; -1/8 and 1/4 take its other diagonal and the
+    y axis.
     """
     angles = ("0", "0.0625", "0.125", "0.4375")
     grid = [(a, i) for a in angles for i in ("0.7326", "5.86")]
     grid += [("0", "0.15"), ("0.0625", "0.15")]
+    grid += [("-0.125", "0.7326"), ("0.25", "5.86")]
     return [
         {
-            "tag": f"dmb_{angle}_{intensity}_{bits}".replace(".", "p"),
+            "tag": f"dmb_{angle}_{intensity}_{bits}".replace(".", "p").replace(
+                "-", "m"
+            ),
             "filter": "dirmotionblur",
             "kind": GRAY,
             "params": (("intensity", F1, intensity), ("mblurangle", F1, angle)),
@@ -910,8 +915,10 @@ def main() -> None:
         mean = float(diff.mean()) * 255
         worst = max(worst, p99)
         verdict = "ok" if p99 <= 4 and mean <= 1.5 else "OFF"
+        # Pixels the same 8-bit level (a 16-bit render rounded to it).
+        same = 100 * float((diff * 255 < 0.5).mean())
         print(
-            f"{tag:14} mean {mean:6.2f}/255  p99 {p99:6.2f}/255  max {diff.max() * 255:6.1f}  {verdict}{note}"
+            f"{tag:14} mean {mean:6.2f}/255  p99 {p99:6.2f}/255  max {diff.max() * 255:6.1f}  same {same:7.3f}%  {verdict}{note}"
         )
     print(f"worst p99 {worst:.2f}/255")
     sys.exit(0)
