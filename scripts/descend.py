@@ -67,6 +67,8 @@ from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.translate import output_type
+from sbsar2ptex.translate import shader
 
 SBSRENDER = Path("C:/Program Files/Adobe/Adobe Substance 3D Designer/sbsrender.exe")
 SIDE = 512
@@ -273,9 +275,15 @@ def build(
             },
         })  # fmt: skip
         g["connections"].append({"from": src, "from_port": 0, "to": out, "to_port": 0})
-    g["connections"].append(
-        {"from": out, "from_port": 0, "to": "Material", "to_port": 0}
-    )
+    # Material Maker's 8-bit export truncates (an exact k/255 comes out
+    # k - 1): half a step more makes it round, as Substance's does.
+    kind = output_type(next(n for n in g["nodes"] if n["name"] == out))
+    g["nodes"].append(shader(f"{out}_export", [("input", kind)], kind,
+                             "return $input(uv) + 0.5 / 255.0;"))  # fmt: skip
+    g["connections"] += [
+        {"from": out, "from_port": 0, "to": f"{out}_export", "to_port": 0},
+        {"from": f"{out}_export", "from_port": 0, "to": "Material", "to_port": 0},
+    ]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(g), encoding="utf-8")
     return path

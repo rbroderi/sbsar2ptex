@@ -705,15 +705,20 @@ def material_graph(mm_nodes, wires, source: tuple[str, int], color: bool) -> dic
             "size": SIZE,
         },
     }
-    nodes = [*mm_nodes, material]
+    # Material Maker's 8-bit export truncates (an exact k/255 comes out
+    # k - 1): half a step more makes it round, as Substance's does.
+    kind = "rgba" if color else "f"
+    nodes = [*mm_nodes, material, shader("export", [("input", kind)], kind,
+                                         "return $input(uv) + 0.5 / 255.0;")]  # fmt: skip
     wires = [
         *wires,
-        {"from": source[0], "from_port": source[1], "to": "Material", "to_port": 0},
+        {"from": source[0], "from_port": source[1], "to": "export", "to_port": 0},
+        {"from": "export", "from_port": 0, "to": "Material", "to_port": 0},
     ]
     if color:
         nodes.append(shader("alpha", [("input", "rgba")], "f", "return $input(uv).a;"))
         wires += [
-            {"from": source[0], "from_port": source[1], "to": "alpha", "to_port": 0},
+            {"from": "export", "from_port": 0, "to": "alpha", "to_port": 0},
             {"from": "alpha", "from_port": 0, "to": "Material", "to_port": 7},
         ]
     return {
