@@ -506,9 +506,12 @@ def procedural_main(
         )
         if not templates:
             print("no Substance library to name nodes by (no Designer found)")
-    made = procedural.build(
-        files, graph, data, size=args.size, library=templates, flat=args.flat
-    )
+    try:
+        made = procedural.build(
+            files, graph, data, size=args.size, library=templates, flat=args.flat
+        )
+    except ValueError as e:  # bytecode this decoder cannot read
+        sys.exit(f"{args.sbsar}: {e}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(made, indent=1), encoding="utf-8")
     print("wrote", target)

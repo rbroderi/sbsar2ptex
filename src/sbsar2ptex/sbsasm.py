@@ -215,7 +215,8 @@ class Asm:
         """Read the container: trailer, tables, bitmaps."""
         self.d = data
         if data[:4] != b"SBAM":
-            sys.exit("not an SBAM file")
+            msg = "not an SBAM file"
+            raise ValueError(msg)
         self.version = self.u16(6)
         self.cooker, self.asmuid = struct.unpack_from("<II", data, 8)
         self.count, table, outputs, defaults = struct.unpack_from(
@@ -247,7 +248,8 @@ class Asm:
 
         at = next((a for a in range(self.defaults_at, end, 4) if table_at(a)), None)
         if at is None:
-            sys.exit("no uid table before the trailer")
+            msg = "no uid table before the trailer"
+            raise ValueError(msg)
         n_out, n_in = struct.unpack_from("<HH", data, at)
         self.output_uids = [self.u32(at + 4 + 4 * i) for i in range(n_out)]
         pairs = at + 4 + 4 * n_out
@@ -397,7 +399,10 @@ def main() -> None:
     data = next(d for n, d in files.items() if n.endswith(".sbsasm"))
     xml = next(d for n, d in files.items() if n.endswith(".xml")).decode("utf-8")
     names = {int(u): n for u, n in re.findall(r'uid="(\d+)" identifier="([^"]*)"', xml)}
-    asm = Asm(data)
+    try:
+        asm = Asm(data)
+    except ValueError as e:
+        sys.exit(f"{args.sbsar}: {e}")
     nodes = asm.nodes()
 
     def uid_name(uid: int) -> str:

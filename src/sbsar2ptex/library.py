@@ -13,6 +13,7 @@ another.
 
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -35,8 +36,41 @@ COOKER_PLACES = (
 PICKLE = "templates.pickle"
 FAILED = "failed.txt"
 """Packages that would not cook, one name a line."""
-VERSION = 1
+VERSION = 2
 """Bump when Template or the matching changes, to rebuild cached pickles."""
+COOKED = "cooked.txt"
+"""The COOK_VERSION the cached packages were cooked at."""
+COOK_VERSION = 2
+"""Bump when the way packages are cooked changes, to cook them again."""
+DISABLED = '<root><disabled v="1"/>'
+"""How a package marks a graph excluded from publishing."""
+
+
+def publishable(text: str) -> str:
+    """Return a package's .sbs text with every graph's outputs published.
+
+    Designer's packages exclude helper and deprecated graphs from publishing,
+    and sbscooker skips them (a package of nothing else does not cook at
+    all), yet authors' graphs use them: legacy versions (Auto levels inside
+    Water level), the parts of Ambient occlusion (HBAO). A graph with outputs
+    but no root gets one listing them.
+    """
+    text = text.replace(DISABLED, "<root>")
+
+    def add_root(m: re.Match[str]) -> str:
+        graph = m.group(0)
+        uids = re.findall(r'<graphoutput><identifier v="[^"]*"/><uid v="(\d+)"', graph)
+        if "<root>" in graph or not uids:
+            return graph
+        outputs = "".join(
+            f'<rootOutput><output v="{u}"/><format v="0"/><usertag v=""/></rootOutput>'
+            for u in uids
+        )
+        return graph.replace(
+            "</graph>", f"<root><rootOutputs>{outputs}</rootOutputs></root></graph>"
+        )
+
+    return re.sub(r"<graph>.*?</graph>", add_root, text, flags=re.DOTALL)
 
 
 def cache_dir() -> Path:
@@ -78,6 +112,11 @@ def cook(cooker: Path, folder: Path, cache: Path, jobs: int = 6) -> list[str]:
     they are listed in FAILED, not to be tried again.
     """
     cache.mkdir(parents=True, exist_ok=True)
+    stamp = cache / COOKED
+    if not stamp.exists() or stamp.read_text().strip() != str(COOK_VERSION):
+        for old in [*cache.glob("*.sbsar"), cache / FAILED]:
+            old.unlink(missing_ok=True)
+        stamp.write_text(f"{COOK_VERSION}\n")
     failed_file = cache / FAILED
     tried = set(failed_file.read_text().split()) if failed_file.exists() else set()
     todo = [
@@ -85,8 +124,15 @@ def cook(cooker: Path, folder: Path, cache: Path, jobs: int = 6) -> list[str]:
         for s in sorted(folder.glob("*.sbs"))
         if not (cache / f"{s.stem}.sbsar").exists() and s.stem not in tried
     ]
+    sources = cache / "sources"  # packages with every graph published
 
-    def one(source: Path) -> tuple[str, int]:
+    def one(package: Path) -> tuple[str, int]:
+        text = package.read_text(encoding="utf-8")
+        source = package
+        if publishable(text) != text:
+            sources.mkdir(exist_ok=True)
+            source = sources / package.name
+            source.write_text(publishable(text), encoding="utf-8")
         result = subprocess.run(  # noqa: S603 (the user's own Designer)
             [str(cooker), str(source), "--output-path", str(cache)],
             capture_output=True,

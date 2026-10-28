@@ -26,8 +26,35 @@ def test_library_load_reads_its_cache(tmp_path) -> None:
 
 
 def test_library_skips_packages_that_failed(tmp_path) -> None:
+    (tmp_path / library.COOKED).write_text(f"{library.COOK_VERSION}\n")
     (tmp_path / library.FAILED).write_text("broken\n")
     packages = tmp_path / "packages"
     packages.mkdir()
     (packages / "broken.sbs").write_text("")
     assert library.cook(tmp_path / "no-cooker", packages, tmp_path) == []
+
+
+def test_library_cooked_another_way_is_cooked_again(tmp_path) -> None:
+    (tmp_path / library.COOKED).write_text("1\n")
+    (tmp_path / "old.sbsar").write_bytes(b"")
+    (tmp_path / library.FAILED).write_text("broken\n")
+    packages = tmp_path / "packages"
+    packages.mkdir()
+    library.cook(tmp_path / "no-cooker", packages, tmp_path)
+    assert not (tmp_path / "old.sbsar").exists()
+    assert not (tmp_path / library.FAILED).exists()
+
+
+def test_excluded_graphs_are_published() -> None:
+    hidden = (
+        '<graph><identifier v="old"/><graphOutputs><graphoutput><identifier v="o"/>'
+        '<uid v="7"/></graphoutput></graphOutputs>'
+        '<root><disabled v="1"/><rootOutputs/></root></graph>'
+    )
+    rootless = (
+        '<graph><identifier v="helper"/><graphOutputs><graphoutput>'
+        '<identifier v="o"/><uid v="9"/></graphoutput></graphOutputs></graph>'
+    )
+    text = library.publishable(hidden + rootless)
+    assert library.DISABLED not in text
+    assert '<root><rootOutputs><rootOutput><output v="9"/>' in text
