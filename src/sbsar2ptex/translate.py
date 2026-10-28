@@ -628,7 +628,8 @@ def buffer(
         "node_position": {"x": 0, "y": 0},
         "parameters": {
             "size": size,
-            "f32": precise or not filtering,
+            "f32": precise or not filtering
+            or __import__("os").environ.get("SBS_Q8") == "fmt",  # EXPERIMENT
             "filter": filtering,
             "mipmap": False,
         },
