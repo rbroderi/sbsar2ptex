@@ -49,6 +49,8 @@ from sbsar2ptex.translate import translate_graph
 SBSRENDER = Path("C:/Program Files/Adobe/Adobe Substance 3D Designer/sbsrender.exe")
 SIZE = 11
 """log2 pixels; Material Maker's export is 2048 px."""
+EXPORT_BATCH = 40
+"""Cases a Material Maker run exports."""
 F4 = "constantValueFloat4"
 F1 = "constantValueFloat1"
 
@@ -844,14 +846,24 @@ def main() -> None:
     mm_out.mkdir(exist_ok=True)
     for tag, _ in made:  # an earlier run's image must not pass for this one's
         (mm_out / f"{tag}_albedo.png").unlink(missing_ok=True)
-    subprocess.run(
-        [str(args.mm), "--export", "-o", mm_out.as_posix(),
-         *(f"{(out / t).as_posix()}.ptex" for t, _ in made)],
-        cwd=args.mm.parent,
-        check=False,
-        capture_output=True,
-        timeout=600,
-    )  # fmt: skip
+    # Some dozens a run: a long batch can end with its last few not
+    # exported; those get one more run.
+    tags = [t for t, _ in made]
+    for attempt in range(2):
+        todo = [t for t in tags if not (mm_out / f"{t}_albedo.png").exists()]
+        for k in range(0, len(todo), EXPORT_BATCH):
+            subprocess.run(
+                [str(args.mm), "--export", "-o", mm_out.as_posix(),
+                 *(f"{(out / t).as_posix()}.ptex" for t in todo[k : k + EXPORT_BATCH])],
+                cwd=args.mm.parent,
+                check=False,
+                capture_output=True,
+                timeout=600,
+            )  # fmt: skip
+        if attempt == 0 and todo:
+            missed = [t for t in todo if not (mm_out / f"{t}_albedo.png").exists()]
+            if missed:
+                print(f"exporting again: {', '.join(missed)}")
 
     worst = 0.0
     for tag, _ in made:
