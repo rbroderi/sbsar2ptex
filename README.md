@@ -187,6 +187,18 @@ harness. Their `rand` follows the FX-Map part of the specification
 the Quadrant-slot and Iterate-pass state transforms. Random Iterate cases
 match pixel for pixel, and Quadrant-grid size vectors match the render probe.
 
+The patterns are drawn as `sbsrender`'s GPU engine draws them, from a
+clean-room behavioral specification (`sbsar2ptex.fxdraw`, a numpy model;
+`sbsar2ptex.fxglsl`, its GLSL): sorted by pattern and blending mode, every
+tile copy whose box overlaps the tiling region, no antialiasing, a float32
+accumulator stored once in the map's format, pattern space shown through the
+render region. Image patterns read the stored texels; bilinear filtering in
+a mip level (filtering 0) reads a mip atlas of stored 2x2 means, two extra
+shaders and buffers per image input so drawn (up to 4096 px). Stores and mip
+means differ between GPU vendors: NVIDIA's (predicted) rules by default;
+`check_filters.py --amd` takes the AMD rules measured, and `--levels` compares
+16-bit levels: the specification's cases reach its targets on AMD.
+
 Each tree node is skipped for pixels it cannot reach (interval bounds on its
 offsets and sizes, `rand(a)` within [0, a]); what depends on graph inputs is
 never skipped, since they can change.

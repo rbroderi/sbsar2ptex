@@ -3496,9 +3496,7 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     )
     _CTX.helpers.append(fxglsl.store_glsl(layout))
     made = shader(name, inputs, t, "\n".join(lines))
-    sub = buffered(
-        made, [nm for nm, _ in inputs], set(images), size, precise=set(images)
-    )
+    sub = buffered(made, [nm for nm, _ in inputs], set(images), size, precise=set())
     for k in mips:
         nodes, wires_, last = _fx_mip_atlas(name, k, f"{name}_pattern{k}_buf", layout)
         sub.nodes += nodes
