@@ -1426,6 +1426,9 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
         name, [("input", t)], t,
         box_glsl_live(t, "vec2(0.0, 1.0)", f"{num(k)} * {scale}", size),
     )  # fmt: skip
+    # the graph's inputs the x pass reads are read by the blur, as the y
+    # pass's (named after it) are: not by the x pass's name, which goes
+    _forget({x["name"]: name}, None)
     x["name"], y["name"] = "pass_x", "pass_y"
     group = subgraph(
         name,

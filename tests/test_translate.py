@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.sbsasm import Asm
@@ -171,6 +172,15 @@ def test_neighborhood_filters_sample_buffers() -> None:
     (control,) = inner["gen_parameters"]["widgets"]
     assert control["name"] == "intensity"
     assert {w["node"] for w in control["linked_widgets"]} == {"pass_x", "pass_y"}
+
+
+def test_blur_x_pass_graph_inputs_follow_the_blur() -> None:
+    # A graph input its x pass read is exposed on the blur, not on the pass's
+    # first name ("Node not found" in Material Maker).
+    translate._CTX = translate._Context(size=8)
+    translate._CTX.exposed["p_seed"] = ["blur_x", "blur", "other"]
+    _blur(Node(index=0, start=0, end=4), "blur", color=False, size=8)
+    assert translate._CTX.exposed == {"p_seed": ["blur", "other"]}
 
 
 def test_identical_nodes_merge() -> None:
