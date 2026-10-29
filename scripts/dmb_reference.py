@@ -412,10 +412,14 @@ def store16(v: np.ndarray) -> np.ndarray:
 def u16_read(k0: np.ndarray, k1: np.ndarray, j: np.ndarray) -> np.ndarray:
     """Return the stored level of a bilinear read of levels k0, k1 at weight j / 256.
 
-    The filter is exact and its result rounded to float32, which is stored
-    (store16; NVIDIA's store of a read is assumed, not measured).
+    The filter is exact. NVIDIA stores that exact value to the nearest
+    level, halves up (no 2^-20 truncation); AMD rounds it to float32 first
+    and stores that.
     """
-    return store16(ratio((256 - j) * k0 + j * k1, 256 * LEVELS))
+    num = (256 - j) * k0 + j * k1
+    if NVIDIA[0]:
+        return (num + 128) // 256
+    return u16(ratio(num, 256 * LEVELS))
 
 
 def read16(k0: np.ndarray, k1: np.ndarray, j: np.ndarray | int) -> np.ndarray:

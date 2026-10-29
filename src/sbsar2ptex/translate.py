@@ -1692,11 +1692,11 @@ def _dmb_sixteen_helpers(g: str) -> str:
     filter's exact result rounded to float32. ``_st`` stores a computed
     float32, exactly: on NVIDIA truncated to a multiple of 2^-20, then to
     the nearest level; on AMD straight to the nearest level (halves up).
-    ``_sr`` stores a bilinear read's float32 so, and ``_pm`` is the
+    ``_sr`` stores a bilinear read: on NVIDIA its exact value to the
+    nearest level, halves up; on AMD its float32 so. ``_pm`` is the
     pyramid's mean of two levels, a half always up (NVIDIA) or as its
-    float32 rounded (AMD). ``_nc`` passes a
-    product through an opaque bit operation, so it is not fused into the
-    sum it feeds.
+    float32 rounded (AMD). ``_nc`` passes a product through an opaque bit
+    operation, so it is not fused into the sum it feeds.
     """
     u = "uvec4" if g == "vec4" else "uint"
     i = "ivec4" if g == "vec4" else "int"
@@ -1734,7 +1734,8 @@ def _dmb_sixteen_helpers(g: str) -> str:
             "\treturn q + floor(((x - 16.0 * q) * 65536.0 + 524288.0 - x)"
             " / 1048576.0);\n"
         )
-        stored = "\treturn $(name)_st($(name)_rd(a, b, j));\n"
+        # A read's exact value, halves up: no truncation (exact integers).
+        stored = "\treturn floor(((256.0 - j) * a + j * b + 128.0) / 256.0);\n"
         mean = "\treturn floor((a + b + 1.0) * 0.5);\n"
     return (
         _DMB_BITS + f"{g} $(name)_lv(float i, float j, bool ymaj) {{\n"
