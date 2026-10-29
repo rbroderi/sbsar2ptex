@@ -21,13 +21,15 @@ reads only the stored frame and adds 1/512; it prints the identical pixels.
 
 In 16-bit graphs (``blur16``) the passes are the 8-bit graph's, every
 intermediate stored as an integer level: the pyramid's mean of two levels
-is a half when their sum is odd, and NVIDIA GPUs send every half up. Terms
+is a half when their sum is odd, and NVIDIA GPUs send every half up; a
+computed value is stored truncated to 2^-20 first on NVIDIA (s16n). Terms
 and sums are float32 in the engine's order, the rotated box adds 0.4 of a
 level. ``--sixteen`` compares it with the specification's T2 renders,
-``--t0`` runs the tie-direction probes, ``--t1`` the cells of a folder of
-long boxes at 0 degrees. ``--amd`` takes AMD's rule (a half rounds as its
-float32 does) here as for 8-bit stores: the renders in ``r/`` were made on
-AMD; NVIDIA's is the default.
+``--t0`` runs the tie-direction probes, ``--p2`` the small-path store
+probe, ``--t1`` the cells of a folder of long boxes at 0 degrees.
+``--amd`` takes AMD's rules (a half rounds as its float32 does, a value is
+stored to the nearest level) here as for 8-bit stores: the renders in
+``r/`` were made on AMD; NVIDIA's are the default.
 """
 
 import argparse
@@ -395,16 +397,25 @@ def u16(v: np.ndarray) -> np.ndarray:
     return np.floor(v * LEVELS + 0.5).astype(np.int64)
 
 
+def s16n(v: np.ndarray) -> np.ndarray:
+    """Return NVIDIA's 16-bit store of a float32 ``v``: truncated to 2^-20, then rounded."""
+    v = np.clip(np.asarray(v, F32), F32(0), F32(1)).astype(np.float64)
+    x = np.floor(v * 2**20).astype(np.int64)
+    return (x * LEVELS + 2**19) >> 20
+
+
+def store16(v: np.ndarray) -> np.ndarray:
+    """Return the 16-bit store of a computed float32 ``v``, as the vendor makes it."""
+    return s16n(v) if NVIDIA[0] else u16(v)
+
+
 def u16_read(k0: np.ndarray, k1: np.ndarray, j: np.ndarray) -> np.ndarray:
     """Return the stored level of a bilinear read of levels k0, k1 at weight j / 256.
 
-    The filter is exact and its result rounded to float32; AMD stores that
-    float; NVIDIA is taken to send exact halves up.
+    The filter is exact and its result rounded to float32, which is stored
+    (store16; NVIDIA's store of a read is assumed, not measured).
     """
-    num = (256 - j) * k0 + j * k1
-    if NVIDIA[0]:
-        return (num + 128) // 256
-    return u16(ratio(num, 256 * LEVELS))
+    return store16(ratio((256 - j) * k0 + j * k1, 256 * LEVELS))
 
 
 def read16(k0: np.ndarray, k1: np.ndarray, j: np.ndarray | int) -> np.ndarray:
@@ -484,7 +495,9 @@ def small16(k: np.ndarray, t: float, f: np.float32, inv: np.float32) -> np.ndarr
 
     ws = f * inv
     p, c, m = read(1, t), ratio(k, LEVELS), read(-1, -t)
-    return u16(((p * ws).astype(F32) + (c * inv).astype(F32)) + (m * ws).astype(F32))
+    return store16(
+        ((p * ws).astype(F32) + (c * inv).astype(F32)) + (m * ws).astype(F32)
+    )
 
 
 def axis16(k: np.ndarray, n: int, f: np.float32, inv: np.float32, ymajor: bool):
@@ -525,7 +538,7 @@ def axis16(k: np.ndarray, n: int, f: np.float32, inv: np.float32, ymajor: bool):
             else:
                 terms.append(f * tex(start))
             acc = total(terms, ymajor)
-        out[:, x] = u16(acc * inv)
+        out[:, x] = store16(acc * inv)
     return out
 
 
@@ -575,7 +588,7 @@ def rotated16(k: np.ndarray, t: float, n: int, f, inv, ymajor: bool) -> np.ndarr
             terms.append(lev(0, start))
             start += 1
         terms.append(f * lev(0, start))
-        box[:, r] = u16((total(terms, ymajor) * inv).astype(F32) + BETA16)
+        box[:, r] = store16((total(terms, ymajor) * inv).astype(F32) + BETA16)
     chat = y - (x - x0) * t
     c0 = np.floor(chat)
     jg = np.round(q(chat - c0) * 256).astype(np.int64)
@@ -633,6 +646,9 @@ def main() -> None:
         "--t0", action="store_true", help="16-bit graphs: the pyramid-halves probes"
     )
     parser.add_argument(
+        "--p2", action="store_true", help="16-bit graphs: the small-path store probe"
+    )
+    parser.add_argument(
         "--t1",
         action="store_true",
         help="16-bit graphs: REFERENCE_DIR holds in_<input>_<N>.png and"
@@ -657,6 +673,9 @@ def main() -> None:
         return
     if args.t1:
         main_t1(args.refs)
+        return
+    if args.p2:
+        main_p2(args)
         return
     model = blur_single_pass if args.single_pass else blur
     for n_px in args.size:
@@ -779,6 +798,36 @@ def main_t0(args: argparse.Namespace) -> None:
         f" model - a: +1 at {int((got - a == 1).sum())}, 0 at"
         f" {int((got - a == 0).sum())} pixels"
     )
+
+
+def p2_rows(out: np.ndarray, img: np.ndarray) -> str:
+    """Return P2's even-x up share and its rows' runs (u up, d down) as text."""
+    rows = 1009
+    even = out[:rows, 0::2] - img[:rows, 0::2]
+    up = (even == 1).mean(axis=1) > 0.5
+    runs, k = [], 0
+    while k < rows:
+        j = k
+        while j < rows and up[j] == up[k]:
+            j += 1
+        runs.append(f"{'u' if up[k] else 'd'}{j - k}")
+        k = j
+    return (
+        f"even-x up share {(even == 1).mean():.4f}, rows up {int(up.sum())},"
+        f" down {rows - int(up.sum())}; runs {' '.join(runs)}"
+    )
+
+
+def main_p2(args: argparse.Namespace) -> None:
+    """Run the P2 probe: the small path (0 degrees, I 0.266) on alternating levels."""
+    img = levels16(args.refs, "probe_p2")
+    got = blur16(img, 0.266, 0)
+    print(f"model   {p2_rows(got, img)}")
+    ref = render16(args.refs, "probe_p2", img.shape[0], 0, 0.266)
+    if ref is not None:
+        same = 100 * (got[:1009] == ref[:1009]).mean()
+        print(f"render  {p2_rows(ref, img)}")
+        print(f"model = render at {same:.4f}% of rows 0-1008")
 
 
 def main_t1(folder: Path) -> None:

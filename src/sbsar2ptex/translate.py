@@ -1689,16 +1689,26 @@ def _dmb_sixteen_helpers(g: str) -> str:
     float32 nearest k / 65535, as a texture read returns it (built from
     the integer quotient: GPU division is not rounded to nearest; ``up``
     whether it rounded up); ``_rd`` a bilinear read of two levels, the
-    filter's exact result rounded to float32. ``_u16`` stores a computed
-    float32 to the nearest level (halves up), exactly; ``_sr`` stores a
-    bilinear read and ``_pm`` the pyramid's mean of two levels, a half
-    always up (NVIDIA) or as its float32 rounded (AMD). ``_nc`` passes a
+    filter's exact result rounded to float32. ``_st`` stores a computed
+    float32, exactly: on NVIDIA truncated to a multiple of 2^-20, then to
+    the nearest level; on AMD straight to the nearest level (halves up).
+    ``_sr`` stores a bilinear read's float32 so, and ``_pm`` is the
+    pyramid's mean of two levels, a half always up (NVIDIA) or as its
+    float32 rounded (AMD). ``_nc`` passes a
     product through an opaque bit operation, so it is not fused into the
     sum it feeds.
     """
     u = "uvec4" if g == "vec4" else "uint"
     i = "ivec4" if g == "vec4" else "int"
     if _DMB_AMD:
+        # floor(65535 v + 0.5) = floor(65536 v) + floor(frac - v + 0.5).
+        store = (
+            "\tv = clamp(v, 0.0, 1.0);\n"
+            f"\t{g} x = v * 65536.0;\n"
+            f"\t{g} k = floor(x);\n"
+            f"\t{g} fx = x - k;\n"
+            "\treturn k + step(v, fx - 0.5) + step(v, fx + 0.5) - 1.0;\n"
+        )
         stored = (
             f"\t{g} s = (256.0 - j) * a + j * b;\n"
             f"\t{g} h = floor(s / 256.0);\n"
@@ -1716,7 +1726,15 @@ def _dmb_sixteen_helpers(g: str) -> str:
             "\treturn h + (s - 2.0 * h) * up;\n"
         )
     else:
-        stored = "\treturn floor(((256.0 - j) * a + j * b + 128.0) / 256.0);\n"
+        # x = 16 q + r, v truncated to 2^-20: (65535 x + 2^19) / 2^20 exactly.
+        store = (
+            "\tv = clamp(v, 0.0, 1.0);\n"
+            f"\t{g} x = floor(v * 1048576.0);\n"
+            f"\t{g} q = floor(x / 16.0);\n"
+            "\treturn q + floor(((x - 16.0 * q) * 65536.0 + 524288.0 - x)"
+            " / 1048576.0);\n"
+        )
+        stored = "\treturn $(name)_st($(name)_rd(a, b, j));\n"
         mean = "\treturn floor((a + b + 1.0) * 0.5);\n"
     return (
         _DMB_BITS + f"{g} $(name)_lv(float i, float j, bool ymaj) {{\n"
@@ -1743,14 +1761,7 @@ def _dmb_sixteen_helpers(g: str) -> str:
         f"{g} $(name)_rd({g} a, {g} b, float j) {{\n"
         "\treturn $(name)_v((256.0 - j) * a + j * b) / 256.0;\n"
         "}\n"
-        # floor(65535 v + 0.5) = floor(65536 v) + floor(frac - v + 0.5).
-        f"{g} $(name)_u16({g} v) {{\n"
-        "\tv = clamp(v, 0.0, 1.0);\n"
-        f"\t{g} x = v * 65536.0;\n"
-        f"\t{g} k = floor(x);\n"
-        f"\t{g} fx = x - k;\n"
-        "\treturn k + step(v, fx - 0.5) + step(v, fx + 0.5) - 1.0;\n"
-        "}\n"
+        f"{g} $(name)_st({g} v) {{\n{store}}}\n"
         f"{g} $(name)_sr({g} a, {g} b, float j) {{\n{stored}}}\n"
         f"{g} $(name)_pm({g} a, {g} b) {{\n{mean}}}\n"
         f"{g} $(name)_nc({g} v, uint z) {{\n"
@@ -1908,7 +1919,7 @@ def _dmb_sixteen(g: str, size: int) -> tuple[str, list[str]]:
             f"\t{g} v = ($(name)_nc(p * ws, z) + $(name)_nc(c * inv, z))"
             " + $(name)_nc(m * ws, z);"
         ),
-        "\treturn $(name)_v($(name)_u16(v));",
+        "\treturn $(name)_v($(name)_st(v));",
         "}",
     ]
 
@@ -1956,7 +1967,7 @@ def _dmb_sixteen(g: str, size: int) -> tuple[str, list[str]]:
         f"\t\t{g} e0 = " + mrg.format(a="float(first)", b="float(first - 1)") + ";",
         f"\t\t{g} e1 = " + mrg.format(a="float(first + 2)", b="float(first + 3)") + ";",
         f"\t\t{g} mid = $(name)_v($(name)_lv(float(first + 1), mn, ymaj));",
-        "\t\treturn $(name)_v($(name)_u16($(name)_nc(((e0 + mid) + e1) * inv, z)));",
+        "\t\treturn $(name)_v($(name)_st($(name)_nc(((e0 + mid) + e1) * inv, z)));",
         "\t}",
         # The ends: merged with their whole neighbors, or partial alone.
         f"\t{g} e0 = lo ? "
@@ -1978,7 +1989,7 @@ def _dmb_sixteen(g: str, size: int) -> tuple[str, list[str]]:
             )
         ),
         "\tacc = acc + (ymaj ? e1 : e0);",
-        "\treturn $(name)_v($(name)_u16($(name)_nc(acc * inv, z)));",
+        "\treturn $(name)_v($(name)_st($(name)_nc(acc * inv, z)));",
         "}",
     ]
 
@@ -2013,8 +2024,8 @@ def _dmb_sixteen(g: str, size: int) -> tuple[str, list[str]]:
         "}",
         "accA = accA + (ymaj ? e1A : e0A); accB = accB + (ymaj ? e1B : e0B);",
         # 0.4 of a level, added to the rounded product.
-        f"{g} gA = $(name)_u16($(name)_nc(accA * inv, z) + 6.103609e-06);",
-        f"{g} gB = $(name)_u16($(name)_nc(accB * inv, z) + 6.103609e-06);",
+        f"{g} gA = $(name)_st($(name)_nc(accA * inv, z) + 6.103609e-06);",
+        f"{g} gB = $(name)_st($(name)_nc(accB * inv, z) + 6.103609e-06);",
         "return $(name)_v($(name)_sr(gA, gB, jg));",
     ]
     return helpers, setup + small + axis + rotated

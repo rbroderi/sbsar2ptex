@@ -249,8 +249,10 @@ def test_directional_blur_knobs_stay_live(bits: int, kind: str) -> None:
     assert "5.86" not in code
     assert "0.0625" not in code
     assert ("_s8(" in code) == (bits == 8)
-    assert ("_pm(" in code) == ("_u16(" in code) == (bits == 16)
+    assert ("_pm(" in code) == ("_st(" in code) == (bits == 16)
     if bits == 16:
-        # Integer levels per channel; halves up (NVIDIA) unless asked.
+        # Integer levels per channel; NVIDIA's rules unless asked: halves
+        # up, a value truncated to 2^-20 before its store.
         assert ("uvec4" in code) == color
         assert "floor((a + b + 1.0) * 0.5)" in code
+        assert "1048576.0" in code
