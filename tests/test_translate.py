@@ -20,6 +20,7 @@ from sbsar2ptex.translate import _dirmotionblur
 from sbsar2ptex.translate import _distance
 from sbsar2ptex.translate import _gradient_keys
 from sbsar2ptex.translate import _levels
+from sbsar2ptex.translate import _normal
 from sbsar2ptex.translate import buffer
 from sbsar2ptex.translate import drop_copies
 from sbsar2ptex.translate import graph_inputs
@@ -89,9 +90,7 @@ def test_empty_levels_range_ramps(color: bool) -> None:
     # in_low == in_high ramps over 1e-4, as Substance's renders of a 16-bit
     # input near the edge show, rather than stepping; the knobs stay live.
     edge = struct.unpack("<I", struct.pack("<f", 0.5))[0]
-    node = Node(
-        index=0, start=0, end=4, op=1, fields=[1 | 1 << 2], inline=[edge, edge]
-    )
+    node = Node(index=0, start=0, end=4, op=1, fields=[1 | 1 << 2], inline=[edge, edge])
     sh, _ = _levels(node, "levels", color=color, size=8)
     code = sh["shader_model"]["instance"]
     assert "1e-4" in code
@@ -219,6 +218,20 @@ def test_buffers_copying_a_buffer_go() -> None:
     inner = {n["name"] for n in next(n for n in nodes if n["name"] == "blur")["nodes"]}
     assert "buf_x" not in inner
     assert "buf_y" in inner
+
+
+@pytest.mark.parametrize("input2alpha", [0, 0x10])
+def test_normal_alpha_is_height_only_if_asked(input2alpha: int) -> None:
+    # Flag 0x10 (input2alpha) puts the height in alpha; off, alpha is 1. A
+    # live knob either way.
+    three = struct.unpack("<I", struct.pack("<f", 3.0))[0]
+    node = Node(
+        index=0, start=0, end=4, op=37, fields=[1 | input2alpha], inline=[three]
+    )
+    made = _normal(node, "normal", color=False, size=8)
+    sh = next(n for n in made.nodes if n["type"] == "shader")
+    assert sh["parameters"]["height_alpha"] == (1.0 if input2alpha else 0.0)
+    assert "$height_alpha > 0.5 ? h : 1.0" in sh["shader_model"]["instance"]
 
 
 @pytest.mark.parametrize("kind", ["f", "rgba"])

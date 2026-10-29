@@ -239,6 +239,14 @@ def cases() -> list[tuple]:
             "",
             True,
         ),
+        (
+            "normal_opaque_g",
+            "normal",
+            GRAY,
+            (("intensity", F1, "3"), ("input2alpha", "constantValueBool", "0")),
+            "",
+            True,
+        ),
     ]
     return out + dmb_cases() + function_cases()
 

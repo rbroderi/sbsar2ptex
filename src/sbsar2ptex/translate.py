@@ -2255,13 +2255,14 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Translate normal: normalize(-k dx, -k dy, 1) / 2 + 1/2, backward differences.
 
     k is the intensity times N / 256 (N the image width); flag 0x4 flips y
-    (inverse dy); alpha is the height.
+    (inverse dy); alpha is the height if flag 0x10 (input2alpha), else 1.
     """
     flags = node.fields[0]
     k = flag_params(flags & 3, node.inline, [("intensity", 0, 1.0)], 1, node)[
         "intensity"
     ]
     k = knob("intensity", "Intensity", k, 0.0, 8.0)
+    height = knob("height_alpha", "Height in alpha", 1.0 if flags & 0x10 else 0.0)
     k *= (1 << size) / 256  # per texel at 256 px: resolution independent
     sy = 1.0 if flags & 4 else -1.0
     lines = [
@@ -2269,7 +2270,7 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
         "float h = $input(uv);",
         "vec2 g = vec2(h - $input(fract(uv - e)), h - $input(fract(uv - e.yx)));",
         f"vec3 n = normalize(vec3({num(-k)} * g.x, {num(sy * k)} * g.y, 1.0));",
-        "return vec4(n * 0.5 + 0.5, h);",
+        f"return vec4(n * 0.5 + 0.5, {num(height)} > 0.5 ? h : 1.0);",
     ]
     made = shader(name, [("input", "f")], "rgba", "\n".join(lines))
     return buffered(made, ["input"], {"input"}, size, precise={"input"})
