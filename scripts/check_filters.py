@@ -1246,6 +1246,9 @@ def main() -> None:
         if ref.ndim == 2:
             got = got[..., 0]
         note = ""
+        if got.shape[0] > ref.shape[0]:  # a smaller case: exported larger
+            k = got.shape[0] // ref.shape[0]
+            got = got[k // 2 :: k, k // 2 :: k]
         if ref.shape[:2] != got.shape[:2]:  # a case whose output size Substance moves
             note = f"  (Substance at {ref.shape[1]}x{ref.shape[0]})"
             ref = ref[:: ref.shape[0] // got.shape[0], :: ref.shape[1] // got.shape[1]]
