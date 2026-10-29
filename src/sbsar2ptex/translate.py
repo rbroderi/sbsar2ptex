@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any
 from typing import Protocol
 
+from sbsar2ptex import fxdraw
+from sbsar2ptex import fxglsl
 from sbsar2ptex import fxmap
 from sbsar2ptex import fxsplat
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
@@ -2575,47 +2577,6 @@ FX_ARGS = "vec2 pos, float number, float depth, uint rs"
 """What an FX-Map function reads: $pos, $number, $depth and its node's
 random state (docs/random-generator.md section 8)."""
 
-# The signature stays on one GLSL line: Material Maker rewrites it line by line.
-FX_DRAW_GLSL = (
-    "vec4 fxdraw_$(name)(vec2 uv, vec2 c, vec2 hs, float a, int id, float s,"
-    " bool mx) {\n"
-    """\tvec2 d0 = uv - c;
-\td0 -= round(d0) * $(tile);
-\tvec2 h = max(abs(hs), vec2(1e-8));
-\tfloat ext = length(h);
-\tint k = ext > 0.5 ? int(ceil(ext - 0.5)) : 0;
-\tint kx = $(tile).x > 0.5 ? k : 0;
-\tint ky = $(tile).y > 0.5 ? k : 0;
-\tfloat ca = cos(a), sa = sin(a);
-\tvec4 v = vec4(0.0);
-\tfor (int j = -ky; j <= ky; j++) {
-\t\tfor (int i = -kx; i <= kx; i++) {
-\t\t\tvec2 d = d0 + vec2(float(i), float(j));
-\t\t\tvec2 q = vec2(ca * d.x + sa * d.y, -sa * d.x + ca * d.y) / h;
-\t\t\tvec4 p = vec4(0.0);
-\t\t\tif (id >= 0) {
-\t\t\t\tp = vec4(fxpat_$(name)(id, q, s));
-\t\t\t} else if (abs(q.x) <= 1.0 && abs(q.y) <= 1.0) {
-\t\t\t\tint k = -1 - id;
-\t\t\t\tp = fximg_$(name)(k % $(stride), k / $(stride), (q + 1.0) * 0.5);
-\t\t\t}
-\t\t\tv = mx ? max(v, p) : v + p;
-\t\t}
-\t}
-\treturn v;
-}
-"""
-)
-"""A pattern (id >= 0) or image (fxmap.image_id) drawn at c, wrapping."""
-
-FX_NEAR_GLSL = """bool fxnear_$(name)(vec2 uv, vec2 p, float r) {
-\tvec2 d = uv - p;
-\td -= round(d) * $(tile);
-\treturn dot(d, d) <= r * r;
-}
-"""
-"""Whether the pixel is within r of p (wrapping as the FX-Map tiles)."""
-
 _FX_CHILD = ((-0.25, -0.25), (0.25, -0.25), (-0.25, 0.25), (0.25, 0.25))
 """Each Quadrant output's cell center, in parent cells from the parent's."""
 
@@ -2824,9 +2785,7 @@ def _fx_splats(
     node: Node,
     tree: fxmap.Tree | None,
     st: fxmap.Settings,
-    *,
-    color: bool,
-    size: int,
+    layout: fxglsl.Layout,
 ) -> tuple[fxsplat.Packed | None, Path] | None:
     """Precompute the FX-Map's patterns into a data texture, when worth it.
 
@@ -2844,10 +2803,9 @@ def _fx_splats(
     defaults = {
         uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
     }
+    color, size = layout.color, layout.size
     try:
         spl = fxsplat.splats(node, tree, st, defaults, color=color, size=size)
-    except fxsplat.RegionError as e:
-        raise UnsupportedError(str(e)) from e
     except Exception as e:
         if fxsplat.evaluable(e):
             return None
@@ -2856,12 +2814,17 @@ def _fx_splats(
         return None
     _CTX.data_dir.mkdir(parents=True, exist_ok=True)
     path = _CTX.data_dir / f"fxmap_{node.index}.png"
-    if fxsplat.pixel_work(spl) > BAKE_WORK:
-        baked = fxsplat.bake(spl, size, (st.tile_x, st.tile_y))
+    regions = (tuple(layout.render), tuple(layout.tiling))
+    tile = (st.tile_x, st.tile_y)
+    unit = tuple(fxsplat.UNIT_REGION)
+    if fxsplat.pixel_work(spl, *regions, tile) > BAKE_WORK and regions == (unit, unit):
+        baked = fxsplat.bake(spl, size, tile)
         if baked is not None:
             fxsplat.write_floats(path, baked)
             return None, path
-    packed = fxsplat.pack(spl, color=color, tile=(st.tile_x, st.tile_y))
+    packed = fxsplat.pack(
+        spl, color=color, tile=tile, render=regions[0], tiling=regions[1]
+    )
     fxsplat.write_png(path, packed)
     return packed, path
 
@@ -2871,7 +2834,10 @@ BAKE_WORK = 2048
 
 
 def _fx_baked_lines() -> list[str]:
-    """Return GLSL adding the baked map (fxsplat.bake), filtered bilinearly."""
+    """Return GLSL adding the baked map (fxsplat.bake), filtered bilinearly.
+
+    The bake's pixel k is the map at k / n (fxsplat.bake's centers).
+    """
     n = 1 << _CTX.size
     _CTX.helpers.append(
         "float fxbaked_$(name)(ivec2 t) {\n"
@@ -2909,8 +2875,14 @@ def _fx_splat_lines(packed: fxsplat.Packed, *, color: bool) -> list[str]:
         "}\n"
     )
     g = packed.grid
-    lines = [
-        f"ivec2 gc = min(ivec2(floor(fract(uv) * {num(float(g))})), ivec2({g - 1}));",
+    col = (
+        "vec4(fxfloat_$(name)(s + 8), fxfloat_$(name)(s + 9),"
+        " fxfloat_$(name)(s + 10), fxfloat_$(name)(s + 11))"
+        if color
+        else "vec4(fxfloat_$(name)(s + 8))"
+    )
+    return [
+        f"ivec2 gc = min(ivec2(floor(uv * {num(float(g))})), ivec2({g - 1}));",
         f"int cell = {packed.cells} + 2 * (gc.y * {g} + gc.x);",
         "int first = int(fxword_$(name)(cell));",
         "int count = int(fxword_$(name)(cell + 1));",
@@ -2921,118 +2893,284 @@ def _fx_splat_lines(packed: fxsplat.Packed, *, color: bool) -> list[str]:
         "\tbool mx = fxfloat_$(name)(s + 7) > 0.5;",
         "\tfloat a = fxfloat_$(name)(s + 4);",
         "\tint id = int(fxfloat_$(name)(s + 5));",
-        "\tvec4 v = fxdraw_$(name)(uv, c, hs, a, id, fxfloat_$(name)(s + 6), mx);",
+        f"\tfxdraw_$(name)(P, c, hs, a, id, fxfloat_$(name)(s + 6), mx, {col}, acc);",
+        "}",
     ]
-    if color:
-        lines += [
-            "\tvec2 rg = vec2(fxfloat_$(name)(s + 8), fxfloat_$(name)(s + 9));",
-            "\tvec2 ba = vec2(fxfloat_$(name)(s + 10), fxfloat_$(name)(s + 11));",
-            "\tvec4 src = v * vec4(rg, ba);",
-            "\tacc.a = src.a + acc.a * (1.0 - src.a);",
-            "\tvec3 over = src.rgb * src.a + acc.rgb * (1.0 - src.a);",
-            "\tacc.rgb = mx ? over : acc.rgb + src.rgb * src.a;",
-        ]
-    else:
-        lines += [
-            "\tfloat value = v.x * fxfloat_$(name)(s + 8);",
-            "\tacc.x = mx ? max(acc.x, value) : acc.x + value;",
-        ]
-    return [*lines, "}"]
 
 
 def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """FX-Map: drawn (_fxmap_drawn) through its render and tiling regions.
 
-    The tiling region is a tile of pattern space that wraps; the render
-    region the part of pattern space the image shows. Equal, the image is
-    the tile: precomputed patterns are placed in it (fxsplat.splats). A
-    render region inside the default tile, a window onto it (make_it_tile
-    stretches a column), is the tile drawn, then sampled through the window.
+    The render region is the part of pattern space the image shows; the
+    tiling region the tile of it that repeats (fxdraw.copies). Both are
+    constants here: inline, or their functions evaluated with the graph's
+    defaults.
     """
     st = fxmap.read_settings(node, color=color)
-    if st.render_roi is None and st.tiling_roi is None:
-        return _fxmap_drawn(node, name, color=color, size=size, regions=False)
-    defaults = {
-        uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
-    }
-    try:
-        render, tiling = fxsplat.regions(node, st, defaults, size)
-    except Exception as e:
-        if fxsplat.evaluable(e):
-            msg = "an FX-Map's regions, not evaluable here"
-            raise UnsupportedError(msg) from e
-        raise
-    unit = fxsplat.UNIT_REGION
-    if render == tiling:
-        return _fxmap_drawn(node, name, color=color, size=size, regions=render != unit)
-    x0, x1, y0, y1 = render
-    if tiling != unit or not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
-        msg = f"an FX-Map's render region {render} outside its tiling region {tiling}"
-        raise UnsupportedError(msg)
-    # The tile drawn finer by the window's magnification (up to four times),
-    # so that sampling it keeps the patterns' edges.
-    finer = size + min(2, max(0, math.ceil(-math.log2(min(x1 - x0, y1 - y0)))))
-    sub = _fxmap_drawn(node, f"{name}_tile", color=color, size=finer, regions=False)
-    t = "rgba" if color else "f"
-    buf = f"{name}_tile_buf"
-    window = shader(
-        name, [("input", t)], t,
-        f"return $input(fract(vec2({num(x0)}, {num(y0)})"
-        f" + uv * vec2({num(x1 - x0)}, {num(y1 - y0)})));",
-    )  # fmt: skip
-    sub.nodes += [buffer(buf, finer), window]
-    sub.wires += [wire(sub.output, buf), wire(buf, name)]
-    sub.output = name
-    return sub
+    render = tiling = fxsplat.UNIT_REGION
+    if st.render_roi is not None or st.tiling_roi is not None:
+        defaults = {
+            uid: [float(x) for x in gi.default] or [0.0]
+            for uid, gi in _CTX.inputs.items()
+        }
+        try:
+            render, tiling = fxsplat.regions(node, st, defaults, size)
+        except Exception as e:
+            if fxsplat.evaluable(e):
+                msg = "an FX-Map's regions, not evaluable here"
+                raise UnsupportedError(msg) from e
+            raise
+    fmt = node.flags >> 4 & 3
+    layout = fxglsl.Layout(
+        size=size,
+        render=tuple(render),
+        tiling=tuple(tiling),
+        tile=(st.tile_x, st.tile_y),
+        color=color,
+        bits={0: 8, 1: 16}.get(fmt),
+        amd=_FX_AMD,
+    )
+    return _fxmap_drawn(node, name, layout)
 
 
-def _fxmap_drawn(
-    node: Node, name: str, *, color: bool, size: int, regions: bool
-) -> Sub:
-    """FX-Map: its tree evaluated per pixel (see sbsar2ptex.fxmap).
+_FX_AMD = False
+"""Draw FX-Maps by an AMD GPU's rules (stores, mip means), not NVIDIA's.
 
-    With ``regions``, precomputed patterns are placed by the render region
-    (equal to the tiling region); a map drawn per pixel cannot be.
+Internal: for checking the shader against renders made on AMD.
+"""
 
-    Each tree node is a GLSL function adding what it draws over the pixel
-    to ``acc`` (premultiplied rgba; gray in x), its children's functions
-    defined first. A node returns at once when nothing it draws can reach
-    the pixel (_fx_reach); otherwise every pattern is visited.
 
-    A map whose functions share variables cannot skip any of the tree, so
-    it is recorded instead: a small buffer holds each pattern it draws
-    (three texels: center and half size; angle, pattern, supplement and
-    blend; color), a pixel of it running the tree up to its pattern, and
-    the map's shader draws the buffer's patterns, skipping those out of
-    reach. Per pixel that is a loop over the patterns, not over the
-    tree's every function.
+@dataclass
+class _FxGroups:
+    """An FX-Map's drawing groups (fxdraw.order), as the tree can draw them."""
+
+    keys: list[tuple]
+    """Each group's (pattern rank, max blending), in drawing order."""
+    images: list[int]
+    """The pattern inputs, in the order of their first appearance."""
+
+    def key(self, pid: int, *, blend: bool) -> tuple:
+        """Return a pattern's group key (fxdraw.order's, by static appearance)."""
+        if pid >= 0:
+            return (pid, blend)
+        k = fxmap.image_parts(pid)[0]
+        return (1000 + len(self.images) - self.images.index(k), blend)
+
+    def index(self, pid: int, *, blend: bool) -> int:
+        """Return a pattern's group's number."""
+        return self.keys.index(self.key(pid, blend=blend))
+
+
+def _fx_groups(tree: fxmap.Tree | None, n_images: int) -> tuple[_FxGroups, dict]:
+    """Return a tree's drawing groups, and each node's (by id) groups below it.
+
+    Image inputs appear in the tree's static order (a Quadrant, then its
+    children; an Iterate's first output, then its repeated one; a Switch's
+    false output, then its true one); one drawn through an index function
+    may be any of them, the ones never named appearing last.
     """
+    order: list[int] = []
+    drawn: list[tuple[int | None, bool]] = []  # (pattern id or None: any image)
+    seen: set[int] = set()
+
+    def visit(t: fxmap.Tree | None) -> None:
+        if t is None or id(t) in seen:
+            return
+        seen.add(id(t))
+        if isinstance(t, fxmap.Quadrant):
+            if t.image_index is not None:
+                drawn.append((None, t.blend_max))
+            elif t.image is not None and t.image < n_images:
+                if t.image not in order:
+                    order.append(t.image)
+                drawn.append((fxmap.image_id(t.image, t.image_flags), t.blend_max))
+            elif t.pattern is not None:
+                drawn.append((t.pattern, t.blend_max))
+            for c in t.children:
+                visit(c)
+        elif isinstance(t, fxmap.Iterate):
+            visit(t.first)
+            visit(t.repeated)
+        else:
+            visit(t.if_false)
+            visit(t.if_true)
+
+    visit(tree)
+    order += [k for k in range(n_images) if k not in order]
+    groups = _FxGroups([], order)
+
+    def keys_of(pid: int | None, *, blend: bool) -> set[tuple]:
+        if pid is None:
+            return {groups.key(-1 - k, blend=blend) for k in range(n_images)}
+        return {groups.key(pid, blend=blend)}
+
+    every = set()
+    for pid, blend in drawn:
+        every |= keys_of(pid, blend=blend)
+    groups.keys = sorted(every)
+    below: dict[int, set[int]] = {}
+
+    def under(t: fxmap.Tree | None) -> set[int]:
+        if t is None:
+            return set()
+        if id(t) in below:
+            return below[id(t)]
+        below[id(t)] = set()  # (a guard; trees have no cycles)
+        got: set[int] = set()
+        if isinstance(t, fxmap.Quadrant):
+            if t.image_index is not None:
+                got = {groups.keys.index(k) for k in keys_of(None, blend=t.blend_max)}
+            elif t.image is not None and t.image < n_images:
+                pid = fxmap.image_id(t.image, t.image_flags)
+                got = {groups.index(pid, blend=t.blend_max)}
+            elif t.pattern is not None:
+                got = {groups.index(t.pattern, blend=t.blend_max)}
+            for c in t.children:
+                got |= under(c)
+        elif isinstance(t, fxmap.Iterate):
+            got = under(t.first) | under(t.repeated)
+        else:
+            got = under(t.if_false) | under(t.if_true)
+        below[id(t)] = got
+        return got
+
+    under(tree)
+    return groups, below
+
+
+def _fx_group_glsl(groups: _FxGroups) -> str:
+    """Return ``fxgroup_$(name)(id, mx)``: a pattern's drawing group's number."""
+    lines = ["int fxgroup_$(name)(int id, bool mx) {", "\tint key;"]
+    lines.append("\tif (id >= 0) key = 2 * id + int(mx);")
+    lines.append("\telse {")
+    lines.append(f"\t\tint k = (-1 - id) % {fxmap.IMAGE_STRIDE};")
+    lines.append("\t\tkey = -1;")
+    for pos, k in enumerate(groups.images):
+        rank = 1000 + len(groups.images) - pos
+        lines.append(f"\t\tif (k == {k}) key = 2 * {rank} + int(mx);")
+    lines.append("\t}")
+    for g, (rank, blend) in enumerate(groups.keys):
+        lines.append(f"\tif (key == {2 * rank + int(blend)}) return {g};")
+    lines += ["\treturn -1;", "}", ""]
+    return "\n".join(lines)
+
+
+def _fx_mips(tree: fxmap.Tree | None, n_images: int) -> list[int]:
+    """Return the pattern inputs the tree can draw in mip levels (filtering 0)."""
+    out: set[int] = set()
+    seen: set[int] = set()
+
+    def visit(t: fxmap.Tree | None) -> None:
+        if t is None or id(t) in seen:
+            return
+        seen.add(id(t))
+        if isinstance(t, fxmap.Quadrant):
+            if t.image_flags >> 2 & 3 == fxmap.MIPMAPPED:
+                if t.image_index is not None:
+                    out.update(range(n_images))
+                elif t.image is not None and t.image < n_images:
+                    out.add(t.image)
+            for c in t.children:
+                visit(c)
+        elif isinstance(t, fxmap.Iterate):
+            visit(t.first)
+            visit(t.repeated)
+        else:
+            visit(t.if_false)
+            visit(t.if_true)
+
+    visit(tree)
+    return sorted(out)
+
+
+def _fx_mip_atlas(
+    name: str, k: int, image_buf: str, layout: fxglsl.Layout
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Return the mip atlas of a map's pattern input ``k``: nodes, wires, last buffer.
+
+    One shader and buffer a pass (fxglsl.mip_passes): two up to 4096 px.
+    """
+    size, bits, amd = layout.size, layout.bits, layout.amd
+    nodes, wires = [], []
+    prev = image_buf
+    for first, last in fxglsl.mip_passes(size):
+        sname = f"{name}_mip{k}_{first}"
+        _CTX.helpers = [
+            fxglsl.val_glsl() if bits is not None else "",
+            fxglsl.levels_glsl(bits),
+            fxglsl.mean_glsl(bits, amd=amd),
+            fxglsl.mip_readers(size, first, last),
+        ]
+        made = shader(
+            sname,
+            [("input", "rgba")],
+            "rgba",
+            "\n".join(fxglsl.mip_body(size, first, last, copy_below=first > 1)),
+        )
+        buf = f"{sname}_buf"
+        nodes += [made, buffer(buf, size, filtering=False)]
+        wires += [wire(prev, sname), wire(sname, buf)]
+        prev = buf
+    return nodes, wires, prev
+
+
+def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
+    """FX-Map: its tree evaluated per pixel (see sbsar2ptex.fxmap), drawn.
+
+    Drawing follows sbsar2ptex.fxdraw (fxglsl): each pattern's tile copies,
+    coverage, value and blending into an accumulator, stored once.
+
+    Each tree node is a GLSL function drawing what it draws over the pixel
+    into ``acc`` (premultiplied rgba; gray in x), its children's functions
+    defined first. The tree is walked once per drawing group present
+    (pattern and blending, fxdraw.order), each walk drawing only its
+    group's patterns, the tree's order kept within it. A node returns at
+    once when nothing it draws can reach the pixel (_fx_reach), or none of
+    the walk's group is below it.
+
+    A map whose functions share variables cannot skip any of the tree, nor
+    walk it twice, so it is recorded instead: a small buffer holds each
+    pattern it draws (three texels: center and half size; angle, pattern,
+    supplement and blend; color), a pixel of it running the tree up to its
+    pattern, and the map's shader draws the buffer's patterns, group by
+    group, skipping those out of reach. Per pixel that is a loop over the
+    patterns, not over the tree's every function.
+    """
+    color, size = layout.color, layout.size
     tree = fxmap.read_tree(node, color=color)
     st = fxmap.read_settings(node, color=color)
-    if not regions:
-        st = replace(st, render_roi=None, tiling_roi=None)
-    deepest = fxmap.max_depth(tree)
-    h = st.hurst
-    if h == 0:
-        weight = "1.0"
-    elif h == 1:
-        weight = num(1.0 / (deepest + 1))
-    else:
-        total = sum(h**j for j in range(deepest + 1))
-        weight = f"pow({num(h)}, depth) * {num(1.0 / total)}"
-    scale = f"{weight} * {num(st.opacity)}"
+    weights = fxsplat.depth_weights(st.hurst, fxmap.max_depth(tree))
+    _CTX.helpers.append(
+        "float fxw_$(name)(float depth) {\n"
+        + "".join(
+            f"\tif (depth < {num(d + 0.5)}) return {num(w)};\n"
+            for d, w in enumerate(weights[:-1])
+        )
+        + f"\treturn {num(weights[-1])};\n}}\n"
+    )
+    opacity = num(fxdraw.f32(st.opacity))
     images = [f"pattern{n}" for n in range(len(st.patterns))]
+    groups, below = _fx_groups(tree, len(images))
+    mips = _fx_mips(tree, len(images))
     t = "rgba" if color else "f"
     names: dict[int, str] = {}
     # Functions that share variables run in Substance's order, every one of
     # them, on per-pixel globals: no node may be skipped (it could set one).
     stateful = fxsplat.stateful(node, tree, st)
     reaches = {} if stateful else _fx_reach(node, tree, size)
-    splats = _fx_splats(node, tree, st, color=color, size=size)
-    if splats is None and regions:
-        msg = "an FX-Map's render and tiling region, drawn per pixel"
-        raise UnsupportedError(msg)
+    splats = _fx_splats(node, tree, st, layout)
     recording = stateful and splats is None
+    walks = len(groups.keys) if not recording else 1
+    masked = 1 < walks <= 32  # noqa: PLR2004
+
+    def instance(op: str) -> list[str]:
+        """Return GLSL lines setting ``col``, the instance color, from ``op``."""
+        if color:
+            return [
+                f"float al = {op}.a * fxw_$(name)(depth) * {opacity};",
+                f"vec4 col = vec4({op}.rgb * al, al);",
+            ]
+        return [f"vec4 col = vec4({op}.w * fxw_$(name)(depth) * {opacity});"]
 
     def emit(tree: fxmap.Tree | None) -> str | None:
         if tree is None:
@@ -3042,7 +3180,11 @@ def _fxmap_drawn(
         lines: list[str] = []
         if recording:  # its pattern is recorded: the rest need not run
             lines.append("if (fxi_$(name) < 0) return;")
-        args = "uv, {pos}, {cell}, {depth}, {number}, {st}, acc"
+        if masked:
+            mask = sum(1 << g for g in below.get(id(tree), set()))
+            if mask != (1 << walks) - 1:
+                lines.append(f"if (({mask}u >> uint(grp) & 1u) == 0u) return;")
+        args = "uv, {pos}, {cell}, {depth}, {number}, {st}, grp, acc"
         reach = reaches.get(id(tree))
         if reach is not None:  # nothing it draws can reach this pixel: skip
             a, b = (max(x, 0.0) for x in reach)
@@ -3059,13 +3201,17 @@ def _fxmap_drawn(
         if isinstance(tree, fxmap.Quadrant):
             kids = [emit(c) for c in tree.children]
             p = tree.params
-            draw_id = tree.pattern if tree.pattern is not None else None
+            draw_id: int | str | None = tree.pattern
             if tree.image is not None and tree.image < len(images):
                 draw_id = fxmap.image_id(tree.image, tree.image_flags)
+            elif tree.image is not None:
+                draw_id = None
+            draws = draw_id is not None or tree.image_index is not None
             # Its parameters in Substance's order (opacity, branch and frame
             # offsets, size, rotation, supplement, image index): their
-            # functions may set variables the next ones read.
-            draws = draw_id is not None or tree.image_index is not None
+            # functions may set variables the next ones read. Walked per
+            # group, what only draws is evaluated in its group's walk.
+            params = []
             for local, key, default in (
                 ("vec4 op", "opacity", [1.0] * 4),
                 ("vec2 bo", "branchoffset", [0.0, 0.0]),
@@ -3076,56 +3222,57 @@ def _fxmap_drawn(
             ):
                 if draws or key == "branchoffset" or (stateful and key in p):
                     value = _fx_param(node, p.get(key), default, key)
-                    lines.append(f"{local} = {value};")
+                    params.append((key, f"{local} = {value};"))
             if tree.image_index is not None:
                 index = _fx_function(node, tree.image_index.code, "imageindex")
                 strided = fxmap.image_id(0, tree.image_flags) + 1
-                lines.append(f"int image = {strided - 1} - int({index});")
+                params.append(
+                    ("imageindex", f"int image = {strided - 1} - int({index});")
+                )
                 draw_id = "image"
-            lines.append("vec2 p = pos + bo;")
-            if draw_id is not None and recording:
-                mx = "1.0" if tree.blend_max else "0.0"
-                lines += [
-                    "if (fxi_$(name) == 0) {",
-                    "\tfxr0_$(name) = vec4(p + fo, cell * sz * 0.5);",
-                    (
-                        "\tfxr1_$(name) = vec4(rot * 6.28318531,"
-                        f" float({draw_id}), sup, {mx});"
-                    ),
-                    (
-                        f"\tfxr2_$(name) = vec4(op.rgb, op.a * {scale});"
-                        if color
-                        else f"\tfxr2_$(name) = vec4(op.y * {scale});"
-                    ),
-                    "}",
-                    "fxi_$(name)--;",
-                ]
-            elif draw_id is not None:
-                mx = "true" if tree.blend_max else "false"
-                lines += [
-                    (
-                        "vec4 v = fxdraw_$(name)(uv, p + fo, cell * sz * 0.5,"
-                        f" rot * 6.28318531, {draw_id}, sup, {mx});"
-                    ),
-                ]
-                if color:
+            mx = "true" if tree.blend_max else "false"
+            if recording:
+                lines += [ln for _, ln in params]
+                lines.append("vec2 p = pos + bo;")
+                if draw_id is not None:
                     lines += [
-                        "vec4 src = v * op;",
-                        f"src.a *= {scale};",
-                        "acc.a = src.a + acc.a * (1.0 - src.a);",
+                        *instance("op"),
+                        "if (fxi_$(name) == 0) {",
+                        "\tfxr0_$(name) = vec4(p + fo, cell * sz * 0.5);",
                         (
-                            "acc.rgb = src.rgb * src.a + acc.rgb * (1.0 - src.a);"
-                            if tree.blend_max
-                            else "acc.rgb += src.rgb * src.a;"
+                            "\tfxr1_$(name) = vec4(rot * 6.28318531,"
+                            f" float({draw_id}), sup, {float(tree.blend_max)});"
                         ),
+                        "\tfxr2_$(name) = col;",
+                        "}",
+                        "fxi_$(name)--;",
                     ]
-                else:
-                    value = f"v.x * op.y * {scale}"
-                    lines.append(
-                        f"acc.x = max(acc.x, {value});"
-                        if tree.blend_max
-                        else f"acc.x += {value};"
-                    )
+            else:
+                lines += [ln for key, ln in params if key == "branchoffset"]
+                lines.append("vec2 p = pos + bo;")
+                if draw_id is not None:
+                    if isinstance(draw_id, int):
+                        cond = f"grp == {groups.index(draw_id, blend=tree.blend_max)}"
+                        inner = [ln for key, ln in params if key != "branchoffset"]
+                    else:
+                        cond = f"fxgroup_$(name)(image, {mx}) == grp"
+                        inner = []
+                        lines += [ln for key, ln in params if key == "imageindex"]
+                        rest = [
+                            ln for key, ln in params
+                            if key not in ("branchoffset", "imageindex")
+                        ]  # fmt: skip
+                        inner = rest
+                    lines += [
+                        f"if ({cond}) {{",
+                        *(f"\t{ln}" for ln in inner),
+                        *(f"\t{ln}" for ln in instance("op")),
+                        (
+                            "\tfxdraw_$(name)(uv, p + fo, cell * sz * 0.5,"
+                            f" rot * 6.28318531, {draw_id}, sup, {mx}, col, acc);"
+                        ),
+                        "}",
+                    ]
             shared = len(set(map(id, tree.children))) == 1 and kids and kids[0]
             # Each slot's state: the child depth's transform, once more per slot.
             if shared:
@@ -3211,48 +3358,14 @@ def _fxmap_drawn(
         body = "\n\t".join(lines)
         _CTX.helpers.append(
             f"void {fname}(vec2 uv, vec2 pos, float cell, float depth,"
-            f" float number, uint st, inout vec4 acc) {{\n\t{body}\n}}\n"
+            f" float number, uint st, int grp, inout vec4 acc) {{\n\t{body}\n}}\n"
         )
         return fname
 
-    tile = f"vec2({1.0 if st.tile_x else 0.0}, {1.0 if st.tile_y else 0.0})"
-
     def draw_helpers() -> None:
         """Add the patterns and drawing helpers (before what draws)."""
-        _CTX.helpers.append(fxmap.PATTERN_GLSL)
-        # An image's texels, q in [0, 1]: nearest clamps to the edge ones,
-        # bilinear blends with zero past them (fxmap.image_id).
-        n = num(float(1 << _CTX.size))
-        texel = [
-            f"\tif (k == {k}) return {'$' + nm}((t + 0.5) / {n});"
-            for k, nm in enumerate(images)
-        ]
-        _CTX.helpers.append(
-            "vec4 fxtexel_$(name)(int k, vec2 t) {\n"
-            "\tif (any(lessThan(t, vec2(0.0)))"
-            f" || any(greaterThan(t, vec2({n} - 1.0)))) {{\n"
-            "\t\treturn vec4(0.0);\n\t}\n"
-            + "\n".join(texel)
-            + "\n\treturn vec4(0.0);\n}\n"
-            "vec4 fximg_$(name)(int k, int filtering, vec2 q) {\n"
-            f"\tif (filtering == {fxmap.NEAREST}) {{\n"
-            f"\t\treturn fxtexel_$(name)(k, clamp(floor(q * {n}), 0.0, {n} - 1.0));\n"
-            "\t}\n"
-            f"\tvec2 p = q * {n} - 0.5;\n"
-            "\tvec2 b = floor(p), f = p - b;\n"
-            "\tvec4 t00 = fxtexel_$(name)(k, b);\n"
-            "\tvec4 t10 = fxtexel_$(name)(k, b + vec2(1.0, 0.0));\n"
-            "\tvec4 t01 = fxtexel_$(name)(k, b + vec2(0.0, 1.0));\n"
-            "\tvec4 t11 = fxtexel_$(name)(k, b + 1.0);\n"
-            "\treturn mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);\n"
-            "}\n"
-        )
-        _CTX.helpers.append(
-            FX_DRAW_GLSL.replace("$(tile)", tile).replace(
-                "$(stride)", str(fxmap.IMAGE_STRIDE)
-            )
-        )
-        _CTX.helpers.append(FX_NEAR_GLSL.replace("$(tile)", tile))
+        _CTX.helpers.append(fxglsl.draw_glsl(layout, images, mips))
+        _CTX.helpers.append(_fx_group_glsl(groups))
 
     if not recording:  # the tree's functions draw
         draw_helpers()
@@ -3290,7 +3403,10 @@ def _fxmap_drawn(
         finally:
             _CTX.sampled = None
             _CTX.fx_variables = None
-    run = f"{root}(uv, vec2(0.5), 1.0, 0.0, 0.0, uint({seed}), acc);"
+
+    def run(grp: int, at: str = "P") -> str:
+        return f"{root}({at}, vec2(0.5), 1.0, 0.0, 0.0, uint({seed}), {grp}, acc);"
+
     recorder: dict[str, Any] | None = None
     if recording:
         # The record buffer: pixel 3k + g holds pattern k's texel g; past
@@ -3314,7 +3430,7 @@ def _fxmap_drawn(
                     "fxr2_$(name) = vec4(0.0);",
                     "vec4 acc = vec4(0.0);",
                     *start,
-                    run,
+                    run(0, "vec2(0.0)"),
                     "int g = at % 3;",
                     (
                         "return g == 0 ? fxr0_$(name)"
@@ -3329,10 +3445,12 @@ def _fxmap_drawn(
             f"\treturn (vec2(float(i % {1 << side}), float(i / {1 << side}))"
             f" + 0.5) / {n};\n}}\n"
         )
-    lines = ["vec4 acc = vec4(0.0);"]
+    lines = [*fxglsl.pixel_lines(layout), "vec4 acc = vec4(0.0);"]
     if isinstance(st.background, int):
         inputs.append(("background", t))
-        lines.append("acc = $background(uv);" if color else "acc.x = $background(uv);")
+        # (as stored: an image's levels, through Material Maker's half floats)
+        bg = "fxlvval_$(name)(fxlvin_$(name)(vec4($background(uv))))"
+        lines.append(f"acc = {bg};" if color else f"acc.x = {bg}.x;")
     elif st.background is not None:
         lines.append(
             f"acc = {vec(st.background, 4)};"
@@ -3341,35 +3459,28 @@ def _fxmap_drawn(
         )
     if recording:
         inputs.append(("records", "rgba"))
+        groups_loop = len(groups.keys) > 1
+        if groups_loop:
+            lines.append(f"for (int grp = 0; grp < {len(groups.keys)}; grp++) {{")
         lines += [
             f"for (int k = 0; k < {records}; k++) {{",
             "\tvec4 r1 = $records(fxrt_$(name)(3 * k + 1));",
             "\tif (r1.w < -0.5) break;",
             "\tvec4 r0 = $records(fxrt_$(name)(3 * k));",
-            "\tfloat ext = length(r0.zw);",  # patterns stay in their square
-            (
-                "\tif (ext <= 0.5 && !fxnear_$(name)(uv, r0.xy, ext * 1.001 + 1e-6))"
-                " continue;"
-            ),
-            "\tvec4 r2 = $records(fxrt_$(name)(3 * k + 2));",
             "\tbool mx = r1.w > 0.5;",
-            "\tvec4 v = fxdraw_$(name)(uv, r0.xy, r0.zw, r1.x, int(r1.y), r1.z, mx);",
         ]
-        if color:
-            lines += [
-                "\tvec4 src = v * r2;",
-                "\tacc.a = src.a + acc.a * (1.0 - src.a);",
-                "\tvec3 over = src.rgb * src.a + acc.rgb * (1.0 - src.a);",
-                "\tacc.rgb = mx ? over : acc.rgb + src.rgb * src.a;",
-            ]
-        else:
-            lines += [
-                "\tfloat value = v.x * r2.x;",
-                "\tacc.x = mx ? max(acc.x, value) : acc.x + value;",
-            ]
-        lines.append("}")
+        if groups_loop:
+            lines.append("\tif (fxgroup_$(name)(int(r1.y), mx) != grp) continue;")
+        lines += [
+            "\tif (!fxnear_$(name)(P, r0.xy, length(r0.zw) * 1.001 + 1e-6)) continue;",
+            "\tvec4 r2 = $records(fxrt_$(name)(3 * k + 2));",
+            "\tfxdraw_$(name)(P, r0.xy, r0.zw, r1.x, int(r1.y), r1.z, mx, r2, acc);",
+            "}",
+        ]
+        if groups_loop:
+            lines.append("}")
     elif root:
-        lines += [*start, run]
+        lines += [*start, *(run(g) for g in range(walks))]
     if splats is not None:
         packed, path = splats
         inputs.append(("splats", "rgba"))
@@ -3378,18 +3489,28 @@ def _fxmap_drawn(
             if packed is None
             else _fx_splat_lines(packed, color=color)
         )
+    mip_inputs = [(f"mip{k}", "rgba") for k in mips]
+    inputs[len(images) : len(images)] = mip_inputs
     lines.append(
-        "return clamp(acc, 0.0, 1.0);" if color else "return clamp(acc.x, 0.0, 1.0);"
+        "return fxstore_$(name)(acc);" if color else "return fxstore_$(name)(acc).x;"
     )
+    _CTX.helpers.append(fxglsl.store_glsl(layout))
     made = shader(name, inputs, t, "\n".join(lines))
-    sub = buffered(made, [nm for nm, _ in inputs], set(images), size)
+    sub = buffered(
+        made, [nm for nm, _ in inputs], set(images), size, precise=set(images)
+    )
+    for k in mips:
+        nodes, wires_, last = _fx_mip_atlas(name, k, f"{name}_pattern{k}_buf", layout)
+        sub.nodes += nodes
+        sub.wires += [*wires_, wire(last, name, len(images) + mips.index(k))]
+        sub.ports = [pt for pt in sub.ports if pt[0] != f"mip{k}"]
     if recorder is not None:
         # The recorder reads the map's (buffered) images too.
         buf = f"{name}_records_buf"
         sub.nodes += [recorder, buffer(buf, side, filtering=False)]
         sub.wires += [
             wire(recorder["name"], buf),
-            wire(buf, name, len(inputs) - 1),
+            wire(buf, name, [nm for nm, _ in inputs].index("records")),
             *(
                 wire(f"{name}_{nm}_buf", recorder["name"], port)
                 for port, nm in enumerate(images)
@@ -3398,7 +3519,7 @@ def _fxmap_drawn(
         sub.ports = [pt for pt in sub.ports if pt[0] != "records"]
     if splats is not None:
         data = f"{name}_splats"
-        port = len(inputs) - 1
+        port = [nm for nm, _ in inputs].index("splats")
         sub.nodes.append(
             {
                 "name": data,
@@ -3410,6 +3531,7 @@ def _fxmap_drawn(
         )
         sub.wires.append(wire(data, name, port))
         sub.ports = [pt for pt in sub.ports if pt[0] != "splats"]
+    sub.rounded = layout.bits is not None  # (fxstore stores it)
     return sub
 
 

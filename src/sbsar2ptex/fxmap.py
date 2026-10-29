@@ -37,18 +37,17 @@ opacity, render and tiling regions...; 3 for the background, an input
 image), code[0], the pattern inputs' node indices, two more code offsets (the
 random seed's and the output size's), then the inline values in state order.
 
-How it draws (fitted to sbsrender): a Quadrant's cell is the image at the
-root and each child's a quarter of its parent's (output0 top left, 1 top
-right, 2 bottom left, 3 bottom right). $pos is the cell's center plus the
-branch offsets of the Quadrant and its ancestors; the pattern is drawn at
-$pos plus the frame offset, pattern size times the cell wide, rotated
-clockwise by rotation (turns), the image wrapping around. Offsets are in
-image units. A pattern at depth k is weighted hurst^k over the sum of hurst^j
-for j to the deepest level (all 1 for hurst 0), times the global opacity;
-gray adds (clamped at the end) or takes the max, of opacity's green
-component times the pattern. Iterate runs output0 once, then output1 count
+Where it draws (fitted to sbsrender): a Quadrant's cell is pattern space
+at the root and each child's a quarter of its parent's (output0 top left, 1
+top right, 2 bottom left, 3 bottom right). $pos is the cell's center plus
+the branch offsets of the Quadrant and its ancestors; the pattern is drawn
+at $pos plus the frame offset, pattern size times the cell wide, rotated
+clockwise by rotation (turns). A pattern at depth k is weighted hurst^k
+over the sum of hurst^j for j to the deepest level (all 1 for hurst 0),
+times the global opacity. Iterate runs output0 once, then output1 count
 times with $number 0, 1, ...; Switch runs output1 when its value is true,
-else output0.
+else output0. How the patterns are then drawn (order, tile copies,
+coverage, blending, images, the store): sbsar2ptex.fxdraw.
 """
 
 import struct
@@ -62,50 +61,70 @@ PATTERNS = {
     0: "square", 1: "disc", 2: "paraboloid", 3: "bell", 4: "gaussian",
     5: "thorn", 6: "pyramid", 7: "brick", 8: "gradation", 9: "waves",
     10: "half bell", 11: "ridged bell", 12: "crescent", 13: "capsule",
-    14: "cone",
+    14: "cone", 15: "gradation offset", 16: "hemisphere",
 }  # fmt: skip
 """Pattern names by compiled id (the .sbs pattern type less 2)."""
 
-PATTERN_GLSL = """float fxss_$(name)(float e, float x) {
-\tfloat t = clamp(x / max(e, 1e-6), 0.0, 1.0);
+SQUARE = frozenset({0, 6, 7, 8, 13, 15})
+"""Patterns covering their square (max |q| <= 1), as images do; the others
+cover their disc (|q| <= 1)."""
+
+OFFSET = frozenset({15, 16})
+"""Patterns adding their supplement after the color: gradation offset and
+hemisphere."""
+
+PATTERN_GLSL = """float fxss_$(name)(float t) {
 \treturn t * t * (3.0 - 2.0 * t);
 }
-float fxpat_$(name)(int id, vec2 q, float s) {
-\tif (abs(q.x) > 1.0 || abs(q.y) > 1.0) return 0.0;
-\tfloat r2 = dot(q, q);
-\tfloat r = sqrt(r2);
-\tfloat bell = pow(max(1.0 - r2, 0.0), 4.0);
-\tif (id == 0) return 1.0;
-\tif (id == 1) return r <= 1.0 ? 1.0 : 0.0;
-\tif (id == 2) return max(1.0 - r2, 0.0);
-\tif (id == 3) return bell;
-\tif (id == 4) return exp(-11.1 * r2);
-\tif (id == 5) return pow(max(1.0 - r, 0.0), 4.0);
-\tif (id == 6) return max(1.0 - max(abs(q.x), abs(q.y)), 0.0);
-\tif (id == 7) {
-\t\treturn fxss_$(name)(s, 1.0 - abs(q.x)) * fxss_$(name)(s, 1.0 - abs(q.y));
-\t}
-\tif (id == 8) return (q.x + 1.0) * 0.5 * (1.0 - s);
-\tif (id == 9) {
-\t\tfloat f = (3.0 + 12.0 * s) * 3.14159265;
-\t\treturn max(1.0 - r2, 0.0) * (0.5 + 0.5 * cos(f * q.x));
-\t}
-\tif (id == 10) return q.x > 0.0 ? bell * (1.0 - fxss_$(name)(1.0 - s, q.x)) : bell;
-\tif (id == 11) return bell * (1.0 - abs(q.x)) * (1.0 - abs(q.x));
-\tif (id == 12) {
-\t\tfloat ring = r <= 1.0 ? 6.75 * r2 * (1.0 - r2) * (1.0 - r2) : 0.0;
-\t\treturn ring * (1.0 - fxss_$(name)(2.0 - 2.0 * s, q.x + 1.0));
-\t}
-\tif (id == 13) {
-\t\tfloat d = max(abs(q.x) - 0.77 * s, 0.0);
-\t\treturn max(1.0 - 20.0 * (d * d + q.y * q.y), 0.0);
-\t}
-\tif (id == 14) return max(1.0 - r, 0.0);
-\tif (id == 15) return (q.x + 1.0) * 0.5 + s;
-\treturn r <= 1.0 ? sqrt(1.0 - r2) + s : 0.0;
+float fxwave_$(name)(float f) {
+\tfloat e = 0.25 - abs(f - round(f));
+\tfloat u = 1.0 - 4.0 * abs(e);
+\tfloat w = 1.0 - u * u;
+\treturn sign(e) * w * (0.77606332 + 0.22393668 * w);
+}
+bool fxpat_$(name)(int id, vec2 q, float s, out float v) {
+\tv = 0.0;
+\tfloat r2 = q.x * q.x + q.y * q.y;
+\tbool square = id == 0 || id == 6 || id == 7 || id == 8 || id == 13 || id == 15;
+\tif (square ? max(abs(q.x), abs(q.y)) > 1.0 : r2 > 1.0) return false;
+\tfloat m = 1.0 - r2;
+\tfloat m2 = m * m;
+\tfloat bell = m2 * m2;
+\tif (id <= 1) v = 1.0;
+\telse if (id == 2) v = m;
+\telse if (id == 3) v = bell;
+\telse if (id == 4) v = clamp(exp(-11.1 * r2) - 1.51e-5, 0.0, 1.0);
+\telse if (id == 5) {
+\t\tfloat t = 1.0 - sqrt(r2);
+\t\tt *= t;
+\t\tv = t * t;
+\t} else if (id == 6) v = 1.0 - max(abs(q.x), abs(q.y));
+\telse if (id == 7) {
+\t\tfloat e = s + 1e-10;
+\t\tv = fxss_$(name)(clamp((1.0 - abs(q.x)) / e, 0.0, 1.0))
+\t\t\t* fxss_$(name)(clamp((1.0 - abs(q.y)) / e, 0.0, 1.0));
+\t} else if (id == 8) v = 0.5 * (q.x + 1.0) * (1.0 - s);
+\telse if (id == 9) v = m * (0.5 + 0.5 * fxwave_$(name)((6.0 * s + 1.5) * q.x));
+\telse if (id == 10) {
+\t\tv = bell * (1.0 - fxss_$(name)(clamp(q.x / (1.0 - s), 0.0, 1.0)));
+\t} else if (id == 11) {
+\t\tfloat t = 1.0 - abs(q.x);
+\t\tv = bell * (t * t);
+\t} else if (id == 12) {
+\t\tfloat t = clamp(0.5 * (q.x + 1.0) / (1.0 - s), 0.0, 1.0);
+\t\tv = 6.75 * r2 * m2 * (1.0 - fxss_$(name)(t));
+\t} else if (id == 13) {
+\t\tfloat d = clamp(abs(q.x) - 0.77 * s, 0.0, 1.0);
+\t\tv = clamp(1.0 - 20.0 * (q.y * q.y + d * d), 0.0, 1.0);
+\t} else if (id == 14) v = 1.0 - sqrt(r2);
+\telse if (id == 15) v = 0.5 * (q.x + 1.0);
+\telse v = sqrt(m);
+\treturn true;
 }
 """
-"""Each pattern's value at q in [-1, 1]^2 (x right, y down), supplement s."""
+"""Whether a pattern covers q (x right, y down), and its value there
+(supplement s): fxdraw.value's in GLSL. Gradation offset and hemisphere
+add s later, after the color (OFFSET)."""
 
 QUAD_PARAMS = (
     ("opacity", 19, 4),
@@ -121,18 +140,27 @@ INLINE, CODE, INPUT = 1, 2, 3
 """Parameter states: a value inline, a function's code block, an input."""
 
 IMAGE_STRIDE = 64
-"""Image pattern ids: -1 - (input index + IMAGE_STRIDE * filtering)."""
+"""Image pattern ids: -1 - (input index + IMAGE_STRIDE * filtering
++ PREMULTIPLIED * premultiplied)."""
+PREMULTIPLIED = 4 * IMAGE_STRIDE
 NEAREST = 2
-"""A Quadrant's image filtering: 0 bilinear and mipmaps, 1 bilinear, 2 nearest."""
+"""A Quadrant's image filtering: 0 bilinear in a mip level, 1 bilinear, 2 nearest."""
+MIPMAPPED = 0
 
 
 def image_id(index: int, flags: int) -> int:
     """Return the pattern id drawing image input ``index`` (Quadrant.image_flags).
 
-    Bilinear filtering blends with zero past the image's edges; nearest
-    clamps to them (fitted to sbsrender).
+    Every filtering reads zero past the image's edges (fxdraw).
     """
-    return -1 - index - IMAGE_STRIDE * (flags >> 2 & 3)
+    premul = PREMULTIPLIED if flags & 0x10 else 0
+    return -1 - index - IMAGE_STRIDE * (flags >> 2 & 3) - premul
+
+
+def image_parts(pid: int) -> tuple[int, int, bool]:
+    """Return an image pattern id's input index, filtering and premultiplication."""
+    k = -1 - pid
+    return k % IMAGE_STRIDE, k // IMAGE_STRIDE % 4, k >= PREMULTIPLIED
 
 
 @dataclass

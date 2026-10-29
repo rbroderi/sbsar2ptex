@@ -10,11 +10,15 @@ of cells each listing the splats that can reach it, in drawing order. The
 shader then draws only its cell's splats. The cost: the map no longer
 follows its parameters live.
 
+The splats are in Substance's drawing order (fxdraw.order), in pattern
+space: the shader maps each pixel to it through the render region, and
+draws each splat's tile copies (fxdraw.copies).
+
 Texture layout, texel indices: splats from 0 (RECORD texels each: center x
 and y, half size x and y, rotation in radians, pattern, supplement, blend
-max as 0 or 1, then the value: gray's, or premultiplied-later rgba), then the
-grid's cells (start and count in the index list, as uints), then the index
-list (splat numbers, as uints).
+max as 0 or 1, then the instance color: gray's, or premultiplied rgba),
+then the grid's cells (start and count in the index list, as uints), then
+the index list (splat numbers, as uints).
 """
 
 import math
@@ -26,6 +30,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from sbsar2ptex import fxdraw
 from sbsar2ptex import fxmap
 from sbsar2ptex.function import FunctionError
 from sbsar2ptex.function import decode
@@ -50,10 +55,6 @@ class TooBig(Exception):  # noqa: N818
     """The tree draws more splats than MAX_SPLATS."""
 
 
-class RegionError(Exception):
-    """A render or tiling region the splats cannot follow."""
-
-
 @dataclass
 class Splat:
     """One pattern as drawn: where, how big, how turned, which, how strong."""
@@ -68,7 +69,8 @@ class Splat:
     suppl: float
     blend_max: bool
     value: list[float]
-    """Gray: [luminance times weight]; color: rgba, alpha times weight."""
+    """The instance color (float32s): gray, [opacity times weight]; color,
+    premultiplied rgba, alpha the opacity's times weight."""
 
 
 def splats(
@@ -82,21 +84,13 @@ def splats(
 ) -> list[Splat]:
     """Return the patterns the FX-Map ``node`` draws, in drawing order.
 
-    ``inputs`` are the graph inputs' values by uid (defaults). Raises
-    FunctionError for what cannot be evaluated here (sampling an input) and
-    TooBig past MAX_SPLATS.
+    In pattern space (the render region maps it to the image). ``inputs``
+    are the graph inputs' values by uid (defaults). Raises FunctionError for
+    what cannot be evaluated here (sampling an input) and TooBig past
+    MAX_SPLATS.
     """
     n = float(1 << size)
-    deepest = fxmap.max_depth(tree)
-    h = settings.hurst
-    total = sum(h**j for j in range(deepest + 1)) if h not in (0, 1) else 1.0
-
-    def weight(depth: float) -> float:
-        if h == 0:
-            return 1.0
-        if h == 1:
-            return 1.0 / (deepest + 1)
-        return h**depth / total
+    weights = depth_weights(settings.hurst, fxmap.max_depth(tree))
 
     blocks: dict[int, Any] = {}
     # One variable store for the whole map: its setup sets variables the
@@ -132,10 +126,9 @@ def splats(
     if settings.setup_code is not None:
         n_px = [n, n]
         run(settings.setup_code, 0, "frameoffset", {1: n_px, 3: [float(size)] * 2})
-    render, tiling = _regions(settings, lambda code: run(code, 0, "frameoffset", {}))
-    if tiling != render:  # the image is not the tile (translate's to handle)
-        msg = f"FX-Map tiling region {tiling} is not its render region {render}"
-        raise RegionError(msg)
+    # (the regions' functions run here, in Substance's order: they may read
+    # or set the map's variables)
+    _regions(settings, lambda code: run(code, 0, "frameoffset", {}))
     out: list[Splat] = []
 
     def enter(
@@ -174,16 +167,22 @@ def splats(
             elif t.image is not None and t.image < len(settings.patterns):
                 pattern = fxmap.image_id(t.image, t.image_flags)
             if pattern is not None:
-                w = weight(depth) * settings.opacity
-                value = [op[0], op[1], op[2], op[3] * w] if color else [op[1] * w]
-                if any(value if not color else value[3:]):
+                value = instance_color(
+                    op, weights[depth], settings.opacity, color=color
+                )
+                # (nothing drawn: no color, no supplement added, no max)
+                faint = not any(value[3:] if color else value) and not (
+                    (t.blend_max and not color)
+                    or (isinstance(pattern, int) and pattern in fxmap.OFFSET and sup[0])
+                )
+                if not faint:
                     out.append(
                         Splat(
                             at[0] + fo[0],
                             at[1] + fo[1],
                             cell * sz[0] / 2,
                             cell * sz[1] / 2,
-                            rot[0] * 2 * math.pi,
+                            fxdraw.f32(fxdraw.f32(rot[0]) * fxdraw.f32(2 * math.pi)),
                             pattern,
                             sup[0],
                             t.blend_max,
@@ -216,17 +215,34 @@ def splats(
             enter(t.if_true if value else t.if_false, e, pos, cell, depth, number)
 
     enter(tree, root & UINT32_MASK, (0.5, 0.5), 1.0, 0, 0.0)
-    if render != UNIT_REGION:  # the region drawn fills the image
-        x0, x1, y0, y1 = render
-        w, h = x1 - x0, y1 - y0
-        if w != h and any(s.angle % math.pi for s in out):
-            # stretching a turned pattern shears it: no splat can draw that
-            msg = f"FX-Map render region {render} stretches turned patterns"
-            raise RegionError(msg)
-        for s in out:
-            s.x, s.y = (s.x - x0) / w, (s.y - y0) / h
-            s.hx, s.hy = s.hx / w, s.hy / h
-    return out
+    return [out[k] for k in fxdraw.order(out)]
+
+
+def depth_weights(hurst: float, deepest: int) -> list[float]:
+    """Return each depth's weight (float32s), 0 to ``deepest``.
+
+    hurst^depth over the sum of hurst^j for j to the deepest level (any
+    Quadrant's, drawing or not); all 1 for hurst 0.
+    """
+    if hurst == 0:
+        return [1.0] * (deepest + 1)
+    total = sum(hurst**j for j in range(deepest + 1))
+    return [fxdraw.f32(hurst**d / total) for d in range(deepest + 1)]
+
+
+def instance_color(
+    op: list[float], weight: float, opacity: float, *, color: bool
+) -> list[float]:
+    """Return a pattern's color: its opacity times weight and global opacity.
+
+    Gray: the opacity's last component (an inline gray opacity is one value;
+    a function's float4 gives its w). Color: premultiplied rgba. Float32.
+    """
+    f = np.float32
+    if not color:
+        return [float(f(op[-1]) * f(weight) * f(opacity))]
+    a = f(op[3]) * f(weight) * f(opacity)
+    return [float(f(op[0]) * a), float(f(op[1]) * a), float(f(op[2]) * a), float(a)]
 
 
 UNIT_REGION = [0.0, 1.0, 0.0, 1.0]
@@ -357,15 +373,42 @@ class Packed:
     """The index list's first texel."""
 
 
-def _reach(s: Splat) -> float:
-    return math.hypot(s.hx, s.hy)
+Region = tuple[float, float, float, float]
+"""A render or tiling region: x0 x1 y0 y1 of pattern space."""
 
 
-def pack(spl: list[Splat], *, color: bool, tile: tuple[bool, bool]) -> Packed:
+def _boxes(
+    s: Splat, render: Region, tiling: Region, tile: tuple[bool, bool]
+) -> list[tuple[float, float, float, float]]:
+    """Return the image-space boxes (x0 x1 y0 y1, uv) of a splat's copies."""
+    bx, by = fxdraw.box(s)
+    rx0, rx1, ry0, ry1 = render
+    rw, rh = rx1 - rx0, ry1 - ry0
+    return [
+        (
+            (s.x + ox - bx - rx0) / rw,
+            (s.x + ox + bx - rx0) / rw,
+            (s.y + oy - by - ry0) / rh,
+            (s.y + oy + by - ry0) / rh,
+        )
+        for ox, oy in fxdraw.copies(s, tiling, tile)
+    ]
+
+
+def pack(
+    spl: list[Splat],
+    *,
+    color: bool,
+    tile: tuple[bool, bool],
+    render: Region = (0.0, 1.0, 0.0, 1.0),
+    tiling: Region = (0.0, 1.0, 0.0, 1.0),
+) -> Packed:
     """Return the splats and a cell grid of them as a data texture.
 
-    The grid (8 to 256 cells a side) is the finest whose index list stays
-    within 16 entries a splat on average.
+    The grid (8 to 256 cells a side) covers the image; a cell lists the
+    splats any copy of which (fxdraw.copies) reaches it, in drawing order.
+    It is the finest whose index list stays within 16 entries a splat on
+    average.
     """
     rec = RECORD[color]
     floats: list[float] = []
@@ -376,26 +419,18 @@ def pack(spl: list[Splat], *, color: bool, tile: tuple[bool, bool]) -> Packed:
     if len(words) != rec * len(spl):
         msg = "splat records of the wrong size"
         raise ValueError(msg)
+    boxes = [_boxes(s, render, tiling, tile) for s in spl]
 
     def lists(g: int) -> list[list[int]]:
-        cells: list[list[int]] = [[] for _ in range(g * g)]
-        for k, s in enumerate(spl):
-            r = _reach(s)
-            spans = []
-            for c, wrap in ((s.x, tile[0]), (s.y, tile[1])):
-                lo, hi = math.floor((c - r) * g), math.floor((c + r) * g)
-                if wrap:
-                    spans.append(
-                        range(g)
-                        if hi - lo + 1 >= g
-                        else [i % g for i in range(lo, hi + 1)]
-                    )
-                else:
-                    spans.append(range(max(lo, 0), min(hi, g - 1) + 1))
-            for cy in spans[1]:
-                for cx in spans[0]:
-                    cells[cy * g + cx].append(k)
-        return cells
+        cells: list[set[int]] = [set() for _ in range(g * g)]
+        for k, bs in enumerate(boxes):
+            for x0, x1, y0, y1 in bs:
+                cx0, cx1 = max(math.floor(x0 * g), 0), min(math.floor(x1 * g), g - 1)
+                cy0, cy1 = max(math.floor(y0 * g), 0), min(math.floor(y1 * g), g - 1)
+                for cy in range(cy0, cy1 + 1):
+                    for cx in range(cx0, cx1 + 1):
+                        cells[cy * g + cx].add(k)
+        return [sorted(c) for c in cells]
 
     grid, cells = 8, lists(8)
     g = 16
@@ -426,59 +461,20 @@ def write_png(path: Path, packed: Packed) -> None:
     Image.fromarray(packed.image, "RGBA").save(path)
 
 
-def _smooth(e: float, x: np.ndarray) -> np.ndarray:
-    t = np.clip(x / max(e, 1e-6), 0.0, 1.0)
-    return t * t * (3.0 - 2.0 * t)
-
-
-def pattern(pid: int, qx: np.ndarray, qy: np.ndarray, s: float) -> np.ndarray:
-    """Return pattern ``pid`` at (qx, qy), supplement ``s`` (fxmap.PATTERN_GLSL)."""
-    r2 = qx * qx + qy * qy
-    r = np.sqrt(r2)
-    bell = np.maximum(1.0 - r2, 0.0) ** 4
-    one = np.ones_like(qx)
-    values = {
-        0: lambda: one,
-        1: lambda: (r <= 1.0) * one,
-        2: lambda: np.maximum(1.0 - r2, 0.0),
-        3: lambda: bell,
-        4: lambda: np.exp(-11.1 * r2),
-        5: lambda: np.maximum(1.0 - r, 0.0) ** 4,
-        6: lambda: np.maximum(1.0 - np.maximum(abs(qx), abs(qy)), 0.0),
-        7: lambda: _smooth(s, 1.0 - abs(qx)) * _smooth(s, 1.0 - abs(qy)),
-        8: lambda: (qx + 1.0) * 0.5 * (1.0 - s) * one,
-        9: lambda: (
-            np.maximum(1.0 - r2, 0.0)
-            * (0.5 + 0.5 * np.cos((3.0 + 12.0 * s) * math.pi * qx))
-        ),
-        10: lambda: np.where(qx > 0.0, bell * (1.0 - _smooth(1.0 - s, qx)), bell),
-        11: lambda: bell * (1.0 - abs(qx)) ** 2,
-        12: lambda: (
-            np.where(r <= 1.0, 6.75 * r2 * (1.0 - r2) ** 2, 0.0)
-            * (1.0 - _smooth(2.0 - 2.0 * s, qx + 1.0))
-        ),
-        13: lambda: np.maximum(
-            1.0 - 20.0 * (np.maximum(abs(qx) - 0.77 * s, 0.0) ** 2 + qy * qy), 0.0
-        ),
-        14: lambda: np.maximum(1.0 - r, 0.0),
-        15: lambda: (qx + 1.0) * 0.5 + s,
-    }
-    if pid in values:
-        v = values[pid]()
-    else:
-        v = np.where(r <= 1.0, np.sqrt(np.maximum(1.0 - r2, 0.0)) + s, 0.0)
-    return np.where((abs(qx) <= 1.0) & (abs(qy) <= 1.0), v, 0.0)
-
-
-def _copies(s: Splat) -> int:
-    """Return the tile copies a side the shader draws of ``s`` (FX_DRAW_GLSL)."""
-    ext = math.hypot(max(abs(s.hx), 1e-8), max(abs(s.hy), 1e-8))
-    return 2 * (math.ceil(ext - 0.5) if ext > 0.5 else 0) + 1  # noqa: PLR2004
-
-
-def pixel_work(spl: list[Splat]) -> float:
+def pixel_work(
+    spl: list[Splat],
+    render: Region = (0.0, 1.0, 0.0, 1.0),
+    tiling: Region = (0.0, 1.0, 0.0, 1.0),
+    tile: tuple[bool, bool] = (True, True),
+) -> float:
     """Return about how many patterns the shader draws a pixel, on average."""
-    return sum(min(1.0, (2 * _reach(s)) ** 2) * _copies(s) ** 2 for s in spl)
+    total = 0.0
+    for s in spl:
+        for x0, x1, y0, y1 in _boxes(s, render, tiling, tile):
+            w = min(x1, 1.0) - max(x0, 0.0)
+            h = min(y1, 1.0) - max(y0, 0.0)
+            total += max(w, 0.0) * max(h, 0.0)
+    return total
 
 
 BAKE_KINDS = 16
@@ -486,15 +482,18 @@ BAKE_KINDS = 16
 
 
 def bake(spl: list[Splat], size: int, tile: tuple[bool, bool]) -> np.ndarray | None:
-    """Return the gray map the splats draw, 2**size a side, or None.
+    """Return the gray map the splats add, 2**size a side, or None.
 
-    Only a tiling map of gray splats of patterns (not images) that add
-    (not max), of few kinds: each kind's patterns are one kernel, wrapped
-    as the map tiles, convolved with their centers and values by FFT (each
-    center spread bilinearly over its four nearest pixels). Clamped.
+    Only a map tiling both ways with the default regions, of gray splats of
+    patterns (not images, nor those adding their supplement) that add (not
+    max), of few kinds: each kind's patterns are one kernel (fxdraw.value),
+    wrapped as the map tiles, convolved with their centers and values by
+    FFT (each center spread bilinearly over its four nearest pixels).
+    Unclamped (the map's store clamps).
     """
     if not all(tile) or any(
-        len(s.value) != 1 or s.pattern < 0 or s.blend_max for s in spl
+        len(s.value) != 1 or s.pattern < 0 or s.pattern in fxmap.OFFSET or s.blend_max
+        for s in spl
     ):
         return None
     kinds: dict[tuple, list[Splat]] = {}
@@ -503,34 +502,35 @@ def bake(spl: list[Splat], size: int, tile: tuple[bool, bool]) -> np.ndarray | N
     if len(kinds) > BAKE_KINDS:
         return None
     n = 1 << size
-    d = np.arange(n) / n
-    d = np.where(d >= 0.5, d - 1.0, d)  # noqa: PLR2004 (offsets, wrapped)
+    d = (np.arange(n) + 0.5) / n - 0.5  # pixel centers' offsets from a center
     dx, dy = np.meshgrid(d, d)
     total = np.zeros((n, n))
     for (pid, hx, hy, angle, suppl), members in kinds.items():
-        hx_, hy_ = max(abs(hx), 1e-8), max(abs(hy), 1e-8)
-        k = (_copies(members[0]) - 1) // 2 + 1
-        ext = math.hypot(hx_, hy_)
+        if hx == 0 or hy == 0:
+            continue
+        bx, by = fxdraw.box(members[0])
+        kx, ky = math.ceil(bx + 0.5), math.ceil(by + 0.5)
         ca, sa = math.cos(angle), math.sin(angle)
         kernel = np.zeros((n, n))
-        for j in range(-k, k + 1):
-            for i in range(-k, k + 1):
-                if math.hypot(max(abs(i) - 0.5, 0), max(abs(j) - 0.5, 0)) > ext:
-                    continue  # (that copy cannot reach the tile)
+        for j in range(-ky, ky + 1):
+            for i in range(-kx, kx + 1):
                 ox, oy = dx + i, dy + j
-                qx = (ca * ox + sa * oy) / hx_
-                qy = (-sa * ox + ca * oy) / hy_
-                kernel += pattern(pid, qx, qy, suppl)
+                qx = (ca * ox + sa * oy) / hx
+                qy = (-sa * ox + ca * oy) / hy
+                kernel += fxdraw.value(pid, qx, qy, suppl)[1]
+        # rolled: kernel[i] is the pattern (i + 1/2) / n from a center, and
+        # points[k] a center at k / n
+        kernel = np.roll(kernel, (-(n // 2), -(n // 2)), axis=(0, 1))
         points = np.zeros((n, n))
         for s in members:
-            px, py = s.x * n - 0.5, s.y * n - 0.5
+            px, py = s.x * n, s.y * n
             x0, y0 = math.floor(px), math.floor(py)
             fx, fy = px - x0, py - y0
             for yy, wy in ((y0, 1 - fy), (y0 + 1, fy)):
                 for xx, wx in ((x0, 1 - fx), (x0 + 1, fx)):
                     points[yy % n, xx % n] += s.value[0] * wx * wy
         total += np.fft.irfft2(np.fft.rfft2(points) * np.fft.rfft2(kernel), s=(n, n))
-    return np.clip(total, 0.0, 1.0).astype(np.float32)
+    return total.astype(np.float32)
 
 
 def write_floats(path: Path, image: np.ndarray) -> None:

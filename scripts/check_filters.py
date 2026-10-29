@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import png16
 from PIL import Image
 
 from sbsar2ptex import translate
@@ -598,7 +599,194 @@ def fxmap_cases() -> list[dict]:
         {"tag": "fx_bake_g", "filter": "fxmaps", "kind": GRAY, "params": faint,
          "extra": fxmap_graph(blobs), "connect": 0, "format16": True}
     )  # fmt: skip
+    return out + fxdraw_cases() + fxunit_cases()
+
+
+def _fx_chain(items: list[tuple]) -> tuple:
+    """Return an Iterate chain drawing ``items`` (FX-Map nodes) in tree order."""
+    i1 = "constantValueInt32"
+    tail = items[-1]
+    for item in reversed(items[:-1]):
+        tail = fx("iterate", (("numberadded", i1, "1"),), {0: item, 1: tail})
+    return tail
+
+
+def _fx_pat(t: int, size: tuple = (), off: tuple = (), rot: float = 0.0,
+            op: tuple | float | None = None, mode: int = 0, sup: float = 0.0,
+            more: tuple = ()) -> tuple:  # fmt: skip
+    """Return a Quadrant drawing pattern type ``t`` (.sbs numbering)."""
+    i1, f1, f2 = "constantValueInt32", "constantValueFloat1", "constantValueFloat2"
+    params: list[tuple] = [("patterntype", i1, str(t))]
+    if size:
+        params.append(("patternsize", f2, f"{size[0]} {size[-1]}"))
+    if off:
+        params.append(("frameoffset", f2, f"{off[0]} {off[1]}"))
+    if rot:
+        params.append(("patternrotation", f1, str(rot)))
+    if op is not None:
+        rgba = (op, op, op, 1.0) if isinstance(op, float) else op
+        params.append(("opacity", F4, " ".join(map(str, rgba))))
+    if mode:
+        params.append(("blendingmode", i1, str(mode)))
+    if sup:
+        params.append(("patternsuppl", f1, str(sup)))
+    return fx("quadrant", (*params, *more))
+
+
+def fxdraw_cases() -> list[dict]:
+    """Return the FX-Map drawing specification's acceptance cases (256 px).
+
+    Pattern types, blending and order, images in color, 8-bit graphs,
+    stretched render regions, a map tiling one way, patterns larger than
+    the image, and render and tiling regions (sbsar2ptex.fxdraw).
+    """
+    i1, f2 = "constantValueInt32", "constantValueFloat2"
+    flat = (("hurst", "constantValueFloat1", "0"),)
+    small = {"filter": "fxmaps", "params": flat, "connect": 0, "format16": True,
+             "size": 8}  # fmt: skip
+
+    def image(f: int, *, size: str = "0.37 0.29", off: str = "0.1131 0.2717",
+              rot: float = 0.0, more: tuple = ()) -> tuple:  # fmt: skip
+        params = [("patternsize", f2, size), ("frameoffset", f2, off),
+                  ("imagefiltering", i1, str(f)), *more]  # fmt: skip
+        if rot:
+            params.append(("patternrotation", "constantValueFloat1", str(rot)))
+        return fx("quadrant", (("patterntype", i1, "1"), *params))
+
+    out = [
+        {**small, "tag": f"x_cimg_f{f}", "kind": COLOR, "connect": 1,
+         "extra": fxmap_graph(image(f, rot=0.1, more=(
+             ("opacity", F4, "0.9 0.8 0.7 0.9"), ("blendingmode", i1, "1"))))}
+        for f in (0, 1, 2)
+    ]  # fmt: skip
+    out.append(
+        {**small, "tag": "x_cimg_premul", "kind": COLOR, "connect": 1,
+         "extra": fxmap_graph(image(1, size="0.6 0.6", off="0.05 0.02",
+                                    more=(("imagepremul", "constantValueBool", "1"),)))}
+    )  # fmt: skip
+    p = _fx_pat
+    out.append(
+        {**small, "tag": "x_gray_mixed", "kind": GRAY,
+         "extra": fxmap_graph(_fx_chain([
+             p(3, (0.5,), (0.05, 0), op=0.6, mode=1),
+             p(2, (0.4,), (-0.1, 0.1), op=0.3),
+             p(4, (0.7,), op=0.5),
+             p(2, (0.3,), (0.1, -0.1), op=0.8, mode=1),
+             p(5, (0.6,), (-0.05, 0.05), op=0.4, mode=1)]))}
+    )  # fmt: skip
+    out.append(
+        {**small, "tag": "x_color_mixed", "kind": COLOR,
+         "params": (*flat, ("background", F4, "0.2 0.1 0.3 0.5")),
+         "extra": fxmap_graph(_fx_chain([
+             p(5, (0.7,), op=(0.9, 0.2, 0.1, 0.6), mode=1),
+             p(2, (0.4,), (0.1, 0), op=(0.1, 0.8, 0.2, 0.5)),
+             p(3, (0.5,), (-0.1, 0.05), op=(0.2, 0.3, 0.9, 0.7), mode=1),
+             p(2, (0.3,), (0, -0.15), rot=0.07, op=(1, 1, 0, 0.4), mode=1)]))}
+    )  # fmt: skip
+    out.append(
+        {**small, "tag": "x_gray_bg_op", "kind": GRAY,
+         "params": (*flat, ("background", F4, "0.25 0.25 0.25 1"),
+                    ("opacitymult", "constantValueFloat1", "0.6")),
+         "extra": fxmap_graph(_fx_chain([
+             p(8, (0.6,), op=0.5), p(6, (0.5,), (0.2, 0.2), op=0.7, mode=1)]))}
+    )  # fmt: skip
+    out.append(
+        {**small, "tag": "x_8bit_shapes", "kind": GRAY, "format16": False,
+         "extra": fxmap_graph(_fx_chain([
+             p(t, (0.45, 0.35), (round(0.22 * (t % 3 - 1), 2),
+                                 round(0.22 * (t // 3 % 3 - 1), 2)),
+               rot=round(0.03 * t, 2), op=0.8, sup=0.3)
+             for t in range(2, 17)]))}
+    )  # fmt: skip
+    out.append(
+        {**small, "tag": "x_8bit_img0", "kind": GRAY, "format16": False,
+         "connect": 1, "extra": fxmap_graph(image(0))}
+    )  # fmt: skip
+    out.append(
+        {**small, "tag": "x_stretch_img0", "kind": GRAY, "connect": 1,
+         "params": (*flat, ("renderroi", F4, "0.1 0.9 0.3 0.6")),
+         "extra": fxmap_graph(image(0, size="0.5 0.4", off="0.05 0.1", rot=0.05))}
+    )  # fmt: skip
+    out.append(
+        {**small, "tag": "x_notile", "kind": GRAY,
+         "params": (*flat, ("tiling", "constantValueInt32", "1")),
+         "extra": fxmap_graph(_fx_chain([
+             p(3, (0.4,), (0.4, 0.4), op=0.7),
+             p(2, (0.3,), (-0.45, 0.1), rot=0.1, op=0.5)]))}
+    )  # fmt: skip
+    out.append(
+        {**small, "tag": "x_big_gauss", "kind": GRAY,
+         "extra": fxmap_graph(_fx_chain([
+             p(6, (2.3, 1.7), (0.1, 0.3), rot=0.15, op=0.3),
+             p(9, (1.4,), (0.3, 0), op=0.4, sup=0.4)]))}
+    )  # fmt: skip
+    four = fxmap_graph(_fx_chain([
+        p(3, (0.3,), (0.42, 0.1), op=0.5),
+        p(2, (0.2, 0.1), (-0.3, -0.45), rot=0.1, op=0.4),
+        p(5, (0.25,), op=0.6),
+        p(4, (0.15,), (0.2, 0.3), op=0.7)]))  # fmt: skip
+    regions = (
+        ("0.2 0.7 0.3 0.8", None),
+        ("-0.5 1.5 -0.5 1.5", None),
+        ("0.1 0.9 0.2 0.6", None),
+        ("-0.25 1.25 0.1 0.9", "-0.25 1.25 0.1 0.9"),
+        (None, "0 0.5 0 0.5"),
+        (None, "0.25 0.75 0.25 0.75"),
+        ("0 1 0 1", "0.1 0.6 0.2 0.9"),
+    )
+    for k, (render, tiling) in enumerate(regions):
+        params = [*flat]
+        if render:
+            params.append(("renderroi", F4, render))
+        if tiling:
+            params.append(("tilingroi", F4, tiling))
+        out.append({**small, "tag": f"x_region{k}", "kind": GRAY,
+                    "params": tuple(params), "extra": four})  # fmt: skip
     return out
+
+
+def fxunit_cases() -> list[dict]:
+    """Return the FX-Map specification's unit checks (16 px).
+
+    Accumulation without clamping or rounding, a gray map's opacity (inline:
+    the mean of rgb; a function's float4: its w), order (max after adds)
+    and the 8-bit store.
+    """
+    i1, f1 = "constantValueInt32", "constantValueFloat1"
+    flat = (("hurst", f1, "0"),)
+    unit = {"filter": "fxmaps", "kind": GRAY, "params": flat, "connect": 0,
+            "format16": True, "size": 4}  # fmt: skip
+    p = _fx_pat
+
+    def many(count: int, op: float) -> tuple:
+        return fx("iterate", (("numberadded", i1, str(count)),), {1: p(2, op=op)})
+
+    w4 = fn("vector4", FLOAT4,
+            componentsin=fn("vector3", FLOAT3,
+                            componentsin=fn("vector2", FLOAT2, componentsin=const(0.9),
+                                            componentslast=const(0.1)),
+                            componentslast=const(0.3)),
+            componentslast=const(0.7))  # fmt: skip
+    k8 = 128
+    return [
+        {**unit, "tag": "u_accum30", "extra": fxmap_graph(many(100, 0.3 / 65535))},
+        {**unit, "tag": "u_accum32779",
+         "extra": fxmap_graph(fx("iterate", (("numberadded", i1, "1000"),),
+                                 {0: p(2, op=0.5), 1: p(2, op=0.01 / 65535)}))},
+        {**unit, "tag": "u_gray_inline",
+         "extra": fxmap_graph(p(2, op=(0.9, 0.1, 0.3, 1.0)))},
+        {**unit, "tag": "u_gray_fn",
+         "extra": fxmap_graph(p(2, more=(("opacity", "dynamicValue",
+                                          function_graph(w4)),)))},
+        {**unit, "tag": "u_order",
+         "extra": fxmap_graph(_fx_chain([p(2, op=0.1, mode=1), p(2, op=0.2),
+                                         p(2, op=0.3)]))},
+        *(
+            {**unit, "tag": f"u_store8_{f}", "format16": False,
+             "extra": fxmap_graph(p(2, op=float(np.float32((k8 + f / 100) / 255))))}
+            for f in (61, 63)
+        ),
+    ]  # fmt: skip
 
 
 def distance_cases() -> list[dict]:
@@ -706,9 +894,10 @@ def pixel_cases() -> list[dict]:
     return out
 
 
-def test_images(out: Path) -> dict[str, Path]:
+def test_images(out: Path, size: int = SIZE) -> dict[str, Path]:  # noqa: PT028
     """Write gray a, b, c and color A, B (alpha varying) test images."""
-    n = 1 << SIZE
+    n = 1 << size
+    tail = "" if size == SIZE else f"_{size}"
     y, x = np.mgrid[0:n, 0:n] / n
     gray = {
         "a": 0.5
@@ -727,13 +916,13 @@ def test_images(out: Path) -> dict[str, Path]:
     }
     paths = {}
     for k, v in gray.items():
-        paths[k] = out / f"in_gray_{k}.png"
+        paths[k] = out / f"in_gray_{k}{tail}.png"
         # 8-bit: Material Maker reads images at 8 bits, so Substance must too.
         Image.fromarray((v.clip(0, 1) * 255).round().astype(np.uint8), "L").save(
             paths[k]
         )
     for k, v in color.items():
-        paths[k] = out / f"in_color_{k}.png"
+        paths[k] = out / f"in_color_{k}{tail}.png"
         Image.fromarray((v.clip(0, 1) * 255).round().astype(np.uint8), "RGBA").save(
             paths[k]
         )
@@ -747,8 +936,19 @@ def load(p: Path) -> np.ndarray:
     return a / (65535 if im.mode.startswith("I") or a.max() > 255 else 255)
 
 
-def material_graph(mm_nodes, wires, source: tuple[str, int], color: bool) -> dict:
-    """Return a graph: ``source`` into a Material's albedo (and alpha into opacity)."""
+def material_graph(
+    mm_nodes,
+    wires,
+    source: tuple[str, int],
+    color: bool,
+    size: int = SIZE,
+    channel: int | None = None,
+) -> dict:
+    """Return a graph: ``source`` into a Material's albedo (and alpha into opacity).
+
+    With ``channel`` (0 for a grayscale source), that channel's 16-bit level
+    instead: the albedo's red its high byte, green its low (--levels).
+    """
     material = {
         "name": "Material",
         "type": "material",
@@ -765,9 +965,32 @@ def material_graph(mm_nodes, wires, source: tuple[str, int], color: bool) -> dic
             "depth_scale": 0.5,
             "flags_transparent": color,
             "sss": 0,
-            "size": SIZE,
+            "size": size,
         },
     }
+    if channel is not None:
+        material["parameters"]["flags_transparent"] = False
+        kind = "rgba" if color else "f"
+        pick = f"$input(uv)[{channel}]" if color else "$input(uv)"
+        enc = shader(
+            "export", [("input", kind)], "rgba",
+            f"float k = floor(clamp({pick}, 0.0, 1.0) * 65535.0 + 0.5);\n"
+            "float h = floor(k / 256.0);\n"
+            # a quarter step up: whole steps whether the export rounds or truncates
+            "return vec4(h, k - 256.0 * h, 0.0, 255.0) / 255.0 + 0.25 / 255.0;",
+        )  # fmt: skip
+        wires = [
+            *wires,
+            {"from": source[0], "from_port": source[1], "to": "export", "to_port": 0},
+            {"from": "export", "from_port": 0, "to": "Material", "to_port": 0},
+        ]
+        graph = {
+            "name": "check", "type": "graph", "label": "Graph", "shortdesc": "",
+            "longdesc": "", "node_position": {"x": 0, "y": 0}, "parameters": {},
+            "seed_int": 0, "nodes": [*mm_nodes, material, enc], "connections": wires,
+        }  # fmt: skip
+        no_auto_buffers(graph)
+        return graph
     # Material Maker's 8-bit export truncates (an exact k/255 comes out
     # k - 1): half a step more makes it round, as Substance's does.
     kind = "rgba" if color else "f"
@@ -822,6 +1045,43 @@ def case(c: tuple | dict) -> dict:
     }
 
 
+def levels_line(
+    tag: str, out: Path, mm_out: Path, names: list[tuple[str, int | None]], bits: int
+) -> str:
+    """Return a --levels line: values exact, within one level, the largest error.
+
+    Every channel of every pixel counts (a color output four values a pixel).
+    """
+    ref = png16.read(out / f"ref_{tag}.png")
+    if png16.bit_depth(out / f"ref_{tag}.png") == 8:
+        ref = ref * 257
+    diffs = []
+    for name, ch in names:
+        path = mm_out / f"{name}_albedo.png"
+        if not path.exists():
+            return f"{tag:16} Material Maker made no image"
+        enc = np.asarray(Image.open(path)).astype(np.int64)
+        got = enc[..., 0] * 256 + enc[..., 1]
+        want = ref[..., 0 if ch is None else min(ch, ref.shape[-1] - 1)]
+        if ch == 3 and ref.shape[-1] < 4:
+            want = np.full_like(got, 65535)
+        if got.shape[0] > want.shape[0]:  # exported larger: the shader's pixels
+            k = got.shape[0] // want.shape[0]
+            got = got[k // 2 :: k, k // 2 :: k]
+        if want.shape != got.shape:
+            return f"{tag:16} sizes differ: {want.shape} {got.shape}"
+        diffs.append(np.abs(got - want))
+    d = np.stack(diffs, -1)
+    if bits == 8:
+        d = (d + 128) // 257
+    pixel = d  # (each channel of each pixel)
+    return (
+        f"{tag:16} exact {100 * float((pixel == 0).mean()):8.4f}%"
+        f"  +-1 {100 * float((pixel <= 1).mean()):8.4f}%  max {int(pixel.max())}"
+        f"  ({bits}-bit)"
+    )
+
+
 def main() -> None:
     """Run the cases the command line names, or all."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -831,20 +1091,35 @@ def main() -> None:
     parser.add_argument(
         "--amd",
         action="store_true",
-        help="16-bit directional motion blurs round halves as AMD GPUs do, to"
-        " compare with renders made on one (by default as NVIDIA's do)",
+        help="16-bit directional motion blurs round halves, and FX-Maps store"
+        " and build mip levels, as AMD GPUs do, to compare with renders made on"
+        " one (by default as NVIDIA's do)",
+    )
+    parser.add_argument(
+        "--levels",
+        action="store_true",
+        help="export each output's 16-bit levels (a color one channel by"
+        " channel) and count pixels exact, within one level and the largest"
+        " error, in the graph's levels (8-bit graphs: 1/255)",
     )
     args = parser.parse_args()
     translate._DMB_AMD = args.amd  # noqa: SLF001
+    translate._FX_AMD = args.amd  # noqa: SLF001
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    images = test_images(out)
+    by_size = {SIZE: test_images(out)}
 
     todo = [case(c) for c in cases()]
     todo = [c for c in todo if not args.tags or c["tag"] in args.tags]
     made: list[tuple[str, int]] = []
+    exports: dict[str, list[tuple[str, int | None]]] = {}
+    bits: dict[str, int] = {}
     for c in todo:
         tag, filt, kind = c["tag"], c["filter"], c["kind"]
+        size = c.get("size", SIZE)
+        if size not in by_size:
+            by_size[size] = test_images(out, size)
+        images = by_size[size]
         src = out / f"{tag}.sbs"
         src.write_text(
             sbs(
@@ -871,7 +1146,7 @@ def main() -> None:
                 str(SBSRENDER), "render", "--input", str(out / f"{tag}.sbsar"),
                 "--set-entry", f"input_a@{images[a]}", "--set-entry", f"input_b@{images[b]}",
                 "--set-entry", f"input_c@{images['c']}",
-                "--set-value", f"$outputsize@{SIZE},{SIZE}",
+                "--set-value", f"$outputsize@{size},{size}",
                 *(a for k, v in c["set"].items() for a in ("--set-value", f"{k}@{v}")),
                 *(("--engine", c["engine"]) if "engine" in c else ()),
                 "--output-path", str(out), "--output-name", f"ref_{tag}",
@@ -897,6 +1172,7 @@ def main() -> None:
                 asm.nodes(),
                 {"output": asm.output_nodes[0][1]},
                 by_uid,
+                size=size,
                 inputs=given,
                 data_dir=out / "data" / tag,
             )
@@ -915,17 +1191,31 @@ def main() -> None:
                             n["parameters"][w["name"]] = float(v)
         source = next(n for n in mm_nodes if n["name"] == outs["output"][0])
         color = output_type(source) == "rgba"
-        graph = material_graph(mm_nodes, wires, outs["output"], color)
-        (out / f"{tag}.ptex").write_text(json.dumps(graph, indent=1), encoding="utf-8")
+        if args.levels:
+            exports[tag] = []
+            for ch in range(4) if color else (0,):
+                name = f"{tag}~{ch}" if color else tag
+                graph = material_graph(
+                    mm_nodes, wires, outs["output"], color, size, channel=ch
+                )
+                (out / f"{name}.ptex").write_text(json.dumps(graph), encoding="utf-8")
+                exports[tag].append((name, ch if color else None))
+        else:
+            graph = material_graph(mm_nodes, wires, outs["output"], color, size)
+            (out / f"{tag}.ptex").write_text(
+                json.dumps(graph, indent=1), encoding="utf-8"
+            )
+            exports[tag] = [(tag, None)]
         made.append((tag, kind))
+        bits[tag] = 16 if c["format16"] else 8
 
     mm_out = out / "mm"
     mm_out.mkdir(exist_ok=True)
-    for tag, _ in made:  # an earlier run's image must not pass for this one's
+    tags = [name for tag, _ in made for name, _ in exports[tag]]
+    for tag in tags:  # an earlier run's image must not pass for this one's
         (mm_out / f"{tag}_albedo.png").unlink(missing_ok=True)
     # Some dozens a run: a long batch can end with its last few not
     # exported; those get one more run.
-    tags = [t for t, _ in made]
     for attempt in range(2):
         todo = [t for t in tags if not (mm_out / f"{t}_albedo.png").exists()]
         for k in range(0, len(todo), EXPORT_BATCH):
@@ -942,6 +1232,10 @@ def main() -> None:
             if missed:
                 print(f"exporting again: {', '.join(missed)}")
 
+    if args.levels:
+        for tag, _ in made:
+            print(levels_line(tag, out, mm_out, exports[tag], bits[tag]))
+        sys.exit(0)
     worst = 0.0
     for tag, _ in made:
         got_path = mm_out / f"{tag}_albedo.png"
