@@ -47,6 +47,7 @@ Substance's image the same way, so that steps finer than 1/255 count.
 
 ``--fork`` exports through material-maker-mod (``--mm`` then being Godot):
 its 8-bit export rounds, as Substance's does, and is of the graph's size.
+A fresh clone of it is imported once first (about 20 s).
 ``--plugins`` builds the graph with the sbs plugin's nodes, installed in
 the fork's user folder (``sbsar2ptex --install-mm-plugin``), and its loops
 unrolled, so that every node has an image to compare.
@@ -89,6 +90,8 @@ NARROW = 16 / 255
 """A grayscale image spanning less than this is compared magnified."""
 MAX_EXPORTS = 40
 """Graphs one Material Maker run exports (its command line has a limit)."""
+FORK_CLASS_CACHE = Path(".godot/global_script_class_cache.cfg")
+"""What a fork's one-time import (godot --import) writes."""
 EXACT = 0.999
 """Share of pixels (8-bit) two images must agree in to match, with --exact."""
 SAME = 0.63
@@ -354,7 +357,8 @@ def mm_export(
     One Material Maker run exports them all (MAX_EXPORTS at a time): its
     start-up, not the graphs, takes most of an export. Its output goes to
     ``folder``/mm.log. ``fork``: ``mm`` is Godot, running material-maker-mod
-    from that folder (its material_maker project).
+    from that folder (its material_maker project), imported first if it never
+    was: without Godot's script class cache its export hangs.
     """
     if fork is None:
         command = [str(mm), "--export"]
@@ -362,6 +366,12 @@ def mm_export(
         command = [str(mm), "--path", str(fork), "--export-material",
                    "--target", "Godot/Godot 4 Standard"]  # fmt: skip
     with (folder / "mm.log").open("w", encoding="utf-8", errors="replace") as log:
+        if fork is not None and not (fork / FORK_CLASS_CACHE).exists():
+            subprocess.run(
+                [str(mm), "--headless", "--path", str(fork), "--import"],
+                cwd=mm.parent, stdout=log, stderr=subprocess.STDOUT, check=True,
+                timeout=1800,
+            )  # fmt: skip
         for k in range(0, len(paths), MAX_EXPORTS):
             subprocess.run(
                 [*command, "-o", folder.as_posix(),
