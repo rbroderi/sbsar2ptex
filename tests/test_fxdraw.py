@@ -181,3 +181,8 @@ def test_eight_bit_mip_means() -> None:
     s = int(t.sum())
     assert fxdraw.mip_mean(t, 8, amd=True)[0, 0] == fxdraw.s8(np.float32(s / 1020))
     assert fxdraw.mip_mean(t, 8)[0, 0] == fxdraw.s8n(np.float32(s / 1020))
+    # NVIDIA adds 0.03 of a 1/4096 step before truncating (RTX 3090): the
+    # sum 62 is 248.97 steps, so 249, a level more than s8n's 15
+    t = np.array([[15, 15], [16, 16]])
+    assert fxdraw.s8n(np.float32(62 / 1020)) == 15
+    assert fxdraw.mip_mean(t, 8)[0, 0] == 16

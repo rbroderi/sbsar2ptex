@@ -188,7 +188,8 @@ def mean_glsl(bits: int | None, *, amd: bool) -> str:
         else:
             body = (
                 "\tuvec4 su = uvec4(a + b + c + d);\n"
-                "\treturn vec4(((su * 4096u) / 1020u * 255u + 2047u) / 4096u);\n"
+                "\treturn vec4(((su * 409600u + 3060u) / 102000u * 255u + 2047u)"
+                " / 4096u);\n"
             )
     else:
         body = "\treturn (a + b + c + d) * 0.25;\n"

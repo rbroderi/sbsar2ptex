@@ -179,7 +179,8 @@ def mip_mean(t: np.ndarray, bits: int, *, amd: bool = False) -> np.ndarray:
 
     16-bit, AMD: the mean as a float32 value rounded to the nearest level (a
     half goes the way the float32 rounded); NVIDIA (predicted): halves up.
-    8-bit: the mean value stored as ``s8`` (AMD) or ``s8n`` (NVIDIA).
+    8-bit: the mean value stored as ``s8`` (AMD), or as ``s8n`` with 0.03 of
+    a 1/4096 step added before its truncation (NVIDIA).
     """
     t = np.asarray(t, dtype=np.int64)
     s = t[0::2, 0::2] + t[1::2, 0::2] + t[0::2, 1::2] + t[1::2, 1::2]
@@ -207,7 +208,8 @@ def mip_mean(t: np.ndarray, bits: int, *, amd: bool = False) -> np.ndarray:
             )
             out[k] = math.floor(h * 255 + Fraction(1, 2))
         return out
-    return (np.floor(s * 4096 / 1020) * 255 + 2047) // 4096
+    # floor(s * 4096 / 1020 + 0.03), in integers (measured on an RTX 3090)
+    return ((s * 409600 + 3060) // 102000 * 255 + 2047) // 4096
 
 
 def mip_chain(t: np.ndarray, bits: int, *, amd: bool = False) -> list[np.ndarray]:
