@@ -92,7 +92,14 @@ the rest keep their constants).
   one iterate buffer running its warp Samples times, not 63 nodes and some
   30 buffers (Biomech: 341 buffers fewer). Its pixels are those of the
   unrolled nodes, each reading the stored image of the one before
-  (`scripts/check_loops.py`).
+  (`scripts/check_loops.py`). A chain the author repeated by hand (Biomech's
+  reaction-diffusion: 16 periods of a threshold, a Blur HQ and a Highpass)
+  becomes one iterate too: one period as translated, its buffers the
+  iterate's states, run a phase at a time (six a period there, three
+  states). Its knobs are those of one period, all its periods alike;
+  periods translated otherwise (the first or last, by what reads them)
+  stay unrolled. Its pixels are the unrolled translation's
+  (`scripts/check_chains.py`).
 
 ## Decompile
 

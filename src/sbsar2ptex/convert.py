@@ -394,7 +394,8 @@ def main() -> None:
         "--experimental",
         action="store_true",
         help="with --procedural: use the material-maker-mod fork's iterate"
-        " buffers for loops (Slope blur); the graph then requires the fork",
+        " buffers for loops (Slope blur, repeated chains); the graph then"
+        " requires the fork",
     )
     parser.add_argument(
         "--no-library",

@@ -86,7 +86,7 @@ def test_levels_wiring() -> None:
 
 
 @pytest.mark.parametrize("color", [False, True])
-def test_empty_levels_range_ramps(color: bool) -> None:
+def test_empty_levels_range_ramps(*, color: bool) -> None:
     # in_low == in_high ramps over 1e-4, as Substance's renders of a 16-bit
     # input near the edge show, rather than stepping; the knobs stay live.
     edge = struct.unpack("<I", struct.pack("<f", 0.5))[0]

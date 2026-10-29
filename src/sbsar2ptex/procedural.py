@@ -25,6 +25,8 @@ from sbsar2ptex.libparams import knobs
 from sbsar2ptex.libparams import solve
 from sbsar2ptex.library import recognized
 from sbsar2ptex.loops import FEATURES
+from sbsar2ptex.loops import Chains
+from sbsar2ptex.loops import chains
 from sbsar2ptex.loops import slope_blurs
 from sbsar2ptex.recognize import Match
 from sbsar2ptex.recognize import Template
@@ -169,6 +171,7 @@ def build(
     )
     lib = library_nodes(found, nodes, inputs, size)
     loops = slope_blurs(found, nodes, lib) if experimental else {}
+    folded = Chains(chains(nodes, set(wanted.values()))) if experimental else None
     mm, wires, outs = translate_graph(
         nodes,
         wanted,
@@ -180,6 +183,7 @@ def build(
         aliases=aliases,
         library=lib,
         loops=loops,
+        fold=folded,
     )
     if not flat:
         instances = [
@@ -213,7 +217,10 @@ def build(
         "connections": [*wires, *extra_wires],
     }
     if experimental:
-        used = FEATURES if any(loop.made for loop in loops.values()) else ()
+        iterated = any(loop.made for loop in loops.values()) or bool(
+            folded and folded.made
+        )
+        used = FEATURES if iterated else ()
         requires = {"material_maker_mod": MM_MOD, "features": list(used)}
         made["requires"] = requires
         made["longdesc"] += f"\nrequires: {json.dumps(requires)}"

@@ -1,7 +1,8 @@
-"""Slope blur made an iterate buffer (--experimental), on a synthetic instance.
+"""Loops made iterate buffers (--experimental), on synthetic graphs.
 
-Its pixels are checked against the unrolled translation, through the
-material-maker-mod fork, by scripts/check_loops.py; these check the
+Slope blur, and chains of alike periods. Their pixels are checked against
+the unrolled translation, through the material-maker-mod fork, by
+scripts/check_loops.py and scripts/check_chains.py; these check the
 detection, the emitted nodes and their wiring.
 """
 
@@ -14,7 +15,9 @@ from sbsar2ptex.function import FLOAT
 from sbsar2ptex.function import INT
 from sbsar2ptex.libparams import knobs
 from sbsar2ptex.loops import STEPS
+from sbsar2ptex.loops import Chains
 from sbsar2ptex.loops import SlopeBlur
+from sbsar2ptex.loops import chains
 from sbsar2ptex.loops import slope_blurs
 from sbsar2ptex.recognize import Match
 from sbsar2ptex.recognize import Template
@@ -243,3 +246,129 @@ def test_without_loops_the_translation_is_unchanged() -> None:
     plain = translate_graph(*args, size=8, library=library)
     none = translate_graph(*args, size=8, library=library, loops={})
     assert json.dumps(plain) == json.dumps(none)
+
+
+def periodic(count: int, extra: dict[int, dict[str, int]] | None = None) -> list[Node]:
+    """Return an image, then ``count`` periods of a directional blur and a blur.
+
+    Each period's blur reads its directional blur, which reads the period
+    before's blur (the first: the image). 8 bits, knobs inline. ``extra``
+    adds inputs to nodes.
+    """
+    nodes = [Node(index=0, start=0, end=4, op=32, uid=SOURCE)]
+    for k in range(count):
+        d, b = 1 + 2 * k, 2 + 2 * k
+        nodes.append(
+            Node(index=d, start=4 * d, end=4 * d + 4, op=22, fields=[1 | 1 << 2],
+                 inline=[word(5.86), word(0.0625)], inputs={"input": d - 1})
+        )  # fmt: skip
+        nodes.append(
+            Node(index=b, start=4 * b, end=4 * b + 4, op=20, flags=1 << 12,
+                 inline=[word(2.0)], inputs={"input": d})
+        )  # fmt: skip
+    for k, more in (extra or {}).items():
+        nodes[k].inputs |= more
+    return nodes
+
+
+def test_a_chain_of_alike_periods_is_found() -> None:
+    (chain,) = chains(periodic(5))
+    assert chain.periods == [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]]
+    assert chain.source == 0
+    assert chain.end == 10
+    assert chains(periodic(2)) == []  # too few
+
+
+def test_a_chain_read_inside_is_split() -> None:
+    # node 6 (a period's blur, not the chain's end) read by an outside node
+    nodes = [*periodic(9), Node(index=19, start=76, end=80, op=20, flags=1 << 12,
+                                inline=[word(2.0)], inputs={"input": 6})]  # fmt: skip
+    found = chains(nodes)
+    assert [(c.periods[0][0], c.end, c.source) for c in found] == [
+        (1, 6, 0),
+        (7, 18, 6),
+    ]
+    # a period reading something else than the one before's end is no period
+    assert chains(periodic(5, {5: {"other": 0}})) == []
+
+
+def test_a_chain_becomes_one_iterate() -> None:
+    nodes = periodic(5)
+    images = {SOURCE: "a.png"}
+    fold = Chains(chains(nodes))
+    mm, wires, outs = translate_graph(nodes, {"out": 10}, images, size=8, fold=fold)
+    # The first period reads the image through a 16-bit buffer, the others
+    # the 8-bit blur before through a 32-bit one (exact): it stays unrolled.
+    assert fold.made == {"n10_loop": range(1, 5)}
+    assert outs == {"out": ("n10_loop", 0)}
+    names = {n["name"] for n in mm}
+    assert names == {"n0", "n1_input_buf", "n1", "n2", "n3_input_buf", "n10_loop"}
+    assert {(w["from"], w["to"]) for w in wires} == {
+        ("n0", "n1_input_buf"), ("n1_input_buf", "n1"), ("n1", "n2"),
+        ("n2", "n3_input_buf"),  # the second period's buffer, the iterate's
+        ("n3_input_buf", "n10_loop"),
+    }  # fmt: skip
+    sub = next(n for n in mm if n["name"] == "n10_loop")
+    inner = {n["name"]: n for n in sub["nodes"]}
+    loop = inner["loop"]["parameters"]
+    # the blur's two 16-bit buffers one state, the 32-bit one another:
+    # three phases a period
+    assert loop == {
+        "states": 2, "size_mode": 0, "size": 8, "size_offset": 0,
+        "iterations": "3 * 4", "filter": True, "rounding": 0,
+        "format_0": 0, "format_1": 1, "rg_0": False, "rg_1": False,
+    }  # fmt: skip
+    # the period's shaders, as translated, their knobs live: the blur's
+    # passes inlined, its intensity one control
+    assert {"n9", "n10_pass_x", "n10_pass_y"} <= set(inner)
+    assert inner["n9"]["parameters"] == pytest.approx(
+        {"intensity": 5.86, "angle": 0.0625}
+    )
+    assert "5.86" not in inner["n9"]["shader_model"]["instance"]
+    controls = inner["gen_parameters"]["widgets"]
+    assert [(c["name"], c["linked_widgets"]) for c in controls] == [
+        (
+            "n10_intensity",
+            [
+                {"node": "n10_pass_x", "widget": "intensity"},
+                {"node": "n10_pass_y", "widget": "intensity"},
+            ],
+        )
+    ]
+    assert sub["parameters"] == {"n10_intensity": 2.0}
+    body = inner["state1"]["shader_model"]["instance"]
+    assert "int p = (int($iteration) - 1) % 3;" in body
+    assert "if (p == 2) return $p2(uv);" in body
+    assert "return $current(uv);" in body
+    links = {
+        (x["from"], x["from_port"], x["to"], x["to_port"]) for x in sub["connections"]
+    }
+    assert {
+        ("gen_inputs", 0, "init1", 0), ("init1", 0, "loop", 1),  # the image
+        ("init0", 0, "loop", 0),
+        ("loop", 3, "n9", 0),  # the directional blur reads it
+        ("n9", 0, "state0", 1),  # into the blur's first buffer (phase 0)
+        ("loop", 2, "n10_pass_x", 0), ("n10_pass_x", 0, "state0", 2),  # 1
+        ("loop", 2, "n10_pass_y", 0), ("n10_pass_y", 0, "state1", 1),  # 2
+        ("loop", 2, "state0", 0), ("state0", 0, "loop", 2),
+        ("loop", 3, "state1", 0), ("state1", 0, "loop", 3),
+        ("loop", 1, "gen_outputs", 0),
+    } == links  # fmt: skip
+    assert all(
+        x.get("buffer") == "never"
+        for x in sub["connections"]
+        if x["to"] != "gen_outputs"
+    )
+
+
+def test_a_chain_read_inside_stays_unrolled_there() -> None:
+    nodes = periodic(5)
+    images = {SOURCE: "a.png"}
+    # node 6's image an output too: a chain ends there (the rest too short)
+    fold = Chains(chains(nodes, {6, 10}))
+    assert [c.periods for c in fold.found] == [[[1, 2], [3, 4], [5, 6]]]
+    plain = translate_graph(nodes, {"a": 10, "b": 6}, images, size=8)
+    folded = translate_graph(nodes, {"a": 10, "b": 6}, images, size=8, fold=fold)
+    # its first period reads a 16-bit buffer, the others 32-bit: only two alike
+    assert fold.left == {6: "at most 2 of its periods are translated alike"}
+    assert json.dumps(plain) == json.dumps(folded)

@@ -641,6 +641,25 @@ class Loop(Protocol):
         ...
 
 
+class Fold(Protocol):
+    """A pass over a whole translation (sbsar2ptex.loops.Chains).
+
+    Given the Material Maker nodes and connections, each one's Substance
+    node (``origins``), each Substance node's Material Maker node
+    (``out_of``, updated in place) and the graph inputs' users (``exposed``,
+    updated in place), it returns the nodes and connections it made of them.
+    """
+
+    def __call__(  # noqa: D102
+        self,
+        mm: list[dict[str, Any]],
+        wires: list[dict[str, Any]],
+        origins: dict[str, int],
+        out_of: dict[int, str],
+        exposed: dict[str, list[str]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
+
+
 def buffer(
     name: str, size: int, *, filtering: bool = True, precise: bool = False
 ) -> dict[str, Any]:
@@ -3513,6 +3532,7 @@ def translate_graph(
     aliases: dict[str, str] | None = None,
     library: dict[int, tuple[Node, dict[int, GraphInput]]] | None = None,
     loops: dict[int, Loop] | None = None,
+    fold: Fold | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -3528,9 +3548,12 @@ def translate_graph(
     functions read: they are translated from it (node_shader), the
     library node's parameters live knobs of the instance. ``loops``
     (sbsar2ptex.loops), by their last node, are made one node each in
-    place of all theirs, which must be library ones.
+    place of all theirs, which must be library ones. ``fold`` is a last
+    pass over the finished translation (loops.Chains).
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
+    if fold is not None and origins is None:
+        origins = {}  # the fold finds a node's nodes by them
     _CTX = _Context(size=size, inputs=dict(inputs or {}), data_dir=data_dir)
     # Functions reading $outputsize see the size the graph renders at, not
     # the archive's default for it.
@@ -3662,6 +3685,8 @@ def translate_graph(
     mm, wires, moved = drop_copies(mm, wires, origins)
     out_of = {k: moved.get(v, v) for k, v in out_of.items()}
     exact_buffers(mm, wires, {merged.get(n, n) for n in rounded})
+    if fold is not None and origins is not None:
+        mm, wires = fold(mm, wires, origins, out_of, _CTX.exposed)
     if aliases is not None:
         aliases.update({k: moved.get(v, v) for k, v in merged.items()})
         aliases.update(moved)
