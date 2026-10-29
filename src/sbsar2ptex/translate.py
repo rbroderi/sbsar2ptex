@@ -187,9 +187,11 @@ IN_FLOAT, IN_FLOAT4, IN_INT, IN_INT2 = 0, 3, 4, 8
 """Graph input types (.sbsasm) the parameters below distinguish."""
 
 
-def _float_param(name: str, label: str, default: float, *, integer: bool) -> None:
-    """Declare a float parameter for the next shader node."""
-    _CTX.params[name] = {
+def _float_decl(
+    name: str, label: str, default: float, *, integer: bool
+) -> dict[str, Any]:
+    """Return a float parameter's declaration (a slider from 0 to 1, or wider)."""
+    return {
         "name": name,
         "label": label,
         "type": "float",
@@ -283,30 +285,50 @@ def _param_for(uid: int) -> str:
     if gi is None:
         msg = f"function reads unknown input {uid:#x}"
         raise UnsupportedError(msg)
+    params, glsl = input_params(gi)
+    for prm in params:
+        _CTX.params[prm["name"]] = prm
+    return glsl
+
+
+def graph_input(uid: int) -> GraphInput | None:
+    """Return the input ``uid`` of the graph (or library node) being translated."""
+    return _CTX.inputs.get(uid)
+
+
+def input_params(gi: GraphInput) -> tuple[list[dict[str, Any]], str]:
+    """Return graph input ``gi`` as Material Maker parameters, and GLSL reading it.
+
+    Floats and ints are a float parameter, float4s a color; other vectors a
+    float parameter per component (named with _x, _y...).
+    """
     integer = gi.type >= IN_INT
     name = input_param(gi)
     label = gi.label or gi.identifier
     if gi.type == IN_FLOAT4:
         r, g, b, a = (list(gi.default) + [0.0] * 4)[:4]
-        _CTX.params[name] = {
+        color = {
             "name": name,
             "label": label,
             "type": "color",
             "default": {"r": r, "g": g, "b": b, "a": a},
         }
-        return f"${name}"
+        return [color], f"${name}"
     if gi.type in (IN_FLOAT, IN_INT):
         default = float(gi.default[0]) if gi.default else 0.0
-        _float_param(name, label, default, integer=integer)
-        return f"int(${name})" if integer else f"${name}"
+        prm = _float_decl(name, label, default, integer=integer)
+        return [prm], f"int(${name})" if integer else f"${name}"
     width = _INPUT_GLSL.get(gi.type, 1)
-    parts = []
+    parts, params = [], []
     for k in range(width):
         pname = f"{name}_{'xyzw'[k]}"
         default = float(gi.default[k]) if k < len(gi.default) else 0.0
-        _float_param(pname, f"{label} {'xyzw'[k]}", default, integer=integer)
+        params.append(
+            _float_decl(pname, f"{label} {'xyzw'[k]}", default, integer=integer)
+        )
         parts.append(f"int(${pname})" if integer else f"${pname}")
-    return f"{'ivec' if gi.type >= IN_INT2 else 'vec'}{width}({', '.join(parts)})"
+    glsl = f"{'ivec' if gi.type >= IN_INT2 else 'vec'}{width}({', '.join(parts)})"
+    return params, glsl
 
 
 def _sample(kind: str, index: int, pos: str, filtering: int) -> str:
@@ -618,6 +640,48 @@ class Sub:
     wires: list[dict[str, Any]]
     ports: list[tuple[str, str, int]]
     output: str
+    rounded: bool = False
+    """Its output is stored in 8 or 16 bits already (a plugin node's format;
+    stored() makes shaders so)."""
+
+
+PLUGIN_PREFIX = "sbs_"
+"""The sbs plugin's node types start so (sbsar2ptex.plugin)."""
+PLUGIN_LINKS = "sbs_inputs"
+"""A plugin node's settings that are graph inputs, while translating: graph
+parameter -> {"decl": its declaration, "widgets": the node's knobs it sets}
+(the knobs have the plugin's names, not the parameter's)."""
+
+
+def is_plugin(node: dict[str, Any]) -> bool:
+    """Whether ``node`` is an sbs plugin node (sbsar2ptex.plugin)."""
+    return str(node.get("type", "")).startswith(PLUGIN_PREFIX)
+
+
+def widgets_of(node: dict[str, Any] | None, p: str) -> list[str]:
+    """Return the widgets of ``node`` a remote sets for its parameter ``p``.
+
+    A shader's parameter is its own widget; a plugin node's graph inputs
+    set its knobs (PLUGIN_LINKS).
+    """
+    links = (node or {}).get(PLUGIN_LINKS, {})
+    return list(links[p]["widgets"]) if p in links else [p]
+
+
+def strip_links(graph: dict[str, Any]) -> None:
+    """Drop PLUGIN_LINKS from ``graph``'s nodes, its subgraphs' too."""
+    for n in graph["nodes"]:
+        n.pop(PLUGIN_LINKS, None)
+        if n["type"] == "graph":
+            strip_links(n)
+
+
+class Plugins(Protocol):
+    """Makes a node an sbs plugin node (sbsar2ptex.plugin.Maker)."""
+
+    def __call__(  # noqa: D102
+        self, node: Node, name: str, size: int, template: Node | None
+    ) -> Sub | None: ...
 
 
 class Loop(Protocol):
@@ -711,7 +775,8 @@ def cache_shared(
         out_of.setdefault(w["from"], []).append(w)
 
     def kind(name: str) -> str:
-        return by_name.get(name, {}).get("type", "")
+        node = by_name.get(name, {})
+        return "graph" if is_plugin(node) else node.get("type", "")
 
     def filtered_buffer(name: str) -> bool:
         return kind(name) == "buffer" and by_name[name]["parameters"]["filter"]
@@ -730,7 +795,7 @@ def cache_shared(
             )
         return precise_memo[name]
 
-    for name in [n["name"] for n in mm if n["type"] in ("shader", "graph")]:
+    for name in [n["name"] for n in mm if kind(n["name"]) in ("shader", "graph")]:
         for port in sorted({w["from_port"] for w in out_of.get(name, [])}):
             ws = [w for w in out_of[name] if w["from_port"] == port]
             if len({w["to"] for w in ws}) < 2:  # noqa: PLR2004
@@ -991,14 +1056,14 @@ def box_taps(radius: float) -> list[tuple[float, float]]:
     return [(k, w / total) for k, w in taps]
 
 
-def box_glsl_live(t: str, direction: str, radius: str, size: int) -> str:
+def box_glsl_live(t: str, direction: str, radius: str, n: str) -> str:
     """Return a GLSL body: the box of box_taps, its radius (texels) a GLSL value.
 
-    ``direction`` is a GLSL vec2 in texels. The taps are counted in the
-    shader, so the radius can be a parameter or a function.
+    ``direction`` is a GLSL vec2 in texels, ``n`` the image width (a GLSL
+    float). The taps are counted in the shader, so the radius can be a
+    parameter or a function.
     """
     g = "vec4" if t == "rgba" else "float"
-    n = num(float(1 << size))
     return "\n".join(
         [
             f"{g} acc = {g}(0.0);",
@@ -1058,13 +1123,24 @@ def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
     labels = {"in_low": "Input low", "in_high": "Input high", "in_mid": "Midtones",
               "out_low": "Output low", "out_high": "Output high"}  # fmt: skip
     p = {k: knob(k, labels[k], v) for k, v in p.items()}
+    body = levels_glsl(
+        *(vec(p[k], n) for k in ("in_low", "in_high", "in_mid", "out_low", "out_high")),
+        color=color,
+    )
+    return shader(name, [("input", t)], t, body), ["input"]
+
+
+def levels_glsl(
+    in_low: str, in_high: str, in_mid: str, out_low: str, out_high: str, *, color: bool
+) -> str:
+    """Return Levels' GLSL body: its settings GLSL values, its input ``$input``."""
     g = "vec4" if color else "float"
     # every setting is clamped to [0, 1], as Substance's are
     lines = [
         f"{g} x = $input(uv);",
-        f"{g} lo = clamp({vec(p['in_low'], n)}, 0.0, 1.0);",
-        f"{g} hi = clamp({vec(p['in_high'], n)}, 0.0, 1.0);",
-        f"{g} m = clamp({vec(p['in_mid'], n)}, 0.0, 1.0);",
+        f"{g} lo = clamp({in_low}, 0.0, 1.0);",
+        f"{g} hi = clamp({in_high}, 0.0, 1.0);",
+        f"{g} m = clamp({in_mid}, 0.0, 1.0);",
         # an input range narrower than 1e-4 is 1e-4 wide: an empty one ramps
         # over the 1e-4 above in_low, which a 16-bit input lands on
         f"{g} d = hi - lo;",
@@ -1078,10 +1154,10 @@ def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
             "x = pow(x, mix(1.0 / (1.0 + 16.0 * (0.5 - m)),"
             " 1.0 + 16.0 * (m - 0.5), step(0.5, m)));"
         ),
-        f"{g} ol = clamp({vec(p['out_low'], n)}, 0.0, 1.0);",
-        f"return mix(ol, clamp({vec(p['out_high'], n)}, 0.0, 1.0), x);",
+        f"{g} ol = clamp({out_low}, 0.0, 1.0);",
+        f"return mix(ol, clamp({out_high}, 0.0, 1.0), x);",
     ]
-    return shader(name, [("input", t)], t, "\n".join(lines)), ["input"]
+    return "\n".join(lines)
 
 
 def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
@@ -1416,17 +1492,18 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     t = "rgba" if color else "f"
     p = word_params(node, [("intensity", 4, 10.0)], {})
     scale = num((1 << size) / 256)
+    width = num(float(1 << size))
     k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
     x = shader(
         f"{name}_x", [("input", t)], t,
-        box_glsl_live(t, "vec2(1.0, 0.0)", f"{num(k)} * {scale}", size),
+        box_glsl_live(t, "vec2(1.0, 0.0)", f"{num(k)} * {scale}", width),
     )  # fmt: skip
     # Read again: a function's helper goes with the shader made next.
     p = word_params(node, [("intensity", 4, 10.0)], {})
     k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
     y = shader(
         name, [("input", t)], t,
-        box_glsl_live(t, "vec2(0.0, 1.0)", f"{num(k)} * {scale}", size),
+        box_glsl_live(t, "vec2(0.0, 1.0)", f"{num(k)} * {scale}", width),
     )  # fmt: skip
     # the graph's inputs the x pass reads are read by the blur, as the y
     # pass's (named after it) are: not by the x pass's name, which goes
@@ -1448,11 +1525,7 @@ def _dmb_setup(node: Node, size: int, *, lpx: bool = False) -> str:
 
     Declares the intensity and angle knobs of the next shader (each of the
     blur's shaders has them, one control on the blur's subgraph), and
-    computes from them, in the shader: ``N`` (texels), ``ymaj`` (steps go
-    along y), the slope ``t`` (minor-axis texels per step), the radius
-    ``R`` in steps, the tap count ``n`` either side, the end taps' weight
-    ``f``, and ``X0``, the image center the frame is sheared about; with
-    ``lpx`` also ``Lpx``, the length in texels.
+    computes from them, in the shader (dmb_setup_glsl).
     """
     p = flag_params(
         node.fields[0],
@@ -1463,10 +1536,23 @@ def _dmb_setup(node: Node, size: int, *, lpx: bool = False) -> str:
     )
     k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
     turn = knob("angle", "Angle", p["angle"])
+    return dmb_setup_glsl(num(k), num(turn), num(float(1 << size)), lpx=lpx)
+
+
+def dmb_setup_glsl(k: str, turn: str, n: str, *, lpx: bool = False) -> str:
+    """Return GLSL deriving a directional motion blur's geometry.
+
+    From its intensity ``k`` and angle ``turn`` (GLSL values) and the image
+    width ``n`` (a GLSL float): ``N`` (texels), ``ymaj`` (steps go along
+    y), the slope ``t`` (minor-axis texels per step), the radius ``R`` in
+    steps, the tap count ``n`` either side, the end taps' weight ``f``, and
+    ``X0``, the image center the frame is sheared about; with ``lpx`` also
+    ``Lpx``, the length in texels.
+    """
     return "\n".join(
         [
-            f"float N = {num(float(1 << size))};",
-            f"float A = {num(turn)};",
+            f"float N = {n};",
+            f"float A = {turn};",
             "float ang = 6.28318531 * A;",
             "float cs = cos(ang);",
             "float sn = sin(ang);",
@@ -1480,11 +1566,11 @@ def _dmb_setup(node: Node, size: int, *, lpx: bool = False) -> str:
             "\tt = cs * sn > 0.0 ? 1.0 : -1.0;",
             "}",
             "if (abs(t) < 1e-6) t = 0.0;",
-            f"float R = 0.5 + ({num(k)} * N / 256.0 - 0.5) * max(abs(cs), abs(sn));",
+            f"float R = 0.5 + ({k} * N / 256.0 - 0.5) * max(abs(cs), abs(sn));",
             "int n = int(ceil(R - 0.5));",
             "float f = R + 0.5 - float(n);",
             "float X0 = 0.5 * (N - 1.0);",
-            *([f"float Lpx = {num(k)} * N / 256.0;"] if lpx else []),
+            *([f"float Lpx = {k} * N / 256.0;"] if lpx else []),
         ]
     )
 
@@ -1493,16 +1579,16 @@ _DMB_Q = "float $(name)_q(float u) {\n\treturn floor(u * 256.0 + 0.5) / 256.0;\n
 """A bilinear fraction rounded to 1/256, as the texture filter rounds it."""
 
 
-def _dmb_image_reads(g: str, size: int, *, eight: bool) -> str:
+def _dmb_image_reads(g: str, n: str, *, eight: bool) -> str:
     """Return GLSL reading the blur's input buffer by texel.
 
     ``_p(i, j, ymaj)`` is the texel at major-axis index i, minor j (its
     center: no filtering); ``_read(i, y, ymaj)`` reads at integer i and
     fractional y, linearly in y with the fraction rounded to 1/256. Indices
-    wrap. In an 8-bit graph the input holds k / 255, which the (16-bit
-    float) buffer keeps only nearly: texels are rounded back to it.
+    wrap (``n`` is the image width, a GLSL float). In an 8-bit graph the
+    input holds k / 255, which the (16-bit float) buffer keeps only nearly:
+    texels are rounded back to it.
     """
-    n = num(float(1 << size))
     texel = f"$input((mod(xy, {n}) + 0.5) / {n})"
     if eight:
         texel = f"floor({texel} * 255.0 + 0.5) / 255.0"
@@ -1557,17 +1643,17 @@ _DMB_BITS = (
 """GLSL the box's aligned blocks (_dmb_blocks) use."""
 
 
-def _dmb_blocks(size: int, use: str) -> list[str]:
+def _dmb_blocks(mask: str, use: str) -> list[str]:
     """Return GLSL adding the box's aligned blocks from ``start`` to ``end``.
 
     Greedy, as Substance's pyramid holds them: each the largest power of
-    two that fits and divides its start (modulo the period), of two at
-    least. ``use`` is GLSL adding block (``start``, level ``L``).
+    two that fits and divides its start (modulo the period: ``mask`` is the
+    image width less one, a GLSL int), of two at least. ``use`` is GLSL
+    adding block (``start``, level ``L``).
     """
-    n = 1 << size
     return [
         "for (int it = 0; it < 64 && end - start >= 2; it++) {",
-        f"\tint s = start & {n - 1};",
+        f"\tint s = start & {mask};",
         "\tint L = min($(name)_msb(end - start), $(name)_lsb(s));",
         "\tif (L < 1) break;",
         f"\t{use}",
@@ -1576,7 +1662,7 @@ def _dmb_blocks(size: int, use: str) -> list[str]:
     ]
 
 
-def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
+def _dmb_eight(g: str, n: str, mask: str) -> tuple[str, list[str]]:
     """Return an 8-bit graph's large paths: GLSL helpers and body lines.
 
     Substance stores every intermediate texture in 8 bits (_dmb_s8) and
@@ -1587,8 +1673,8 @@ def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
     aligned blocks (both ends when n = 2). Otherwise every value is the
     stored frame's (blocks a fractional column over past its seam), with no
     merging, the box stored with 1/512 added, then the read back stored.
+    ``n`` is the image width (a GLSL float), ``mask`` it less one (int).
     """
-    n = num(float(1 << size))
     helpers = (
         _dmb_s8(g)
         # A partial end tap (at b) read with its whole neighbor (a) at once.
@@ -1673,7 +1759,7 @@ def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
         *(
             "\t" + line
             for line in _dmb_blocks(
-                size, "acc += float(1 << L) * $(name)_blk(float(start), L, mn, ymaj);"
+                mask, "acc += float(1 << L) * $(name)_blk(float(start), L, mn, ymaj);"
             )
         ),
         "\tif (end - start == 1) {",
@@ -1701,7 +1787,7 @@ def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
         "\tstart += 1;",
         "}",
         *_dmb_blocks(
-            size,
+            mask,
             call.format(at="start", lv="L")
             + " accA += float(1 << L) * a; accB += float(1 << L) * b;",
         ),
@@ -1827,27 +1913,32 @@ def _dmb_sixteen_helpers(g: str) -> str:
         "\tfloat fl = floor(fr);\n"
         "\tj = floor((fr - fl) * 256.0 + 0.5);\n"
         "\treturn c + b + fl;\n"
-        "}\n"
-        # 1 / x to the nearest float32 (x > 0, normal): long division.
-        "float $(name)_rcp(float x) {\n"
-        "\tuint bits = floatBitsToUint(x);\n"
-        "\tuint e = bits >> 23u;\n"
-        "\tuint m = (bits & 8388607u) | 8388608u;\n"
-        "\tif (m == 8388608u) return uintBitsToFloat((254u - e) << 23u);\n"
-        "\tuint q = 0u;\n"
-        "\tuint r = 8388608u;\n"
-        "\tfor (int it = 0; it < 24; it++) {\n"
-        "\t\tr *= 2u;\n"
-        "\t\tq *= 2u;\n"
-        "\t\tif (r >= m) { r -= m; q += 1u; }\n"
-        "\t}\n"
-        "\tif (2u * r > m) q += 1u;\n"
-        "\treturn uintBitsToFloat(((253u - e) << 23u) + q - 8388608u);\n"
-        "}\n"
+        "}\n" + RCP_GLSL
     )
 
 
-def _dmb_sixteen(g: str, size: int) -> tuple[str, list[str]]:
+RCP_GLSL = (
+    # 1 / x to the nearest float32 (x > 0, normal): long division.
+    "float $(name)_rcp(float x) {\n"
+    "\tuint bits = floatBitsToUint(x);\n"
+    "\tuint e = bits >> 23u;\n"
+    "\tuint m = (bits & 8388607u) | 8388608u;\n"
+    "\tif (m == 8388608u) return uintBitsToFloat((254u - e) << 23u);\n"
+    "\tuint q = 0u;\n"
+    "\tuint r = 8388608u;\n"
+    "\tfor (int it = 0; it < 24; it++) {\n"
+    "\t\tr *= 2u;\n"
+    "\t\tq *= 2u;\n"
+    "\t\tif (r >= m) { r -= m; q += 1u; }\n"
+    "\t}\n"
+    "\tif (2u * r > m) q += 1u;\n"
+    "\treturn uintBitsToFloat(((253u - e) << 23u) + q - 8388608u);\n"
+    "}\n"
+)
+"""GLSL ``$(name)_rcp(x)``: 1 / x correctly rounded (a GPU's is not)."""
+
+
+def _dmb_sixteen(g: str, n: str, mask: str) -> tuple[str, list[str]]:
     """Return a 16-bit graph's paths past R = 0.5: GLSL helpers and body lines.
 
     The 8-bit graph's passes (_dmb_eight), Substance's intermediates stored
@@ -1856,8 +1947,8 @@ def _dmb_sixteen(g: str, size: int) -> tuple[str, list[str]]:
     R, 1 / 2R and every term are float32 as the engine computes them (max
     |cos|, |sin| exactly 1 only at angle 0, an ulp below at other quarter
     turns), the terms summed from the + end along x, the - end along y.
+    ``n`` is the image width (a GLSL float), ``mask`` it less one (int).
     """
-    n = num(float(1 << size))
     helpers = (
         _dmb_sixteen_helpers(g)
         # Level L at major index s0 along minor index mn: input levels.
@@ -1972,11 +2063,10 @@ def _dmb_sixteen(g: str, size: int) -> tuple[str, list[str]]:
     # The box's terms are summed from its + end along x, from its - end
     # along y: its aligned blocks found from that end (the same blocks).
     def blocks(use: str) -> list[str]:
-        mask = (1 << size) - 1
         return [
             "if (ymaj) {",
             "\tint start = sB;",
-            *("\t" + line for line in _dmb_blocks(size, use)),
+            *("\t" + line for line in _dmb_blocks(mask, use)),
             "} else {",
             "\tint e = eB;",
             "\tfor (int it = 0; it < 64 && e - sB >= 2; it++) {",
@@ -2110,20 +2200,36 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """
     t = "rgba" if color else "f"
     g = "vec4" if color else "float"
-    n = num(float(1 << size))
     fmt = node.flags >> 4 & 3
+    setup = _dmb_setup(node, size, lpx=fmt == 1)
+    helpers, body = dmb_glsl(g, fmt, num(float(1 << size)), str((1 << size) - 1), setup)
+    made = shader(name, [("input", t)], t, body)
+    made["shader_model"]["instance"] = helpers + made["shader_model"]["instance"]
+    # 16 bits: the input's levels exactly, so a 32-bit buffer.
+    precise = {"input"} if fmt == 1 else set()
+    return buffered(made, ["input"], {"input"}, size, precise=precise)
+
+
+def dmb_glsl(g: str, fmt: int, n: str, mask: str, setup: str) -> tuple[str, str]:
+    """Return a directional motion blur's GLSL: helpers and the body.
+
+    ``g`` is its value type (float or vec4), ``fmt`` the node's output
+    format (_dirmotionblur), ``n`` the image width (a GLSL float), ``mask``
+    it less one (a GLSL int), ``setup`` dmb_setup_glsl's lines. The body
+    reads the input as ``$input``.
+    """
     eight, sixteen = fmt == 0, fmt == 1
     start = [
-        _dmb_setup(node, size, lpx=sixteen),
+        setup,
         f"vec2 pq = floor(uv * {n});",
         "if (ymaj) pq = pq.yx;",
         "if (R <= 0.5) return $(name)_p(pq.x, pq.y, ymaj);",
     ]
     if sixteen:
-        helpers, large = _dmb_sixteen(g, size)
+        helpers, large = _dmb_sixteen(g, n, mask)
         lines = [*start, *large]
     elif eight:
-        helpers, large = _dmb_eight(g, size)
+        helpers, large = _dmb_eight(g, n, mask)
         lines = [
             *start,
             "if (n <= 1) {",
@@ -2205,15 +2311,7 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
             "}",
             "return mix(acc, acc1, $(name)_q(ch - c0)) / (2.0 * R);",
         ]
-    made = shader(name, [("input", t)], t, "\n".join(lines))
-    made["shader_model"]["instance"] = (
-        _dmb_image_reads(g, size, eight=eight)
-        + helpers
-        + made["shader_model"]["instance"]
-    )
-    # 16 bits: the input's levels exactly, so a 32-bit buffer.
-    precise = {"input"} if sixteen else set()
-    return buffered(made, ["input"], {"input"}, size, precise=precise)
+    return _dmb_image_reads(g, n, eight=eight) + helpers, "\n".join(lines)
 
 
 def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:
@@ -3538,6 +3636,7 @@ def translate_graph(
     library: dict[int, tuple[Node, dict[int, GraphInput]]] | None = None,
     loops: dict[int, Loop] | None = None,
     fold: Fold | None = None,
+    plugins: Plugins | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -3554,7 +3653,9 @@ def translate_graph(
     library node's parameters live knobs of the instance. ``loops``
     (sbsar2ptex.loops), by their last node, are made one node each in
     place of all theirs, which must be library ones. ``fold`` is a last
-    pass over the finished translation (loops.Chains).
+    pass over the finished translation (loops.Chains). ``plugins`` makes
+    nodes sbs plugin nodes where it can (sbsar2ptex.plugin), the others
+    translated as they are without it.
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
     if fold is not None and origins is None:
@@ -3657,17 +3758,27 @@ def translate_graph(
                 if loop is not None:
                     made = loop.make(name, nodes, own)
                 else:
-                    made = node_shader(node, name, own, template)
+                    made = plugins and plugins(node, name, own, template)
+                    made = made or node_shader(node, name, own, template)
             finally:
                 _CTX.inputs = graph_wide
         else:
-            made = node_shader(node, name, own)
+            made = plugins and plugins(node, name, own, None)
+            made = made or node_shader(node, name, own)
         if not isinstance(made, Sub):
             shader_node, names = made
             made = Sub(
                 [shader_node], [], [(n, name, i) for i, n in enumerate(names)], name
             )
-        if stored(made, node) or (loop is not None and loop.rounds(nodes)):
+        for n in made.nodes:  # a plugin node's graph inputs (shader() does it)
+            for p in n.get(PLUGIN_LINKS, {}):
+                if p.startswith(GRAPH_PARAM):
+                    _CTX.exposed.setdefault(p, []).append(n["name"])
+        if (
+            made.rounded
+            or stored(made, node)
+            or (loop is not None and loop.rounds(nodes))
+        ):
             rounded.add(made.output)
         if own != size:
             made.nodes.append(buffer(f"{name}_size", own))
@@ -3709,6 +3820,10 @@ def output_type(node: dict[str, Any]) -> str:
     if node["type"] == "graph":
         outs = next(c for c in node["nodes"] if c["name"] == "gen_outputs")
         return outs["ports"][0]["type"]
+    if is_plugin(node):
+        from sbsar2ptex.plugin import output_kind  # noqa: PLC0415 (it imports this)
+
+        return output_kind(node["type"])
     return "rgba"
 
 
@@ -3734,6 +3849,8 @@ def declared_params(mm: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """
     out: dict[str, dict[str, Any]] = {}
     for node in mm:
+        for p, link in node.get(PLUGIN_LINKS, {}).items():
+            out.setdefault(p, link["decl"])
         if node["type"] == "shader":
             for prm in node["shader_model"]["parameters"]:
                 out.setdefault(prm["name"], prm)
@@ -3822,6 +3939,7 @@ def subgraph(
 def remote(exposed: dict[str, list[str]], mm: list[dict[str, Any]]) -> dict[str, Any]:
     """Return a remote node exposing each parameter across the nodes declaring it."""
     declared = declared_params(mm)
+    by_name = {n["name"]: n for n in mm}
     widgets, values = [], {}
     for k, (pname, users) in enumerate(sorted(exposed.items())):
         prm = declared[pname]
@@ -3830,7 +3948,11 @@ def remote(exposed: dict[str, list[str]], mm: list[dict[str, Any]]) -> dict[str,
                 "name": f"param{k}",
                 "label": prm["label"],
                 "type": "linked_control",
-                "linked_widgets": [{"node": u, "widget": pname} for u in users],
+                "linked_widgets": [
+                    {"node": u, "widget": w}
+                    for u in users
+                    for w in widgets_of(by_name.get(u), pname)
+                ],
             }
         )
         values[f"param{k}"] = prm["default"]

@@ -40,21 +40,25 @@ from typing import Any
 from sbsar2ptex.function import decode
 from sbsar2ptex.libparams import evaluate32
 from sbsar2ptex.libparams import slots
+from sbsar2ptex.plugin import atoms
 from sbsar2ptex.recognize import Match
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import GRAPH_PARAM
 from sbsar2ptex.translate import INSTANCE_PARAM
+from sbsar2ptex.translate import PLUGIN_LINKS
 from sbsar2ptex.translate import STORE_STEPS
 from sbsar2ptex.translate import GraphInput
 from sbsar2ptex.translate import Sub
 from sbsar2ptex.translate import buffer
 from sbsar2ptex.translate import input_param
+from sbsar2ptex.translate import is_plugin
 from sbsar2ptex.translate import node_shader
 from sbsar2ptex.translate import num
 from sbsar2ptex.translate import output_type
 from sbsar2ptex.translate import shader
 from sbsar2ptex.translate import stored
 from sbsar2ptex.translate import subgraph
+from sbsar2ptex.translate import widgets_of
 from sbsar2ptex.translate import wire
 
 FEATURES = ("iterate_buffer_v2", "iteration_variable")
@@ -542,6 +546,12 @@ class Chains:
         return mm, wires
 
 
+def _one_pass(node: dict[str, Any]) -> bool:
+    """Whether ``node`` is a plugin node of one shader (no buffer of its own)."""
+    atom = atoms().get(node["type"]) if is_plugin(node) else None
+    return atom is not None and atom.definition["type"] == "shader"
+
+
 def _has_buffer(graph: dict[str, Any]) -> bool:
     return any(
         n["type"] == "buffer" or (n["type"] == "graph" and _has_buffer(n))
@@ -787,7 +797,8 @@ def _fold(
         moved = _inline(g, nodes, tw, controls)
         if image[0] == g["name"]:
             image = moved[image[1]]
-    kinds = {n["type"] for n in nodes.values()}
+    # (plugin nodes of one pass, sbsar2ptex.plugin, are shaders too)
+    kinds = {n["type"] for n in nodes.values() if not _one_pass(n)}
     if kinds - {"shader", "buffer", "graph"}:
         msg = f"its period has {sorted(kinds - {'shader', 'buffer', 'graph'})}"
         raise UnfoldableError(msg)
@@ -960,26 +971,28 @@ def _fold(
     }  # fmt: skip
     users: dict[str, list[str]] = {}
     values: dict[str, Any] = {}
+    labels: dict[str, str] = {}
     for node in inner:
-        if node["type"] == "shader":
-            names = [p["name"] for p in node["shader_model"]["parameters"]]
+        if PLUGIN_LINKS in node:  # a plugin node's graph inputs set its knobs
+            decls = [link["decl"] for link in node[PLUGIN_LINKS].values()]
+        elif node["type"] == "shader":
+            decls = node["shader_model"]["parameters"]
         elif node["type"] == "graph":
-            names = list(node["parameters"])
+            decls = [{"name": p, "default": v} for p, v in node["parameters"].items()]
         else:
             continue
-        for p in names:
+        for prm in decls:
+            p = prm["name"]
+            if node["type"] != "graph":
+                labels[p] = prm.get("label", p)
             if p.startswith((GRAPH_PARAM, INSTANCE_PARAM)):
                 users.setdefault(p, []).append(node["name"])
-                values.setdefault(p, node["parameters"][p])
-    labels = {
-        p["name"]: p.get("label", p["name"])
-        for node in inner
-        if node["type"] == "shader"
-        for p in node["shader_model"]["parameters"]
-    }
+                values.setdefault(p, node["parameters"].get(p, prm["default"]))
+    by_name = {n["name"]: n for n in inner}
     widgets = [
         {"name": p, "label": labels.get(p, p), "type": "linked_control",
-         "linked_widgets": [{"node": u, "widget": p} for u in us]}
+         "linked_widgets": [{"node": u, "widget": w}
+                            for u in us for w in widgets_of(by_name[u], p)]}
         for p, us in sorted(users.items())
     ] + [
         {"name": c, "label": d["label"], "type": "linked_control",

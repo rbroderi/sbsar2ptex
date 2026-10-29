@@ -102,6 +102,35 @@ the rest keep their constants).
   (`scripts/check_chains.py`). Biomech, both kinds of loop: 1,205 buffers
   and 3,449 nodes, not 2,519 and 5,980.
 
+  With `--experimental` the graph is also made of the **sbs plugin**'s
+  nodes: one Material Maker node per Substance atomic node (`sbs_levels`,
+  `sbs_blend_gray`, `sbs_dirmotionblur`...), its knobs Substance's own
+  (`levelinlow`, `blendingmode`, `intensity`, the output `format`...), so
+  the graph reads like the Substance one. The graph requires the plugin
+  (`"plugins": {"sbs": ">=1.0"}`); install it with
+
+  ```bash
+  sbsar2ptex --install-mm-plugin DIR
+  ```
+
+  DIR being the plugin's folder: Material Maker's user folder's
+  `plugins/sbs` (`%APPDATA%/material_maker_2/plugins/sbs` on Windows).
+  A node whose setting a Substance function computes stays translated
+  inline (a setting that is just a graph input is the plugin node's knob,
+  set by the "parameters" node), as do gradient maps and curves (no
+  Material Maker parameter holds their keys and Bezier points as
+  Substance does), pixel processors and FX-Maps; in a loop's iterate,
+  only nodes of one pass are plugin nodes (a blur has buffers of its own).
+  A plugin node's GLSL is the inline translation's, its image width
+  `$pass_size` rather than a number, and its pixels are the inline
+  translation's, bit for bit, in every case of `scripts/check_filters.py`
+  that makes one (`scripts/check_plugin.py`, through the fork) and in
+  each of Biomech's maps. Biomech: 3,987 of its nodes are plugin nodes;
+  1,614 stay inline (964 directional blurs, 215 blends, 179
+  transformations, 10 levels and an HSL driven by functions, 111 blurs in
+  its reaction-diffusion iterates, and its 134 FX-Maps, pixel processors,
+  gradient maps and curves).
+
 ## Decompile
 
 ```bash

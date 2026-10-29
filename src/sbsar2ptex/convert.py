@@ -345,7 +345,15 @@ def ptex(graph: Graph, maps: dict[str, Path], size: int, normal: str) -> dict[st
 def main() -> None:
     """Convert the archive the command line names."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("sbsar", type=Path)
+    parser.add_argument("sbsar", type=Path, nargs="?")
+    parser.add_argument(
+        "--install-mm-plugin",
+        type=Path,
+        metavar="DIR",
+        help="write the sbs Material Maker plugin (the nodes --experimental"
+        " graphs use) in DIR, its folder: Material Maker's user folder's"
+        " plugins/sbs",
+    )
     parser.add_argument(
         "-o", "--out", type=Path, help="output folder (default: beside it)"
     )
@@ -394,8 +402,8 @@ def main() -> None:
         "--experimental",
         action="store_true",
         help="with --procedural: use the material-maker-mod fork's iterate"
-        " buffers for loops (Slope blur, repeated chains); the graph then"
-        " requires the fork",
+        " buffers for loops (Slope blur, repeated chains) and the sbs plugin's"
+        " nodes (--install-mm-plugin); the graph then requires them",
     )
     parser.add_argument(
         "--no-library",
@@ -412,6 +420,16 @@ def main() -> None:
         help="re-read the cooked library (after a Designer update)",
     )
     args = parser.parse_args()
+    if args.install_mm_plugin is not None:
+        from sbsar2ptex import plugin  # noqa: PLC0415 (it imports convert's peers)
+
+        written = plugin.install(args.install_mm_plugin)
+        print(f"wrote the sbs plugin {plugin.VERSION} ({len(written) - 1} nodes)")
+        print("in", args.install_mm_plugin.resolve())
+        if args.sbsar is None:
+            return
+    if args.sbsar is None:
+        parser.error("the following arguments are required: sbsar")
 
     files = read_archive(args.sbsar)
     xml = next((d for n, d in files.items() if n.endswith(".xml")), None)
@@ -513,6 +531,7 @@ def procedural_main(
         )
         if not templates:
             print("no Substance library to name nodes by (no Designer found)")
+    stats: dict[str, Any] = {}
     try:
         made = procedural.build(
             files,
@@ -523,9 +542,15 @@ def procedural_main(
             flat=args.flat,
             matches=(args.library or library.cache_dir()) / "matches",
             experimental=args.experimental,
+            stats=stats,
         )
     except ValueError as e:  # bytecode this decoder cannot read
         sys.exit(f"{args.sbsar}: {e}")
+    if "plugin nodes" in stats:
+        made_count = sum(stats["plugin nodes"].values())
+        print(f"sbs plugin nodes: {made_count}; translated inline:")
+        for why, count in sorted(stats["inline"].items(), key=lambda kv: -kv[1]):
+            print(f"  {count:6}  {why}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(made, indent=1), encoding="utf-8")
     print("wrote", target)

@@ -33,7 +33,10 @@ from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import GRAPH_PARAM
 from sbsar2ptex.translate import INSTANCE_PARAM
+from sbsar2ptex.translate import PLUGIN_LINKS
 from sbsar2ptex.translate import declared_params
+from sbsar2ptex.translate import output_type
+from sbsar2ptex.translate import widgets_of
 
 PART = (300, 1200)
 """Smallest and largest part, in Substance nodes."""
@@ -372,14 +375,7 @@ def nest(
 
     def out_type(node: str) -> str:
         n = by_name.get(node)
-        if n is None:
-            return "rgba"
-        if n["type"] == "shader":
-            return n["shader_model"]["outputs"][0]["type"]
-        if n["type"] == "graph":
-            outs = next(c for c in n["nodes"] if c["name"] == "gen_outputs")
-            return outs["ports"][0]["type"]
-        return "rgba"
+        return "rgba" if n is None else output_type(n)
 
     def wires_of(g: Group | None) -> list[dict[str, Any]]:
         return g.wires if g is not None else top_wires
@@ -438,6 +434,8 @@ def nest(
         parameters (INSTANCE_PARAM): its knobs, shown on it alone.
         """
         shared = (GRAPH_PARAM, INSTANCE_PARAM) if whole else (GRAPH_PARAM,)
+        if PLUGIN_LINKS in n:
+            return [p for p in n[PLUGIN_LINKS] if p.startswith(shared)]
         if n["type"] == "shader":
             return [
                 p["name"]
@@ -459,7 +457,7 @@ def nest(
         ios = [
             _ios("gen_inputs", g.input_types),
             _ios("gen_outputs", g.output_types),
-            _remote("gen_parameters", exposed, declared),
+            _remote("gen_parameters", exposed, declared, inner),
         ]
         layout([*inner, *ios[:2]], g.wires)
         return {
@@ -481,7 +479,7 @@ def nest(
             exposed.setdefault(p, []).append(n["name"])
     layout(top_nodes, top_wires)
     if exposed:
-        top_nodes.append(_remote("parameters", exposed, declared))
+        top_nodes.append(_remote("parameters", exposed, declared, top_nodes))
     return top_nodes, top_wires, new_outs
 
 
@@ -496,15 +494,27 @@ def _ios(name: str, types: list[str]) -> dict[str, Any]:
 
 
 def _remote(
-    name: str, exposed: dict[str, list[str]], declared: dict[str, dict[str, Any]]
+    name: str,
+    exposed: dict[str, list[str]],
+    declared: dict[str, dict[str, Any]],
+    nodes: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Return a remote node exposing each parameter (by name) across its users."""
+    """Return a remote node exposing each parameter (by name) across its users.
+
+    ``nodes`` are the users' level (a plugin node's knobs have names of
+    their own: translate.widgets_of).
+    """
+    by_name = {n["name"]: n for n in nodes}
     widgets = [
         {
             "name": p,
             "label": declared[p]["label"],
             "type": "linked_control",
-            "linked_widgets": [{"node": u, "widget": p} for u in users],
+            "linked_widgets": [
+                {"node": u, "widget": w}
+                for u in users
+                for w in widgets_of(by_name.get(u), p)
+            ],
         }
         for p, users in sorted(exposed.items())
     ]

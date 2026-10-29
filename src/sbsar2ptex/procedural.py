@@ -28,6 +28,9 @@ from sbsar2ptex.loops import FEATURES
 from sbsar2ptex.loops import Chains
 from sbsar2ptex.loops import chains
 from sbsar2ptex.loops import slope_blurs
+from sbsar2ptex.plugin import PLUGIN_ID
+from sbsar2ptex.plugin import VERSION
+from sbsar2ptex.plugin import Maker
 from sbsar2ptex.recognize import Match
 from sbsar2ptex.recognize import Template
 from sbsar2ptex.recognize import resembler
@@ -38,6 +41,7 @@ from sbsar2ptex.structure import nest
 from sbsar2ptex.translate import GraphInput
 from sbsar2ptex.translate import graph_inputs
 from sbsar2ptex.translate import no_auto_buffers
+from sbsar2ptex.translate import strip_links
 from sbsar2ptex.translate import translate_graph
 
 LENGTH_SIZE = 4
@@ -142,6 +146,7 @@ def build(
     aliases: dict[str, str] | None = None,
     matches: Path | None = None,
     experimental: bool = False,
+    stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the Material Maker graph translating ``graph``.
 
@@ -150,8 +155,10 @@ def build(
     groups are named by content); ``flat``: no subgraphs; ``aliases`` is
     filled as translate_graph fills it; ``matches`` a folder keeping the
     library nodes found (library.recognized). ``experimental`` uses the
-    material-maker-mod fork's features (sbsar2ptex.loops), and says so: a
-    "requires" key and long description line, as the fork reads them.
+    material-maker-mod fork's features (sbsar2ptex.loops) and the sbs
+    plugin's nodes (sbsar2ptex.plugin), and says so: a "requires" key and
+    long description line, as the fork reads them. ``stats`` is filled with
+    the plugin nodes made, by type, and the nodes left inline, by reason.
     """
     xml = member(files, ".xml").decode("utf-8")
     asm = Asm(member(files, ".sbsasm"))
@@ -172,7 +179,11 @@ def build(
     )
     lib = library_nodes(found, nodes, inputs, size)
     loops = slope_blurs(found, nodes, lib) if experimental else {}
-    folded = Chains(chains(nodes, set(wanted.values()))) if experimental else None
+    repeated = chains(nodes, set(wanted.values())) if experimental else []
+    folded = Chains(repeated) if experimental else None
+    # Plugin nodes, of one pass in the chains (an iterate's body: no buffers)
+    in_chains = {k for c in repeated for period in c.periods for k in period}
+    maker = Maker(size, in_chains) if experimental else None
     mm, wires, outs = translate_graph(
         nodes,
         wanted,
@@ -185,7 +196,11 @@ def build(
         library=lib,
         loops=loops,
         fold=folded,
+        plugins=maker,
     )
+    if maker is not None and stats is not None:
+        stats["plugin nodes"] = dict(sorted(maker.made.items()))
+        stats["inline"] = dict(sorted(maker.inline.items()))
     if not flat:
         instances = [
             (list(m.members.values()), m.template.label or m.template.graph)
@@ -222,8 +237,14 @@ def build(
             folded and folded.made
         )
         used = FEATURES if iterated else ()
-        requires = {"material_maker_mod": MM_MOD, "features": list(used)}
+        requires: dict[str, Any] = {
+            "material_maker_mod": MM_MOD,
+            "features": list(used),
+        }
+        if maker is not None and maker.made:
+            requires["plugins"] = {PLUGIN_ID: f">={VERSION}"}
         made["requires"] = requires
         made["longdesc"] += f"\nrequires: {json.dumps(requires)}"
     no_auto_buffers(made)
+    strip_links(made)
     return made

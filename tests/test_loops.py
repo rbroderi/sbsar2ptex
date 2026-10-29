@@ -19,6 +19,7 @@ from sbsar2ptex.loops import Chains
 from sbsar2ptex.loops import SlopeBlur
 from sbsar2ptex.loops import chains
 from sbsar2ptex.loops import slope_blurs
+from sbsar2ptex.plugin import Maker
 from sbsar2ptex.recognize import Match
 from sbsar2ptex.recognize import Template
 from sbsar2ptex.sbsasm import BASE
@@ -372,3 +373,25 @@ def test_a_chain_read_inside_stays_unrolled_there() -> None:
     # its first period reads a 16-bit buffer, the others 32-bit: only two alike
     assert fold.left == {6: "at most 2 of its periods are translated alike"}
     assert json.dumps(plain) == json.dumps(folded)
+
+
+def test_a_chain_folds_its_plugin_nodes() -> None:
+    # Plugin nodes of one pass are the iterate's body as shaders are; nodes
+    # with buffers of their own (a blur) stay translated inline there.
+    nodes = periodic(5)
+    found = chains(nodes)
+    fold = Chains(found)
+    maker = Maker(8, {k for c in found for period in c.periods for k in period})
+    mm, _, outs = translate_graph(
+        nodes, {"out": 10}, {SOURCE: "a.png"}, size=8, fold=fold, plugins=maker
+    )
+    assert fold.made == {"n10_loop": range(1, 5)}
+    assert outs == {"out": ("n10_loop", 0)}
+    assert maker.made == {"sbs_dirmotionblur_gray": 5}
+    assert maker.inline == {"blur: in a loop (its buffers)": 5}
+    sub = next(n for n in mm if n["name"] == "n10_loop")
+    inner = {n["name"]: n for n in sub["nodes"]}
+    assert inner["n9"]["type"] == "sbs_dirmotionblur_gray"
+    assert inner["n9"]["parameters"]["intensity"] == pytest.approx(5.86)
+    assert inner["n9"]["parameters"]["mblurangle"] == pytest.approx(0.0625)
+    assert {"n10_pass_x", "n10_pass_y"} <= set(inner)
