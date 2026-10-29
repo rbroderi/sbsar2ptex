@@ -1,8 +1,16 @@
-"""Function bytecode: decoding, and choosing a node's blocks."""
+"""Function bytecode: decoding, evaluating, and choosing a node's blocks."""
+
+import struct
+
+import numpy as np
 
 from sbsar2ptex.function import BOOL
+from sbsar2ptex.function import FLOAT
 from sbsar2ptex.function import INT
+from sbsar2ptex.function import Block
+from sbsar2ptex.function import Instr
 from sbsar2ptex.function import decode
+from sbsar2ptex.function import evaluate
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import _seed_block
 
@@ -42,3 +50,20 @@ def test_the_seed_is_the_block_of_one_integer() -> None:
         node = Node(index=0, start=0, end=4 * len(words), words=words,
                     code=[0, 4 * len(blocks[0])])  # fmt: skip
         assert _seed_block(node) == (0 if blocks[0] is seed else 4 * len(blocks[0]))
+
+
+def const(value: float) -> Instr:
+    """Return a float constant instruction."""
+    (word,) = struct.unpack("<I", struct.pack("<f", value))
+    return Instr(op=0x00, type=FLOAT, width=1, operands=[word & 0xFFFF, word >> 16])
+
+
+def test_mod_is_float32_each_step_rounded() -> None:
+    # A Tile Sampler's hash, 1234 / 4325 * 3.435974e10 mod 1e6: Substance's
+    # float32 a - b * floor(a / b), each step rounded (numpy's float32),
+    # lands 192 from the exact (and float64) remainder, 449344.
+    a = np.float32(1234.0) / np.float32(4325.0) * np.float32(3.435974e10)
+    b = np.float32(1e6)
+    mod = Instr(op=0x16, type=FLOAT, width=1, operands=[0, 1])
+    got = evaluate(Block([const(float(a)), const(float(b)), mod]), {})
+    assert got == [float(a - b * np.floor(a / b))] == [449536.0]

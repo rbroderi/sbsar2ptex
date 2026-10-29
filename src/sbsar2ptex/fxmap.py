@@ -120,6 +120,20 @@ QUAD_PARAMS = (
 INLINE, CODE, INPUT = 1, 2, 3
 """Parameter states: a value inline, a function's code block, an input."""
 
+IMAGE_STRIDE = 64
+"""Image pattern ids: -1 - (input index + IMAGE_STRIDE * filtering)."""
+NEAREST = 2
+"""A Quadrant's image filtering: 0 bilinear and mipmaps, 1 bilinear, 2 nearest."""
+
+
+def image_id(index: int, flags: int) -> int:
+    """Return the pattern id drawing image input ``index`` (Quadrant.image_flags).
+
+    Bilinear filtering blends with zero past the image's edges; nearest
+    clamps to them (fitted to sbsrender).
+    """
+    return -1 - index - IMAGE_STRIDE * (flags >> 2 & 3)
+
 
 @dataclass
 class Param:
@@ -139,6 +153,8 @@ class Quadrant:
     """The pattern input drawn, when an image."""
     image_index: "Param | None" = None
     """The image's index, when a function."""
+    image_flags: int = 0
+    """The image's flags word (filtering << 2, 0x10 premultiplied...)."""
     blend_max: bool = False
     seed: int | None = None
     params: dict[str, Param] = field(default_factory=dict)
@@ -279,7 +295,7 @@ def read_tree(node: Node, *, color: bool = False) -> Tree | None:
             states = {name: w >> bit & 3 for name, bit, _ in QUAD_PARAMS}
             image_flags = 0
             if w >> 31:
-                image_flags = word(nxt)
+                image_flags = quad.image_flags = word(nxt)
                 nxt += 4
             if w & 0x10 or any(states.values()) or image_flags & 2:
                 at = word(nxt)

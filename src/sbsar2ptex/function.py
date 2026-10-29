@@ -139,16 +139,60 @@ def constant(instr: Instr) -> list[float] | list[int] | list[bool]:
 
 
 # Python evaluation (for checking and constant folding). Values are lists
-# of components (one for scalars).
+# of components (one for scalars). Every step is rounded to its type, as
+# Substance evaluates functions: floats to float32, ints wrapping at 32
+# bits. A Tile Sampler's hash of large products (1234 / (n + 4321) *
+# 3.435974e10, mod 1e6...) lands elsewhere in float64. A double operation
+# rounded once is the float32 one for + - * / and sqrt; mod rounds each of
+# its steps.
+
+
+def f32(x: float) -> float:
+    """Return ``x`` rounded to float32 (infinite past its range)."""
+    try:
+        return struct.unpack("<f", struct.pack("<f", x))[0]
+    except OverflowError:
+        return math.copysign(math.inf, x)
+
+
+def _wrap(x: float) -> int:
+    x = int(x) & 0xFFFFFFFF
+    return x - (1 << 32) if x >> 31 else x
+
+
+def _div(a: float, b: float, kind: int) -> float:
+    if kind == INT:
+        return int(a / b) if b else 0
+    if b:
+        return a / b
+    return math.copysign(math.inf, a) if a else math.nan
+
+
+def _mod(a: float, b: float, kind: int) -> float:
+    """Return a - b * floor(a / b), each step rounded to float32 for floats."""
+    if not b:
+        return 0.0
+    if kind != FLOAT:
+        return a - b * math.floor(a / b)
+    return f32(a - f32(b * math.floor(f32(a / b))))
+
+
+def _guard(fn: Callable[[float], float]) -> Callable[[float], float]:
+    def safe(a: float) -> float:
+        try:
+            return fn(a)
+        except (ValueError, OverflowError):
+            return math.nan
+
+    return safe
+
 
 _BINARY: dict[int, Callable[[float, float], Any]] = {
     0x12: lambda a, b: a + b,
     0x13: lambda a, b: a - b,
     0x14: lambda a, b: a * b,
-    0x15: lambda a, b: a / b if b else math.inf,
-    0x16: lambda a, b: a - b * math.floor(a / b) if b else 0.0,
-    0x1A: lambda a, b: a and b,
-    0x1B: lambda a, b: a or b,
+    0x1A: lambda a, b: bool(a) and bool(b),
+    0x1B: lambda a, b: bool(a) or bool(b),
     0x1D: lambda a, b: a == b,
     0x1E: lambda a, b: a != b,
     0x1F: lambda a, b: a > b,
@@ -163,31 +207,38 @@ _UNARY: dict[int, Callable[[float], Any]] = {
     0x17: lambda a: -a,
     0x1C: lambda a: not a,
     0x23: abs,
-    0x24: math.floor,
-    0x25: math.ceil,
-    0x26: math.cos,
-    0x27: math.sin,
+    0x24: _guard(math.floor),
+    0x25: _guard(math.ceil),
+    0x26: _guard(math.cos),
+    0x27: _guard(math.sin),
     0x28: lambda a: math.sqrt(a) if a >= 0 else math.nan,
     0x29: lambda a: math.log(a) if a > 0 else -math.inf,
-    0x2A: math.exp,
-    0x2B: lambda a: 2.0**a,
-    0x2C: math.tan,
+    0x2A: _guard(math.exp),
+    0x2B: _guard(lambda a: 2.0**a),
+    0x2C: _guard(math.tan),
     0x35: lambda a: math.log2(a) if a > 0 else -math.inf,
 }
 
 
-def _bcast(a: list, b: list) -> tuple[list, list]:
+def _spread(a: list, b: list) -> tuple[list, list]:
+    """Return two operands of one width: a scalar repeated to the other's."""
     if len(a) == len(b):
         return a, b
-    if len(a) == 1:
-        return a * len(b), b
-    return a, b * len(a)
+    return (a * len(b), b) if len(a) == 1 else (a, b * len(a))
+
+
+def _as(kind: int, values: list) -> list:
+    if kind == FLOAT:
+        return [f32(float(x)) for x in values]
+    if kind == INT:
+        return [_wrap(x) if math.isfinite(x) else 0 for x in values]
+    return [bool(x) for x in values]
 
 
 def evaluate(
     block: Block,
-    inputs: dict[int, list[float]],
-    builtins: dict[int, list[float]],
+    inputs: dict[int, list],
+    builtins: dict[int, list[float]] | None = None,
     rand: Callable[[float], float] | None = None,
     variables: dict[int, list] | None = None,
 ) -> list:
@@ -196,57 +247,66 @@ def evaluate(
     ``rand(a)``, when given, is the generator rand instructions call, in
     instruction order. ``variables``, when given, is the variable store,
     read and written in place: blocks that share one (an FX-Map's) see each
-    other's variables.
+    other's variables. Samples, and what ``builtins`` and ``rand`` leave
+    out, raise FunctionError.
     """
     vals: list[list] = []
     var: dict[int, list] = {} if variables is None else variables
     for ins in block.instrs:
-        ops = ins.operands
-        if ins.op == 0x00:
+        ops, op = ins.operands, ins.op
+        if op == 0x00:
             v = constant(ins)
-        elif ins.op == 0x01:
+        elif op == 0x01 and builtins is not None:
             v = builtins[ops[0]]
-        elif ins.op == 0x02:  # noqa: PLR2004
+        elif op == 0x02:  # noqa: PLR2004
             v = inputs[ins.u32s()[0]]
-        elif ins.op == 0x04:  # noqa: PLR2004
+        elif op == 0x04:  # noqa: PLR2004
             v = var.get(ops[0], [0.0] * ins.width)
-        elif ins.op == 0x07:  # noqa: PLR2004
-            var[ops[1]] = vals[ops[0]]
-            v = vals[ops[0]]
-        elif ins.op == 0x09:  # noqa: PLR2004
+        elif op == 0x07:  # noqa: PLR2004
+            var[ops[1]] = v = vals[ops[0]]
+        elif op == 0x09:  # noqa: PLR2004
             v = vals[ops[1]] if vals[ops[0]][0] else vals[ops[2]]
-        elif ins.op == 0x0C:  # noqa: PLR2004
+        elif op == 0x0C:  # noqa: PLR2004
             v = [0.0] * ins.width if ops[1] == NO_VALUE else vals[ops[1]]
-        elif ins.op in (0x0D, 0x0E, 0x0F):
+        elif op in (0x0D, 0x0E, 0x0F):
             v = [x for o in ops for x in vals[o]]
-        elif ins.op == 0x10:  # noqa: PLR2004
+        elif op == 0x10:  # noqa: PLR2004
             src, sel = vals[ops[0]], ops[1]
             v = [src[sel >> (2 * k) & 3] for k in range(ins.width)]
-        elif ins.op == 0x11:  # noqa: PLR2004
-            conv = float if ins.type == FLOAT else int
-            v = [conv(x) for x in vals[ops[0]]]
-        elif ins.op == 0x18:  # noqa: PLR2004
-            v = [sum(x * y for x, y in zip(vals[ops[0]], vals[ops[1]], strict=True))]
-        elif ins.op == 0x2D:  # noqa: PLR2004
+        elif op == 0x11:  # noqa: PLR2004 (converted below, by its type)
+            v = vals[ops[0]]
+        elif op == 0x18:  # noqa: PLR2004
+            acc = 0.0
+            for x, y in zip(vals[ops[0]], vals[ops[1]], strict=True):
+                acc = f32(acc + f32(x * y))
+            v = [acc]
+        elif op == 0x2D:  # noqa: PLR2004
             x, y = vals[ops[0]][:2]
             v = [math.atan2(y, x)]
-        elif ins.op == 0x2E:  # noqa: PLR2004
+        elif op == 0x2E:  # noqa: PLR2004
             rho, theta = vals[ops[0]][0], vals[ops[1]][0]
-            v = [rho * math.cos(theta), rho * math.sin(theta)]
-        elif ins.op == 0x2F:  # noqa: PLR2004
-            a, b = _bcast(vals[ops[0]], vals[ops[1]])
-            x = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
-            v = [p + (q - p) * t for p, q, t in zip(a, b, x, strict=True)]
-        elif ins.op == 0x32 and rand is not None:  # noqa: PLR2004
+            v = [f32(rho * f32(math.cos(theta))), f32(rho * f32(math.sin(theta)))]
+        elif op == 0x2F:  # noqa: PLR2004
+            a, b = _spread(vals[ops[0]], vals[ops[1]])
+            t = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
+            v = [f32(p + f32(f32(q - p) * s)) for p, q, s in zip(a, b, t, strict=True)]
+        elif op == 0x32 and rand is not None:  # noqa: PLR2004
             v = [rand(vals[ops[0]][0])]
-        elif ins.op in _BINARY:
-            a, b = _bcast(vals[ops[0]], vals[ops[1]])
-            v = [_BINARY[ins.op](p, q) for p, q in zip(a, b, strict=True)]
-        elif ins.op in _UNARY:
-            v = [_UNARY[ins.op](p) for p in vals[ops[0]]]
+        elif op in _BINARY or op in (0x15, 0x16):
+            a, b = _spread(vals[ops[0]], vals[ops[1]])
+            if op == 0x15:  # noqa: PLR2004
+                v = [_div(p, q, ins.type) for p, q in zip(a, b, strict=True)]
+            elif op == 0x16:  # noqa: PLR2004
+                v = [_mod(p, q, ins.type) for p, q in zip(a, b, strict=True)]
+            else:
+                v = [_BINARY[op](p, q) for p, q in zip(a, b, strict=True)]
+        elif op in _UNARY:
+            v = [_UNARY[op](p) for p in vals[ops[0]]]
         else:
             msg = f"cannot evaluate {ins.name}"
             raise FunctionError(msg)
+        if op not in (0x07, 0x09, 0x0C) and ins.type in (FLOAT, INT, BOOL):
+            v = _as(ins.type, v)
         vals.append(v)
     return vals[-1]
 
@@ -324,7 +384,7 @@ def bounds(
         elif ins.op == 0x07:  # noqa: PLR2004
             var[ops[1]] = v = arg(0)
         elif ins.op == 0x09:  # noqa: PLR2004
-            a, b = _bcast(arg(1), arg(2))
+            a, b = _spread(arg(1), arg(2))
             v = [(min(p[0], q[0]), max(p[1], q[1])) for p, q in zip(a, b, strict=True)]
         elif ins.op == 0x0C:  # noqa: PLR2004
             v = [(0.0, 0.0)] * ins.width if ops[1] == NO_VALUE else arg(1)
@@ -338,7 +398,7 @@ def bounds(
             if ins.type != FLOAT:  # truncation toward zero: widen by one
                 v = [(lo - 1, hi + 1) for lo, hi in v]
         elif ins.op in (0x12, 0x13, 0x14, 0x30, 0x31):
-            a, b = _bcast(arg(0), arg(1))
+            a, b = _spread(arg(0), arg(1))
             v = []
             for p, q in zip(a, b, strict=True):
                 if ins.op == 0x12:  # noqa: PLR2004
@@ -352,13 +412,13 @@ def bounds(
                 else:
                     v.append((max(p[0], q[0]), max(p[1], q[1])))
         elif ins.op == 0x15:  # noqa: PLR2004
-            a, b = _bcast(arg(0), arg(1))
+            a, b = _spread(arg(0), arg(1))
             v = [
                 _imul(p, (1 / q[1], 1 / q[0])) if q[0] > 0 or q[1] < 0 else _ALL
                 for p, q in zip(a, b, strict=True)
             ]
         elif ins.op == 0x16:  # noqa: PLR2004
-            a, b = _bcast(arg(0), arg(1))
+            a, b = _spread(arg(0), arg(1))
             v = [
                 (min(0.0, q[0]), max(0.0, q[1])) if q[0] > 0 or q[1] < 0 else _ALL
                 for _, q in zip(a, b, strict=True)
@@ -374,7 +434,7 @@ def bounds(
             r = max(abs(arg(0)[0][0]), abs(arg(0)[0][1]))
             v = [(-r, r), (-r, r)]
         elif ins.op == 0x2F:  # noqa: PLR2004
-            a, b = _bcast(arg(0), arg(1))
+            a, b = _spread(arg(0), arg(1))
             t = arg(2) * (len(a) if len(arg(2)) == 1 else 1)
             v = []
             for p, q, x in zip(a, b, t, strict=True):

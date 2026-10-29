@@ -2596,7 +2596,8 @@ FX_DRAW_GLSL = (
 \t\t\tif (id >= 0) {
 \t\t\t\tp = vec4(fxpat_$(name)(id, q, s));
 \t\t\t} else if (abs(q.x) <= 1.0 && abs(q.y) <= 1.0) {
-\t\t\t\tp = fximg_$(name)(-1 - id, (q + 1.0) * 0.5);
+\t\t\t\tint k = -1 - id;
+\t\t\t\tp = fximg_$(name)(k % $(stride), k / $(stride), (q + 1.0) * 0.5);
 \t\t\t}
 \t\t\tv = mx ? max(v, p) : v + p;
 \t\t}
@@ -2605,7 +2606,7 @@ FX_DRAW_GLSL = (
 }
 """
 )
-"""A pattern (id >= 0) or image (-1 - index) drawn at c, wrapping."""
+"""A pattern (id >= 0) or image (fxmap.image_id) drawn at c, wrapping."""
 
 FX_NEAR_GLSL = """bool fxnear_$(name)(vec2 uv, vec2 p, float r) {
 \tvec2 d = uv - p;
@@ -3060,7 +3061,7 @@ def _fxmap_drawn(
             p = tree.params
             draw_id = tree.pattern if tree.pattern is not None else None
             if tree.image is not None and tree.image < len(images):
-                draw_id = -1 - tree.image
+                draw_id = fxmap.image_id(tree.image, tree.image_flags)
             # Its parameters in Substance's order (opacity, branch and frame
             # offsets, size, rotation, supplement, image index): their
             # functions may set variables the next ones read.
@@ -3078,7 +3079,8 @@ def _fxmap_drawn(
                     lines.append(f"{local} = {value};")
             if tree.image_index is not None:
                 index = _fx_function(node, tree.image_index.code, "imageindex")
-                lines.append(f"int image = -1 - int({index});")
+                strided = fxmap.image_id(0, tree.image_flags) + 1
+                lines.append(f"int image = {strided - 1} - int({index});")
                 draw_id = "image"
             lines.append("vec2 p = pos + bo;")
             if draw_id is not None and recording:
@@ -3218,16 +3220,38 @@ def _fxmap_drawn(
     def draw_helpers() -> None:
         """Add the patterns and drawing helpers (before what draws)."""
         _CTX.helpers.append(fxmap.PATTERN_GLSL)
-        sample = [
-            f"\tif (k == {n}) return {'$' + nm}(fract(q));"
-            for n, nm in enumerate(images)
+        # An image's texels, q in [0, 1]: nearest clamps to the edge ones,
+        # bilinear blends with zero past them (fxmap.image_id).
+        n = num(float(1 << _CTX.size))
+        texel = [
+            f"\tif (k == {k}) return {'$' + nm}((t + 0.5) / {n});"
+            for k, nm in enumerate(images)
         ]
         _CTX.helpers.append(
-            "vec4 fximg_$(name)(int k, vec2 q) {\n"
-            + "\n".join(sample)
+            "vec4 fxtexel_$(name)(int k, vec2 t) {\n"
+            "\tif (any(lessThan(t, vec2(0.0)))"
+            f" || any(greaterThan(t, vec2({n} - 1.0)))) {{\n"
+            "\t\treturn vec4(0.0);\n\t}\n"
+            + "\n".join(texel)
             + "\n\treturn vec4(0.0);\n}\n"
+            "vec4 fximg_$(name)(int k, int filtering, vec2 q) {\n"
+            f"\tif (filtering == {fxmap.NEAREST}) {{\n"
+            f"\t\treturn fxtexel_$(name)(k, clamp(floor(q * {n}), 0.0, {n} - 1.0));\n"
+            "\t}\n"
+            f"\tvec2 p = q * {n} - 0.5;\n"
+            "\tvec2 b = floor(p), f = p - b;\n"
+            "\tvec4 t00 = fxtexel_$(name)(k, b);\n"
+            "\tvec4 t10 = fxtexel_$(name)(k, b + vec2(1.0, 0.0));\n"
+            "\tvec4 t01 = fxtexel_$(name)(k, b + vec2(0.0, 1.0));\n"
+            "\tvec4 t11 = fxtexel_$(name)(k, b + 1.0);\n"
+            "\treturn mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);\n"
+            "}\n"
         )
-        _CTX.helpers.append(FX_DRAW_GLSL.replace("$(tile)", tile))
+        _CTX.helpers.append(
+            FX_DRAW_GLSL.replace("$(tile)", tile).replace(
+                "$(stride)", str(fxmap.IMAGE_STRIDE)
+            )
+        )
         _CTX.helpers.append(FX_NEAR_GLSL.replace("$(tile)", tile))
 
     if not recording:  # the tree's functions draw

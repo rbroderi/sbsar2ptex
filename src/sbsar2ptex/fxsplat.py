@@ -64,7 +64,7 @@ class Splat:
     hy: float
     angle: float
     pattern: int
-    """A pattern id, or -1 - an image input's index."""
+    """A pattern id, or an image's (fxmap.image_id)."""
     suppl: float
     blend_max: bool
     value: list[float]
@@ -169,9 +169,10 @@ def splats(
             at = (pos[0] + bo[0], pos[1] + bo[1])
             pattern = t.pattern
             if t.image_index is not None:
-                pattern = -1 - int(run(t.image_index.code, e, "imageindex", ctx)[0])
+                index = int(run(t.image_index.code, e, "imageindex", ctx)[0])
+                pattern = fxmap.image_id(index, t.image_flags)
             elif t.image is not None and t.image < len(settings.patterns):
-                pattern = -1 - t.image
+                pattern = fxmap.image_id(t.image, t.image_flags)
             if pattern is not None:
                 w = weight(depth) * settings.opacity
                 value = [op[0], op[1], op[2], op[3] * w] if color else [op[1] * w]

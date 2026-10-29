@@ -38,7 +38,7 @@ from dataclasses import field
 from typing import Any
 
 from sbsar2ptex.function import decode
-from sbsar2ptex.libparams import evaluate32
+from sbsar2ptex.function import evaluate
 from sbsar2ptex.libparams import slots
 from sbsar2ptex.plugin import atoms
 from sbsar2ptex.recognize import Match
@@ -273,7 +273,7 @@ def _chain(m: Match) -> tuple[list[int], list[int], list[float]] | None:  # noqa
         if any(f is None for f in fns):
             return None
         for probe in PROBES:
-            if len({tuple(evaluate32(f, at(*probe))) for f in fns}) != 1:
+            if len({tuple(evaluate(f, at(*probe))) for f in fns}) != 1:
                 return None
         mean, weights, dest = [], [], chain[0]
         for i, w in enumerate(chain[1:], 1):
@@ -290,10 +290,10 @@ def _chain(m: Match) -> tuple[list[int], list[int], list[float]] | None:  # noqa
             opacity = _function(t.nodes[b], "opacity")
             if opacity is None:
                 return None
-            c = evaluate32(opacity, at(1.0, STEPS))
+            c = evaluate(opacity, at(1.0, STEPS))
             if (
-                evaluate32(opacity, at(1.0, i)) != [0.0]
-                or evaluate32(opacity, at(1.0, i + 1)) != c
+                evaluate(opacity, at(1.0, i)) != [0.0]
+                or evaluate(opacity, at(1.0, i + 1)) != c
             ):
                 return None
             mean.append(b)

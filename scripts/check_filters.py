@@ -575,6 +575,16 @@ def fxmap_cases() -> list[dict]:
         {"tag": "fx_state_g", "filter": "fxmaps", "kind": GRAY, "params": flat,
          "extra": fxmap_graph(state), "connect": 1, "format16": True}
     )  # fmt: skip
+    # The input image drawn (pattern type 1), off the pixel grid: each image
+    # filtering (bilinear+mipmaps, bilinear, nearest: Quadrant.image_flags).
+    out += [
+        {"tag": f"fx_image{f}_g", "filter": "fxmaps", "kind": GRAY,
+         "params": flat, "connect": 1, "format16": True,
+         "extra": fxmap_graph(pat(1, ("patternsize", f2, "0.37 0.29"),
+                                  ("frameoffset", f2, "0.1131 0.2717"),
+                                  ("imagefiltering", i1, str(f))))}
+        for f in (0, 1, 2)
+    ]  # fmt: skip
     # Patterns larger than the map, many: baked (fxsplat.bake).
     blob = pat(
         6,  # gaussian

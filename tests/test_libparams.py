@@ -4,8 +4,8 @@ import struct
 
 from sbsar2ptex.function import FLOAT
 from sbsar2ptex.function import decode
+from sbsar2ptex.function import evaluate
 from sbsar2ptex.libparams import _typed
-from sbsar2ptex.libparams import evaluate32
 from sbsar2ptex.libparams import knobs
 from sbsar2ptex.libparams import solve
 from sbsar2ptex.recognize import Match
@@ -64,7 +64,7 @@ def instance_of(low: float, high: float | None = None) -> tuple[Match, list[Node
 
 
 def test_the_function_is_evaluated_in_float32() -> None:
-    assert evaluate32(decode(half_radius()), {RADIUS: [0.3]}) == [
+    assert evaluate(decode(half_radius()), {RADIUS: [0.3]}) == [
         struct.unpack("<f", struct.pack("<f", 0.15))[0]
     ]
 

@@ -17,18 +17,16 @@ and anything not reproduced exactly.
 
 import math
 import struct
-from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
-from sbsar2ptex.function import BOOL
 from sbsar2ptex.function import FLOAT
 from sbsar2ptex.function import INT
-from sbsar2ptex.function import NO_VALUE
 from sbsar2ptex.function import Block
 from sbsar2ptex.function import FunctionError
-from sbsar2ptex.function import constant
 from sbsar2ptex.function import decode
+from sbsar2ptex.function import evaluate
+from sbsar2ptex.function import f32
 from sbsar2ptex.recognize import Match
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
@@ -197,148 +195,11 @@ def slots(node: Node) -> dict[str, Slot]:
     return out
 
 
-def _f32(x: float) -> float:
-    """Return ``x`` rounded to float32 (infinite past its range)."""
-    try:
-        return struct.unpack("<f", struct.pack("<f", x))[0]
-    except OverflowError:
-        return math.copysign(math.inf, x)
-
-
-def _wrap(x: float) -> int:
-    x = int(x) & 0xFFFFFFFF
-    return x - (1 << 32) if x >> 31 else x
-
-
-def _div(a: float, b: float, kind: int) -> float:
-    if kind == INT:
-        return int(a / b) if b else 0
-    if b:
-        return a / b
-    return math.copysign(math.inf, a) if a else math.nan
-
-
-def _guard(fn: Callable[[float], float]) -> Callable[[float], float]:
-    def safe(a: float) -> float:
-        try:
-            return fn(a)
-        except (ValueError, OverflowError):
-            return math.nan
-
-    return safe
-
-
-_BINARY: dict[int, Callable[[float, float], Any]] = {
-    0x12: lambda a, b: a + b,
-    0x13: lambda a, b: a - b,
-    0x14: lambda a, b: a * b,
-    0x16: lambda a, b: (a - b * math.floor(a / b)) if b else 0.0,
-    0x1A: lambda a, b: bool(a) and bool(b),
-    0x1B: lambda a, b: bool(a) or bool(b),
-    0x1D: lambda a, b: a == b,
-    0x1E: lambda a, b: a != b,
-    0x1F: lambda a, b: a > b,
-    0x20: lambda a, b: a >= b,
-    0x21: lambda a, b: a < b,
-    0x22: lambda a, b: a <= b,
-    0x30: min,
-    0x31: max,
-    0x36: lambda a, b: a**b if a >= 0 else math.nan,
-}
-_UNARY: dict[int, Callable[[float], Any]] = {
-    0x17: lambda a: -a,
-    0x1C: lambda a: not a,
-    0x23: abs,
-    0x24: _guard(math.floor),
-    0x25: _guard(math.ceil),
-    0x26: _guard(math.cos),
-    0x27: _guard(math.sin),
-    0x28: lambda a: math.sqrt(a) if a >= 0 else math.nan,
-    0x29: lambda a: math.log(a) if a > 0 else -math.inf,
-    0x2A: _guard(math.exp),
-    0x2B: _guard(lambda a: 2.0**a),
-    0x2C: _guard(math.tan),
-    0x35: lambda a: math.log2(a) if a > 0 else -math.inf,
-}
-
-
-def _spread(a: list, b: list) -> tuple[list, list]:
-    """Return two operands of one width: a scalar repeated to the other's."""
-    if len(a) == len(b):
-        return a, b
-    return (a * len(b), b) if len(a) == 1 else (a, b * len(a))
-
-
-def _as(kind: int, values: list) -> list:
-    if kind == FLOAT:
-        return [_f32(float(x)) for x in values]
-    if kind == INT:
-        return [_wrap(x) if math.isfinite(x) else 0 for x in values]
-    return [bool(x) for x in values]
-
-
-def evaluate32(block: Block, inputs: dict[int, list]) -> list:
-    """Return ``block``'s value, every step rounded to float32 as cooking does.
-
-    Only what a library parameter's function reads: graph inputs, no
-    built-ins, random numbers or samples (FunctionError).
-    """
-    vals: list[list] = []
-    var: dict[int, list] = {}
-    for ins in block.instrs:
-        ops, op = ins.operands, ins.op
-        if op == 0x00:
-            v = constant(ins)
-        elif op == 0x02:  # noqa: PLR2004
-            v = inputs[ins.u32s()[0]]
-        elif op == 0x04:  # noqa: PLR2004
-            v = var[ops[0]]
-        elif op == 0x07:  # noqa: PLR2004
-            var[ops[1]] = v = vals[ops[0]]
-        elif op == 0x09:  # noqa: PLR2004
-            v = vals[ops[1]] if vals[ops[0]][0] else vals[ops[2]]
-        elif op == 0x0C:  # noqa: PLR2004
-            v = [0.0] * ins.width if ops[1] == NO_VALUE else vals[ops[1]]
-        elif op in (0x0D, 0x0E, 0x0F):
-            v = [x for o in ops for x in vals[o]]
-        elif op == 0x10:  # noqa: PLR2004
-            src, sel = vals[ops[0]], ops[1]
-            v = [src[sel >> (2 * k) & 3] for k in range(ins.width)]
-        elif op == 0x11:  # noqa: PLR2004
-            v = vals[ops[0]]
-        elif op == 0x18:  # noqa: PLR2004
-            acc = 0.0
-            for x, y in zip(vals[ops[0]], vals[ops[1]], strict=True):
-                acc = _f32(acc + _f32(x * y))
-            v = [acc]
-        elif op == 0x2F:  # noqa: PLR2004
-            a, b = vals[ops[0]], vals[ops[1]]
-            t = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
-            v = [
-                _f32(p + _f32(_f32(q - p) * s)) for p, q, s in zip(a, b, t, strict=True)
-            ]
-        elif op in _BINARY or op == 0x15:  # noqa: PLR2004 (0x15 divides)
-            a, b = _spread(vals[ops[0]], vals[ops[1]])
-            if op == 0x15:  # noqa: PLR2004
-                v = [_div(p, q, ins.type) for p, q in zip(a, b, strict=True)]
-            else:
-                v = [_BINARY[op](p, q) for p, q in zip(a, b, strict=True)]
-        elif op in _UNARY:
-            v = [_UNARY[op](p) for p in vals[ops[0]]]
-        else:
-            msg = f"cannot evaluate {ins.name} here"
-            raise FunctionError(msg)
-        if op not in (0x07, 0x09, 0x0C) and ins.type in (FLOAT, INT, BOOL):
-            v = _as(ins.type, v)
-        vals.append(v)
-    return vals[-1]
-
-
 def _words(values: list, kind: int) -> list[int]:
     """Return values as the u32 words a node stores them in."""
     if kind == FLOAT:
         return [
-            struct.unpack("<I", struct.pack("<f", _f32(float(x))))[0] for x in values
+            struct.unpack("<I", struct.pack("<f", f32(float(x))))[0] for x in values
         ]
     return [int(x) & 0xFFFFFFFF for x in values]
 
@@ -347,7 +208,7 @@ def _ulps(x: float, k: int) -> list[float]:
     """Return the float32 values within ``k`` steps of ``x``, nearest first."""
     if not math.isfinite(x):
         return []
-    bits = struct.unpack("<i", struct.pack("<f", _f32(x)))[0]
+    bits = struct.unpack("<i", struct.pack("<f", f32(x)))[0]
     out = []
     for d in sorted(range(-k, k + 1), key=abs):
         b = bits + d
@@ -367,7 +228,7 @@ def _typed(v: float) -> float:
     """Return the shortest decimal that is float32 ``v``: 3.22, not 3.2200000286."""
     for digits in range(1, 10):
         x = float(f"{v:.{digits}g}")
-        if _f32(x) == _f32(v):
+        if f32(x) == f32(v):
             return x
     return v
 
@@ -381,14 +242,14 @@ class _Equation:
 
     def holds(self, values: dict[int, list]) -> bool:
         try:
-            got = evaluate32(self.block, values)
+            got = evaluate(self.block, values)
         except (FunctionError, KeyError, IndexError, ZeroDivisionError):
             return False
         return _words(got, self.kind) == self.target
 
     def value(self, values: dict[int, list]) -> float | None:
         try:
-            got = evaluate32(self.block, values)
+            got = evaluate(self.block, values)
         except (FunctionError, KeyError, IndexError, ZeroDivisionError):
             return None
         return float(got[0]) if got else None

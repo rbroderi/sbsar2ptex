@@ -2,6 +2,7 @@
 
 import pytest
 
+from sbsar2ptex import fxmap
 from sbsar2ptex.fxmap import read_settings
 from sbsar2ptex.sbsasm import Node
 
@@ -28,3 +29,10 @@ def test_settings_with_a_setup_function() -> None:
     assert st.setup_code == 0xF5C0E0 + 0x34
     assert st.background == 0xFA3
     assert st.hurst == 0.0
+
+
+def test_an_image_id_carries_its_filtering() -> None:
+    # image input 3, nearest (filtering 2 in bits 2-3; 0x2: an index function)
+    k = -1 - fxmap.image_id(3, 2 << 2 | 0x2)
+    assert (k % fxmap.IMAGE_STRIDE, k // fxmap.IMAGE_STRIDE) == (3, fxmap.NEAREST)
+    assert fxmap.image_id(3, 0) == -4  # bilinear and mipmaps: the index alone
