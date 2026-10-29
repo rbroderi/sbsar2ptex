@@ -3256,13 +3256,11 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
                         inner = [ln for key, ln in params if key != "branchoffset"]
                     else:
                         cond = f"fxgroup_$(name)(image, {mx}) == grp"
-                        inner = []
                         lines += [ln for key, ln in params if key == "imageindex"]
-                        rest = [
+                        inner = [
                             ln for key, ln in params
                             if key not in ("branchoffset", "imageindex")
                         ]  # fmt: skip
-                        inner = rest
                     lines += [
                         f"if ({cond}) {{",
                         *(f"\t{ln}" for ln in inner),
