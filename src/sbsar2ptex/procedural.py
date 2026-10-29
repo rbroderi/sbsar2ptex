@@ -146,6 +146,7 @@ def build(
     aliases: dict[str, str] | None = None,
     matches: Path | None = None,
     experimental: bool = False,
+    loops: bool = True,
     stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the Material Maker graph translating ``graph``.
@@ -157,7 +158,9 @@ def build(
     library nodes found (library.recognized). ``experimental`` uses the
     material-maker-mod fork's features (sbsar2ptex.loops) and the sbs
     plugin's nodes (sbsar2ptex.plugin), and says so: a "requires" key and
-    long description line, as the fork reads them. ``stats`` is filled with
+    long description line, as the fork reads them; ``loops`` False keeps
+    the loops unrolled (every node's image a node's, for scripts/descend.py
+    to compare). ``stats`` is filled with
     the plugin nodes made, by type, and the nodes left inline, by reason.
     """
     xml = member(files, ".xml").decode("utf-8")
@@ -178,9 +181,10 @@ def build(
         else []
     )
     lib = library_nodes(found, nodes, inputs, size)
-    loops = slope_blurs(found, nodes, lib) if experimental else {}
-    repeated = chains(nodes, set(wanted.values())) if experimental else []
-    folded = Chains(repeated) if experimental else None
+    looped = experimental and loops
+    slopes = slope_blurs(found, nodes, lib) if looped else {}
+    repeated = chains(nodes, set(wanted.values())) if looped else []
+    folded = Chains(repeated) if looped else None
     # Plugin nodes, of one pass in the chains (an iterate's body: no buffers)
     in_chains = {k for c in repeated for period in c.periods for k in period}
     maker = Maker(size, in_chains) if experimental else None
@@ -194,7 +198,7 @@ def build(
         origins=origins,
         aliases=aliases,
         library=lib,
-        loops=loops,
+        loops=slopes,
         fold=folded,
         plugins=maker,
     )
@@ -233,7 +237,7 @@ def build(
         "connections": [*wires, *extra_wires],
     }
     if experimental:
-        iterated = any(loop.made for loop in loops.values()) or bool(
+        iterated = any(loop.made for loop in slopes.values()) or bool(
             folded and folded.made
         )
         used = FEATURES if iterated else ()

@@ -2,7 +2,7 @@
 
     uv run python scripts/descend.py SBSAR NODE --mm PATH/TO/material_maker.exe
         [--sbsrender PATH] [--work DIR] [--size 10] [--strict]
-        [--bisect [PROBES]] [--pin NODES] [--exact]
+        [--bisect [PROBES]] [--pin NODES] [--exact] [--fork DIR [--plugins]]
 
 NODE is a compiled node index (``sbsasm-dump`` lists them; a graph output's
 node is a good start). A node is rendered twice: in Substance, by
@@ -44,6 +44,12 @@ Material Maker exports 8 bits. A grayscale node whose Substance image spans
 less than NARROW (1st to 99th percentile) is magnified before export,
 (v - median) * k + 0.5 with its spread filling most of the range, and
 Substance's image the same way, so that steps finer than 1/255 count.
+
+``--fork`` exports through material-maker-mod (``--mm`` then being Godot):
+its 8-bit export rounds, as Substance's does, and is of the graph's size.
+``--plugins`` builds the graph with the sbs plugin's nodes, installed in
+the fork's user folder (``sbsar2ptex --install-mm-plugin``), and its loops
+unrolled, so that every node has an image to compare.
 
 The flat graph is built once into the work folder (``--rebuild`` to redo it).
 Side-by-side images (Substance left) go to WORK/vs.
@@ -267,11 +273,13 @@ def build(
     magnify: tuple[float, float] | None = None,
     *,
     alpha: bool = False,
+    rounds: bool = False,
 ) -> Path:
     """Write ``src`` alone (with what feeds it) as the albedo, to ``path``.
 
     ``magnify`` (center, gain) exports ``magnified`` of it instead; ``alpha``
     its alpha, as gray (the albedo's own alpha is exported opaque).
+    ``rounds``: the exporter rounds to 8 bits (the fork), not truncates.
     """
     g = copy.deepcopy(graph)
     keep = cone(into, src) | {"Material"}
@@ -319,32 +327,44 @@ def build(
             },
         })  # fmt: skip
         g["connections"].append({"from": src, "from_port": 0, "to": out, "to_port": 0})
-    # Material Maker's 8-bit export truncates (an exact k/255 comes out
-    # k - 1): half a step more makes it round, as Substance's does.
-    kind = output_type(next(n for n in g["nodes"] if n["name"] == out))
-    g["nodes"].append(shader(f"{out}_export", [("input", kind)], kind,
-                             "return $input(uv) + 0.5 / 255.0;"))  # fmt: skip
-    g["connections"] += [
-        {"from": out, "from_port": 0, "to": f"{out}_export", "to_port": 0},
-        {"from": f"{out}_export", "from_port": 0, "to": "Material", "to_port": 0},
-    ]
+    if not rounds:
+        # Material Maker's 8-bit export truncates (an exact k/255 comes out
+        # k - 1): half a step more makes it round, as Substance's does.
+        kind = output_type(next(n for n in g["nodes"] if n["name"] == out))
+        g["nodes"].append(shader(f"{out}_export", [("input", kind)], kind,
+                                 "return $input(uv) + 0.5 / 255.0;"))  # fmt: skip
+        g["connections"].append(
+            {"from": out, "from_port": 0, "to": f"{out}_export", "to_port": 0}
+        )
+        out = f"{out}_export"
+    g["connections"].append(
+        {"from": out, "from_port": 0, "to": "Material", "to_port": 0}
+    )
     no_auto_buffers(g)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(g), encoding="utf-8")
     return path
 
 
-def mm_export(mm: Path, folder: Path, paths: list[Path]) -> None:
+def mm_export(
+    mm: Path, folder: Path, paths: list[Path], fork: Path | None = None
+) -> None:
     """Export the graphs at ``paths`` into ``folder`` (NAME_albedo.png each).
 
     One Material Maker run exports them all (MAX_EXPORTS at a time): its
     start-up, not the graphs, takes most of an export. Its output goes to
-    ``folder``/mm.log.
+    ``folder``/mm.log. ``fork``: ``mm`` is Godot, running material-maker-mod
+    from that folder (its material_maker project).
     """
+    if fork is None:
+        command = [str(mm), "--export"]
+    else:
+        command = [str(mm), "--path", str(fork), "--export-material",
+                   "--target", "Godot/Godot 4 Standard"]  # fmt: skip
     with (folder / "mm.log").open("w", encoding="utf-8", errors="replace") as log:
         for k in range(0, len(paths), MAX_EXPORTS):
             subprocess.run(
-                [str(mm), "--export", "-o", folder.as_posix(),
+                [*command, "-o", folder.as_posix(),
                  *(p.as_posix() for p in paths[k : k + MAX_EXPORTS])],
                 cwd=mm.parent, stdout=log, stderr=subprocess.STDOUT, check=False,
                 timeout=7200,
@@ -360,12 +380,17 @@ def export(
     magnify: tuple[float, float] | None = None,
     *,
     alpha: bool = False,
+    fork: Path | None = None,
 ) -> Path | None:
-    """Export ``src`` alone (``build``) into ``folder``; None on failure."""
-    path = build(graph, into, src, folder / f"{src}.ptex", magnify, alpha=alpha)
+    """Export ``src`` alone (``build``) into ``folder``; None on failure.
+
+    ``fork`` as mm_export's.
+    """
+    path = build(graph, into, src, folder / f"{src}.ptex", magnify, alpha=alpha,
+                 rounds=fork is not None)  # fmt: skip
     png = folder / f"{src}_albedo.png"
     png.unlink(missing_ok=True)
-    mm_export(mm, folder, [path])
+    mm_export(mm, folder, [path], fork)
     return png if png.exists() else None
 
 
@@ -406,13 +431,15 @@ class Search:
         if not self.slots[False] or not self.slots[True]:
             sys.exit(f"need a grayscale and a color graph output: {self.outputs}")
         built = self.work / "graph"
-        ptex, known = built / f"{args.sbsar.stem}.ptex", built / "aliases.json"
+        kind = "_sbs" if args.plugins else ""  # each kind built apart
+        ptex = built / f"{args.sbsar.stem}{kind}.ptex"
+        known = built / f"aliases{kind}.json"
         if not ptex.exists() or not known.exists() or args.rebuild:
             aliases: dict[str, str] = {}
             made = procedural.build(
                 self.files, describe(member(self.files, ".xml"))[0],
                 built / f"{args.sbsar.stem}_data", size=args.size, flat=True,
-                aliases=aliases,
+                aliases=aliases, experimental=args.plugins, loops=False,
             )  # fmt: skip
             built.mkdir(parents=True, exist_ok=True)
             ptex.write_text(json.dumps(made, indent=1), encoding="utf-8")
@@ -574,9 +601,10 @@ class Search:
                     paths.append(path)
                     build(self.graph, self.into, self.mm_name(n), path,
                           magnify if stem.endswith("_magnified") else None,
-                          alpha=stem.endswith("_alpha"))  # fmt: skip
+                          alpha=stem.endswith("_alpha"),
+                          rounds=self.args.fork is not None)  # fmt: skip
         if paths:
-            mm_export(self.args.mm, folder, paths)
+            mm_export(self.args.mm, folder, paths, self.args.fork)
         for (n, alpha), (t, magnify) in jobs.items():
             self.memo[n, alpha] = self.compare(n, alpha, t, magnify)
         return {a: self.memo[p] for a, p in zip(asked, probes, strict=True)}
@@ -699,7 +727,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("sbsar", type=Path)
     parser.add_argument("node", type=int)
-    parser.add_argument("--mm", type=Path, required=True, help="material_maker.exe")
+    parser.add_argument(
+        "--mm", type=Path, required=True,
+        help="material_maker.exe; with --fork, the Godot (console) executable",
+    )  # fmt: skip
+    parser.add_argument(
+        "--fork", type=Path, metavar="DIR",
+        help="export with material-maker-mod: its folder (project.godot's)",
+    )  # fmt: skip
+    parser.add_argument(
+        "--plugins", action="store_true",
+        help="with --fork: build with the sbs plugin's nodes (loops unrolled)",
+    )  # fmt: skip
     parser.add_argument("--sbsrender", type=Path, default=SBSRENDER)
     parser.add_argument("--work", type=Path, default=Path("descend"))
     parser.add_argument("--size", type=int, default=10, help="log2 pixels")
@@ -721,7 +760,9 @@ def main() -> None:
     )  # fmt: skip
     args = parser.parse_args()
     args.strict = args.strict or bool(args.bisect) or args.exact
-    if args.exact and args.size != MM_EXPORT_SIZE:
+    if args.plugins and args.fork is None:
+        parser.error("--plugins needs --fork (the plugin's nodes are the fork's)")
+    if args.exact and args.fork is None and args.size != MM_EXPORT_SIZE:
         # Material Maker exports at 2048 px: a graph of another size is
         # sampled between its pixels, which no exact comparison survives.
         print(f"--exact: building at size {MM_EXPORT_SIZE} (Material Maker's export)")

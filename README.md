@@ -114,7 +114,10 @@ the rest keep their constants).
   ```
 
   DIR being the plugin's folder: Material Maker's user folder's
-  `plugins/sbs` (`%APPDATA%/material_maker_2/plugins/sbs` on Windows).
+  `plugins/sbs` (`%APPDATA%/material_maker_2/plugins/sbs` on Windows:
+  the folder is the one `application/config/custom_user_dir_name` names,
+  in project.godot or an override.cfg beside it, and stock Material Maker
+  shares it).
   A node whose setting a Substance function computes stays translated
   inline (a setting that is just a graph input is the plugin node's knob,
   set by the "parameters" node), as do gradient maps and curves (no

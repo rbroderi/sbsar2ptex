@@ -352,7 +352,8 @@ def main() -> None:
         metavar="DIR",
         help="write the sbs Material Maker plugin (the nodes --experimental"
         " graphs use) in DIR, its folder: Material Maker's user folder's"
-        " plugins/sbs",
+        " plugins/sbs (%%APPDATA%%/material_maker_2/plugins/sbs on Windows,"
+        " or the folder the project's custom_user_dir_name names)",
     )
     parser.add_argument(
         "-o", "--out", type=Path, help="output folder (default: beside it)"
