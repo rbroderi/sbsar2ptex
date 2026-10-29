@@ -130,11 +130,11 @@ def store_glsl(layout: Layout) -> str:
                 "\tvec4 f = x - k;\n"
                 "\tk += step(v, f - 0.5) + step(v, f + 0.5) - 1.0;\n"
             )
-        else:  # x = 16 q + r, v truncated to 2^-20: (65535 x + 2^19) / 2^20
+        else:  # x = 16 q + r, v truncated to 2^-20: (65535 x + 2^19 - 1) / 2^20
             body = (
                 "\tvec4 x = floor(v * 1048576.0);\n"
                 "\tvec4 q = floor(x / 16.0);\n"
-                "\tvec4 k = q + floor(((x - 16.0 * q) * 65536.0 + 524288.0 - x)"
+                "\tvec4 k = q + floor(((x - 16.0 * q) * 65536.0 + 524287.0 - x)"
                 " / 1048576.0);\n"
             )
         out = "fxv_$(name)(k)"
@@ -348,8 +348,13 @@ def draw_glsl(
             "\tvec2 gx = px.x * vec2(ca / hs.x, sa / hs.y);\n"
             "\tvec2 gy = px.y * vec2(sa / hs.x, ca / hs.y);\n"
             "\tfloat lam = 0.5 * log2(max(dot(gx, gx), dot(gy, gy)));\n"
-            f"\tfloat lq = ceil(lam * 256.0 - {num(0.5 + fxdraw.LOD_TIE)}) / 256.0;\n"
-            f"\treturn int(clamp(floor(lq + 0.5), 0.0, {num(float(layout.size))}));\n"
+            + (
+                f"\tfloat lq = ceil(lam * 256.0 - {num(0.5 + fxdraw.LOD_TIE)})"
+                " / 256.0;\n"
+                if layout.amd
+                else "\tfloat lq = lam;\n"
+            )
+            + f"\treturn int(clamp(floor(lq + 0.5), 0.0, {num(float(layout.size))}));\n"
             "}\n"
         )
     if layout.color:

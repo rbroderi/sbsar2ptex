@@ -87,6 +87,9 @@ def test_stores() -> None:
     assert fxdraw.s8n(np.float32((128 + 0.4) / 255)) == 128
     assert fxdraw.u16(np.float32(0.5)) == 32768
     assert fxdraw.s16n(np.float32(1.0)) == 65535
+    # NVIDIA puts a half down (RTX 3090): 0.5 is 32767.5 levels
+    assert fxdraw.s16n(np.float32(0.5)) == 32767
+    assert fxdraw.s16n(np.float32(0.5000008)) == 32767
 
 
 def test_waves_is_a_polynomial_cosine() -> None:
@@ -153,7 +156,7 @@ def test_a_mip_level_is_drawn_at_its_size() -> None:
         h = 0.5 / 2**lv
         pid = fxmap.image_id(0, 0)
         inst = Instance(0.5, 0.5, h, h, 0.0, pid, 0.0, blend_max=False, value=[1.0])
-        assert fxdraw.level(h, h, 0.0, n, 1 / n, 1 / n) == lv
+        assert fxdraw.level(h, h, 0.0, n, 1 / n, 1 / n, amd=True) == lv
         got = fxdraw.render([inst], n, color=False, images=[image], amd=True)
         side = n >> lv
         lo = n // 2 - side // 2
@@ -169,10 +172,11 @@ def test_the_level_follows_the_smaller_side() -> None:
     turn = 2 * math.pi / 8
     assert fxdraw.level(0.3, 0.3, turn, 256, 1 / 256, 1 / 256) == 1
     assert fxdraw.level(0.375, 0.375, turn, 256, 1 / 256, 1 / 256) == 0
-    # the switch from level 0 to 1: lambda 0.5 - 2/1024 stays at 0
-    for k, want in ((-2, 0), (-1, 1)):
+    # the switch from level 0 to 1: on AMD lambda 0.5 - 2/1024 stays at 0
+    # (rounded to 1/256, ties down); on NVIDIA it is at 0.5 exactly
+    for k, amd, want in ((-2, True, 0), (-1, True, 1), (-1, False, 0), (1, False, 1)):
         h = 0.5 * 2 ** -(0.5 + k / 1024)
-        assert fxdraw.level(h, h, 0.0, 256, 1 / 256, 1 / 256) == want
+        assert fxdraw.level(h, h, 0.0, 256, 1 / 256, 1 / 256, amd=amd) == want
 
 
 def test_eight_bit_mip_means() -> None:

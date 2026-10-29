@@ -132,9 +132,13 @@ def u16(v: np.ndarray) -> np.ndarray:
 
 
 def s16n(v: np.ndarray) -> np.ndarray:
-    """Return 16-bit levels of float32s, truncated to 2^-20 first (NVIDIA)."""
+    """Return 16-bit levels of float32s, truncated to 2^-20 first (NVIDIA).
+
+    Then to the nearest level, a half down: 0.5 is 32767 (RTX 3090).
+    """
     v = np.clip(np.asarray(v, dtype=np.float64), 0, 1)
-    return np.floor(np.floor(v * 2**20) / 2**20 * 65535 + 0.5).astype(np.int64)
+    x = np.floor(v * 2**20).astype(np.int64)
+    return (x * 65535 + 2**19 - 1) // 2**20
 
 
 def s8(v: np.ndarray) -> np.ndarray:
@@ -225,12 +229,22 @@ LOD_TIE = 1e-3
 rounded down there, past float noise."""
 
 
-def level(hx: float, hy: float, angle: float, m: int, px: float, py: float) -> int:
+def level(
+    hx: float,
+    hy: float,
+    angle: float,
+    m: int,
+    px: float,
+    py: float,
+    *,
+    amd: bool = False,
+) -> int:
     """Return the mip level an image pattern reads (filtering 0).
 
     ``m`` is the image's size, ``px`` and ``py`` a pixel's step in pattern
     space. The longer of the screen derivatives of the texel coordinates;
-    its log2 rounded to 1/256 (ties down), then to the nearest level.
+    its log2 (AMD: rounded to 1/256, ties down) to the nearest level, a
+    half up (NVIDIA switches at exactly 0.5 and 1.5: RTX 3090).
     """
     if hx == 0 or hy == 0:
         return int(math.log2(m))
@@ -238,7 +252,7 @@ def level(hx: float, hy: float, angle: float, m: int, px: float, py: float) -> i
     gx = m * px / 2 * math.hypot(c / hx, s / hy)
     gy = m * py / 2 * math.hypot(s / hx, c / hy)
     lam = math.log2(max(gx, gy))
-    lq = math.ceil(lam * 256 - 0.5 - LOD_TIE) / 256
+    lq = math.ceil(lam * 256 - 0.5 - LOD_TIE) / 256 if amd else lam
     return min(max(math.floor(lq + 0.5), 0), int(math.log2(m)))
 
 
@@ -387,7 +401,7 @@ def render(
                     ]
                 lv = 0
                 if filtering == fxmap.MIPMAPPED:
-                    lv = level(s.hx, s.hy, s.angle, n, rw / n, rh / n)
+                    lv = level(s.hx, s.hy, s.angle, n, rw / n, rh / n, amd=amd)
                 tex = chains[index][lv].astype(np.float64) / full
                 m = tex.shape[0]
                 u = (qx * 0.5 + 0.5).astype(np.float64)
