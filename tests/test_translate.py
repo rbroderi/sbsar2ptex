@@ -221,20 +221,26 @@ def test_buffers_copying_a_buffer_go() -> None:
     assert "buf_y" in inner
 
 
-@pytest.mark.parametrize("bits", [8, 16])
-def test_directional_blur_knobs_stay_live(bits: int) -> None:
-    # Intensity and angle, inline in the node; its output format in bits 4-5.
+@pytest.mark.parametrize("kind", ["f", "rgba"])
+@pytest.mark.parametrize("bits", [8, 16, 32])
+def test_directional_blur_knobs_stay_live(bits: int, kind: str) -> None:
+    color = kind == "rgba"
+    # Intensity and angle, inline in the node; its output format in bits 4-5
+    # (0 8 bits, 1 16 bits, 3 32-bit float).
     words = [struct.unpack("<I", struct.pack("<f", v))[0] for v in (5.86, 0.0625)]
-    flags = (bits == 16) << 4
+    flags = {8: 0, 16: 1, 32: 3}[bits] << 4
     node = Node(
         index=0, start=0, end=4, op=22, flags=flags, fields=[1 | 1 << 2], inline=words
     )
-    made = _dirmotionblur(node, "dmb", color=False, size=8)
+    made = _dirmotionblur(node, "dmb", color=color, size=8)
     # One shader, its knobs live (never constants in its GLSL), reading the
-    # input's buffer; in an 8-bit graph, with Substance's 8-bit stores.
+    # input's buffer; in an 8-bit graph with Substance's 8-bit stores, in a
+    # 16-bit one with its 16-bit stores, on a 32-bit buffer (exact levels).
     by_type = {n["type"]: n for n in made.nodes}
     assert len(made.nodes) == 2
-    assert by_type["buffer"]["parameters"]["filter"] is True
+    buf = by_type["buffer"]["parameters"]
+    assert buf["filter"] is True
+    assert buf["f32"] is (bits == 16)
     sh = by_type["shader"]
     assert sh["parameters"] == pytest.approx({"intensity": 5.86, "angle": 0.0625})
     code = sh["shader_model"]["instance"]
@@ -243,3 +249,8 @@ def test_directional_blur_knobs_stay_live(bits: int) -> None:
     assert "5.86" not in code
     assert "0.0625" not in code
     assert ("_s8(" in code) == (bits == 8)
+    assert ("_pm(" in code) == ("_u16(" in code) == (bits == 16)
+    if bits == 16:
+        # Integer levels per channel; halves up (NVIDIA) unless asked.
+        assert ("uvec4" in code) == color
+        assert "floor((a + b + 1.0) * 0.5)" in code

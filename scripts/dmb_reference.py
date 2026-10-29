@@ -18,6 +18,16 @@ In 8-bit graphs (``blur8``, ``--eight``: the ``noise8_<N>`` renders) every
 intermediate is stored in 8 bits through a half-float truncation, boxes
 add aligned blocks of a pyramid of stored pair means, and the rotated box
 reads only the stored frame and adds 1/512; it prints the identical pixels.
+
+In 16-bit graphs (``blur16``) the passes are the 8-bit graph's, every
+intermediate stored as an integer level: the pyramid's mean of two levels
+is a half when their sum is odd, and NVIDIA GPUs send every half up. Terms
+and sums are float32 in the engine's order, the rotated box adds 0.4 of a
+level. ``--sixteen`` compares it with the specification's T2 renders,
+``--t0`` runs the tie-direction probes, ``--t1`` the cells of a folder of
+long boxes at 0 degrees. ``--amd`` takes AMD's rule (a half rounds as its
+float32 does) here as for 8-bit stores: the renders in ``r/`` were made on
+AMD; NVIDIA's is the default.
 """
 
 import argparse
@@ -367,6 +377,229 @@ def blur8(img: np.ndarray, intensity: float, angle: float) -> np.ndarray:
     return out.T if ymajor else out
 
 
+LEVELS = 65535
+BETA16 = F32(0.4 / 65535)
+"""The rotated box's bias in a 16-bit graph: 0.4 of a level."""
+HALVES: list[str | None] = [None]
+"""Force every pyramid half "up" or "down" (the T0 probe); None: the vendor's rule."""
+
+
+def ratio(num: np.ndarray, den: int) -> np.ndarray:
+    """Return num / den rounded once to float32 (exact float64 quotient first)."""
+    return (np.asarray(num, np.float64) / den).astype(F32)
+
+
+def u16(v: np.ndarray) -> np.ndarray:
+    """Return the 16-bit store of a computed float32 ``v``: the nearest level, halves up."""
+    v = np.clip(np.asarray(v, F32), F32(0), F32(1)).astype(np.float64)
+    return np.floor(v * LEVELS + 0.5).astype(np.int64)
+
+
+def u16_read(k0: np.ndarray, k1: np.ndarray, j: np.ndarray) -> np.ndarray:
+    """Return the stored level of a bilinear read of levels k0, k1 at weight j / 256.
+
+    The filter is exact and its result rounded to float32; AMD stores that
+    float; NVIDIA is taken to send exact halves up.
+    """
+    num = (256 - j) * k0 + j * k1
+    if NVIDIA[0]:
+        return (num + 128) // 256
+    return u16(ratio(num, 256 * LEVELS))
+
+
+def read16(k0: np.ndarray, k1: np.ndarray, j: np.ndarray | int) -> np.ndarray:
+    """Return a bilinear read of levels k0, k1 at weight j / 256, as float32."""
+    return ratio((256 - j) * k0 + j * k1, 256 * LEVELS)
+
+
+def pairmean(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Return the stored mean of two stored levels: a half rounds by the vendor's rule.
+
+    NVIDIA sends every half up; AMD stores the float32 of (a + b) / 131070
+    exactly, so a half goes up when that float is not below it.
+    """
+    s = a + b
+    if HALVES[0] is not None:
+        return (s + (HALVES[0] == "up")) >> 1
+    if NVIDIA[0]:
+        return (s + 1) >> 1
+    return u16(ratio(s, 2 * LEVELS))
+
+
+def pyramid16(rows: np.ndarray) -> list[np.ndarray]:
+    """Return the 16-bit stored pair-mean levels of ``rows`` (integers) along axis 1."""
+    levels = [rows]
+    while levels[-1].shape[1] > 1:
+        a = levels[-1]
+        levels.append(pairmean(a[:, 0::2], a[:, 1::2]))
+    return levels
+
+
+def setup16(intensity: float, angle: float, n_px: int) -> tuple:
+    """Return (y-major, t, R, n, f, 1 / 2R) as a 16-bit graph's engine has them.
+
+    R, f and 1 / 2R are float32 from float32 steps; max(|cos|, |sin|) is 1
+    exactly only at angle 0, a float32 ulp below it at other quarter turns.
+    """
+    ymajor, t, _ = setup(intensity, angle, n_px)
+    lpx = F32(F32(intensity) * F32(n_px)) / F32(256)
+    if angle == 0:
+        mx = F32(1)
+    elif angle * 4 == round(angle * 4):
+        mx = F32(1 - 2**-24)
+    else:
+        a = 2 * math.pi * angle
+        mx = F32(max(abs(math.cos(a)), abs(math.sin(a))))
+    radius = F32(0.5) + F32(lpx - F32(0.5)) * mx
+    n = math.ceil(float(radius) - 0.5)
+    f = radius + F32(0.5) - F32(n)
+    inv = F32(1) / (F32(2) * radius)
+    return ymajor, t, radius, n, f, inv
+
+
+def total(terms: list[np.ndarray], ymajor: bool) -> np.ndarray:
+    """Return the float32 sum of the box's terms (listed from its - end).
+
+    x-major sums from the + end, y-major from the - end.
+    """
+    order = terms if ymajor else terms[::-1]
+    acc = order[0]
+    for term in order[1:]:
+        acc = (acc + term).astype(F32)
+    return acc
+
+
+def small16(k: np.ndarray, t: float, f: np.float32, inv: np.float32) -> np.ndarray:
+    """Return the 16-bit graph's small path (x-major): three reads, from the + end."""
+    n_px = k.shape[0]
+    y, x = np.mgrid[0:n_px, 0:n_px]
+
+    def read(dx: int, dy: float) -> np.ndarray:
+        yy = y + dy
+        y0 = np.floor(yy)
+        j = np.round(q(yy - y0) * 256).astype(np.int64)
+        y0i = y0.astype(np.int64)
+        xi = (x + dx) % n_px
+        return read16(k[y0i % n_px, xi], k[(y0i + 1) % n_px, xi], j)
+
+    ws = f * inv
+    p, c, m = read(1, t), ratio(k, LEVELS), read(-1, -t)
+    return u16(((p * ws).astype(F32) + (c * inv).astype(F32)) + (m * ws).astype(F32))
+
+
+def axis16(k: np.ndarray, n: int, f: np.float32, inv: np.float32, ymajor: bool):
+    """Return the 16-bit graph's x-major blur at t = 0, in levels.
+
+    The 8-bit graph's decomposition (axis8) over a pyramid of integer pair
+    means; each term a float32, summed in the major axis's order.
+    """
+    n_px = k.shape[1]
+    j = int(np.floor(float(f) / (1 + float(f)) * 256 + 0.5))
+    w = f + F32(1)
+    levels = pyramid16(k)
+
+    def tex(i: int) -> np.ndarray:
+        return ratio(k[:, i % n_px], LEVELS)
+
+    def merged(whole: int, part: int) -> np.ndarray:
+        return read16(k[:, whole % n_px], k[:, part % n_px], j) * w
+
+    out = np.empty_like(k)
+    for x in range(n_px):
+        first, end = x - (n - 1), x + n
+        if n == 2:
+            terms = [merged(first, first - 1), tex(first + 1)]
+            terms.append(merged(first + 2, first + 3))
+            acc = total(terms, ymajor=True)  # this order on both axes
+        else:
+            if first % 2:
+                terms, start = [merged(first, first - 1)], first + 1
+            else:
+                terms, start = [f * tex(first - 1)], first
+            found, start = blocks(start, end, n_px)
+            for s0, level in found:
+                lv = levels[level][:, (s0 % n_px) >> level]
+                terms.append(ratio(lv, LEVELS) * F32(1 << level))
+            if end - start == 1:
+                terms.append(merged(start, start + 1))
+            else:
+                terms.append(f * tex(start))
+            acc = total(terms, ymajor)
+        out[:, x] = u16(acc * inv)
+    return out
+
+
+def rotated16(k: np.ndarray, t: float, n: int, f, inv, ymajor: bool) -> np.ndarray:
+    """Return the 16-bit graph's x-major blur at t != 0, in levels.
+
+    rotated8's passes: the frame and the back-resample stored bilinear
+    reads, the pyramid integer pair means, the box's terms float32 (past
+    the seam a read between two columns' stored levels), stored with 0.4 of
+    a level added.
+    """
+    n_px = k.shape[0]
+    x0 = (n_px - 1) / 2
+    y, x = np.mgrid[0:n_px, 0:n_px].astype(np.float64)
+    yy = y + (x - x0) * t  # frame[c, r]: c rows, r columns
+    y0 = np.floor(yy)
+    j = np.round(q(yy - y0) * 256).astype(np.int64)
+    y0i, xi = y0.astype(np.int64), x.astype(np.int64)
+    frame = u16_read(k[y0i % n_px, xi], k[(y0i + 1) % n_px, xi], j)
+    levels = pyramid16(frame)
+    cvec = np.arange(n_px, dtype=np.float64)
+
+    def lev(level: int, s0: int) -> np.ndarray:
+        kk = s0 // n_px
+        i = (s0 - kk * n_px) >> level
+        lv = levels[level]
+        if kk == 0:
+            return ratio(lv[:, i], LEVELS)
+        cf = cvec + kk * n_px * t
+        ca = np.floor(cf)
+        jj = np.round(q(cf - ca) * 256).astype(np.int64)
+        cai = ca.astype(np.int64)
+        return read16(lv[cai % n_px, i], lv[(cai + 1) % n_px, i], jj)
+
+    box = np.empty_like(frame)
+    for r in range(n_px):
+        first, end = r - (n - 1), r + n
+        terms = [f * lev(0, first - 1)]
+        start = first
+        if first % 2:
+            terms.append(lev(0, first))
+            start += 1
+        found, start = blocks(start, end, n_px)
+        for s0, level in found:
+            terms.append(lev(level, s0) * F32(1 << level))
+        if end - start == 1:
+            terms.append(lev(0, start))
+            start += 1
+        terms.append(f * lev(0, start))
+        box[:, r] = u16((total(terms, ymajor) * inv).astype(F32) + BETA16)
+    chat = y - (x - x0) * t
+    c0 = np.floor(chat)
+    jg = np.round(q(chat - c0) * 256).astype(np.int64)
+    c0i = c0.astype(np.int64)
+    return u16_read(box[c0i % n_px, xi], box[(c0i + 1) % n_px, xi], jg)
+
+
+def blur16(k: np.ndarray, intensity: float, angle: float) -> np.ndarray:
+    """Return the blur in a 16-bit graph: ``k`` and the result are integer levels."""
+    ymajor, t, radius, n, f, inv = setup16(intensity, angle, k.shape[0])
+    k = k.astype(np.int64)
+    if ymajor:
+        k = k.T.copy()
+    if radius <= 0.5:
+        out = k
+    elif n == 1:
+        out = small16(k, t, f, inv)
+    elif t == 0:
+        out = axis16(k, n, f, inv, ymajor)
+    else:
+        out = rotated16(k, t, n, f, inv, ymajor)
+    return out.T if ymajor else out
+
+
 def tag(v: float) -> str:
     """Return a value as the reference file names write it."""
     text = f"{v:g}".replace(".", "p")
@@ -392,14 +625,38 @@ def main() -> None:
         "--intensities", type=float, nargs="*", default=list(INTENSITIES)
     )
     parser.add_argument(
+        "--sixteen",
+        action="store_true",
+        help="16-bit graphs: the T2 cells, %% identical pixels / max levels",
+    )
+    parser.add_argument(
+        "--t0", action="store_true", help="16-bit graphs: the pyramid-halves probes"
+    )
+    parser.add_argument(
+        "--t1",
+        action="store_true",
+        help="16-bit graphs: REFERENCE_DIR holds in_<input>_<N>.png and"
+        " ref_i<I>_<input>_<N>.png (0 degrees)",
+    )
+    parser.add_argument(
         "--amd",
         action="store_true",
-        help="8-bit stores as AMD GPUs make them (s8), not NVIDIA's (s8n)",
+        help="stores as AMD GPUs make them (8 bits: s8, not s8n; 16 bits: a"
+        " pyramid half rounds by float32, not always up)",
     )
     args = parser.parse_args()
     NVIDIA[0] = not args.amd
     if args.eight:
         main8(args)
+        return
+    if args.sixteen:
+        main16(args)
+        return
+    if args.t0:
+        main_t0(args)
+        return
+    if args.t1:
+        main_t1(args.refs)
         return
     model = blur_single_pass if args.single_pass else blur
     for n_px in args.size:
@@ -423,6 +680,130 @@ def main() -> None:
                     row.append(f"{err.max():8.2f}/{int((err > 1).sum()):<5d}")
                 print(f"{angle:<9g}" + "".join(f"{r:>14}" for r in row))
             print()
+
+
+T2 = (
+    ("small and axis, 0", [(s, 0, i) for s in ("tex256", "tex1024") for i in INTENSITIES]),
+    ("axis, y-major", [("tex256", 0.25, i) for i in INTENSITIES[2:]]
+     + [("tex1024", 0.25, i) for i in INTENSITIES[1:]]),
+    ("axis, large R", [("tex1024", 0, i) for i in (8, 16, 48)]
+     + [(s, 0, i) for s in ("smooth1024", "smooth2048") for i in (8, 16, 32, 48)]
+     + [("hash12_1024", 0, i) for i in (8, 16, 32)]),
+    ("axis, both axes", [("tex256", a, 5.86) for a in (0.5, 1, -0.5, 0.75, -0.25)]
+     + [("tex256", a, 12) for a in (0.5, 0.75)] + [("tex256", a, 3.3) for a in (0, 0.25)]),
+    ("rotated", [("tex256", a, i) for a in (0.125, -0.125) for i in (5.86, 12)]
+     + [("tex1024", a, i) for a in (0.125, -0.125) for i in (1.5, 5.86)]
+     + [("tex256", 0.1875, i) for i in (2.93, 5.86, 12)]),
+    ("rotated, mx near-ties", [("tex1024", a, i) for a in (0.125, -0.125) for i in (2.93, 12)]),
+    ("grid", [("grid256", a, i) for a in (0, 0.125, -0.125, 0.1875, 0.25, 0.1)
+              for i in INTENSITIES]
+     + [("grid1024", a, i) for a in (0, 0.125, -0.125, 0.25, 0.1) for i in INTENSITIES]),
+    ("grid, fraction ties", [("grid1024", a, i) for a in (0.0625, 0.1875, 0.4375)
+                             for i in INTENSITIES]),
+    ("n = 2", [("tex256", 0, i) for i in (1.75, 2, 2.25)]
+     + [("tex256", 0.25, 2.25), ("tex256", 0.125, 2.93)]),
+    ("small, off the x axis", [("tex256", a, 0.7326) for a in (0.25, 0.125, -0.125, 0.4375)]
+     + [("tex1024", 0.25, 0.3)]),
+    ("oblique, large", [("tex256", a, i) for a in (0.0625, 0.1875, 0.1, 0.4375)
+                        for i in (2.93, 5.86, 12)]),
+)  # fmt: skip
+"""The specification's T2 cells (AMD renders): (input, angle, intensity) by group."""
+
+
+def levels16(refs: Path, name: str) -> np.ndarray:
+    """Return an input image as 16-bit levels (an 8-bit image's k as 257 k)."""
+    src = refs / f"{name}.png"
+    if not src.exists():
+        src = refs.parent / src.name
+    img = np.asarray(Image.open(src))
+    return img.astype(np.int64) * (257 if img.dtype == np.uint8 else 1)
+
+
+def render16(refs: Path, name: str, n_px: int, angle: float, intensity: float):
+    """Return a 16-bit graph's reference render as levels, or None if missing."""
+    level = n_px.bit_length() - 1
+    path = refs / f"{name}_s{level}_b16_{tag(angle)}_{tag(intensity)}.png"
+    return np.asarray(Image.open(path)).astype(np.int64) if path.exists() else None
+
+
+def main16(args: argparse.Namespace) -> None:
+    """Compare the 16-bit model with the T2 cells: % identical pixels / max levels."""
+    for group, cells in T2:
+        print(group)
+        for name, angle, intensity in cells:
+            img = levels16(args.refs, name)
+            ref = render16(args.refs, name, img.shape[0], angle, intensity)
+            if ref is None:
+                continue
+            diff = blur16(img, intensity, angle) - ref
+            print(
+                f"  {name:12} {angle:<8g} {intensity:<7g}"
+                f" {100 * (diff == 0).mean():9.4f}%  max {np.abs(diff).max()}"
+            )
+
+
+def main_t0(args: argparse.Namespace) -> None:
+    """Run the T0 probes: per row, whether its pyramid halves went up or down.
+
+    Each row's model is run with every half down and every half up; a row
+    is counted for the one that matches all its pixels. Then probe4 and the
+    model with the vendor's rule as is.
+    """
+    probes = (("alt256", 12, None), ("seqA", 3, None), ("seqB", 3, None),
+              ("seqC", 3, 1009))  # fmt: skip
+    for name, intensity, rows in probes:
+        img = levels16(args.refs, name)
+        ref = render16(args.refs, name, img.shape[0], 0, intensity)[:rows]
+        got = {}
+        for way in ("down", "up"):
+            HALVES[0] = way
+            got[way] = blur16(img, intensity, 0)[:rows]
+        HALVES[0] = None
+        down = (got["down"] == ref).all(axis=1)
+        up = (got["up"] == ref).all(axis=1)
+        rule = blur16(img, intensity, 0)[:rows]
+        top = img.max(axis=1, keepdims=True)[:rows]
+        print(
+            f"{name:7} rows up {int((up & ~down).sum())}, down {int((down & ~up).sum())},"
+            f" either {int((up & down).sum())}, neither {int((~up & ~down).sum())}"
+            f" of {len(ref)}; vendor rule {100 * (rule == ref).mean():.4f}% identical,"
+            f" {100 * (rule == top).mean():.4f}% its row's larger value"
+        )
+    img = levels16(args.refs, "probe4")
+    ref = render16(args.refs, "probe4", img.shape[0], 0, 3)
+    got = blur16(img, 3, 0)
+    a = img.min(axis=1, keepdims=True)
+    print(
+        f"probe4  {100 * (got == ref).mean():.4f}% identical; render - a:"
+        f" +1 at {int((ref - a == 1).sum())}, 0 at {int((ref - a == 0).sum())};"
+        f" model - a: +1 at {int((got - a == 1).sum())}, 0 at"
+        f" {int((got - a == 0).sum())} pixels"
+    )
+
+
+def main_t1(folder: Path) -> None:
+    """Compare the 16-bit model with the T1 cells (0 degrees, I 8 to 48).
+
+    ``folder`` holds ``in_{hash,smooth}_{1024,2048}.png`` and the renders
+    ``ref_i<I>_<input>_<N>.png``: per cell the identical pixels, the
+    largest difference and the mean (model - render), in levels.
+    """
+    for kind in ("hash", "smooth"):
+        for n_px in (1024, 2048):
+            src = folder / f"in_{kind}_{n_px}.png"
+            if not src.exists():
+                continue
+            img = np.asarray(Image.open(src)).astype(np.int64)
+            for intensity in (8, 16, 32, 48):
+                path = folder / f"ref_i{intensity}_{kind}_{n_px}.png"
+                if not path.exists():
+                    continue
+                diff = blur16(img, intensity, 0) - np.asarray(Image.open(path))
+                print(
+                    f"{kind:6} {n_px:5} I {intensity:<3}"
+                    f" {100 * (diff == 0).mean():9.4f}%  max {np.abs(diff).max()}"
+                    f"  mean {diff.mean():+.4f}"
+                )
 
 
 def main8(args: argparse.Namespace) -> None:

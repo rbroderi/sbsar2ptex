@@ -1398,7 +1398,7 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     return Sub([group], [], [("input", name, 0)], name)
 
 
-def _dmb_setup(node: Node, size: int) -> str:
+def _dmb_setup(node: Node, size: int, *, lpx: bool = False) -> str:
     """Return GLSL deriving a directional motion blur's geometry from its knobs.
 
     Declares the intensity and angle knobs of the next shader (each of the
@@ -1406,7 +1406,8 @@ def _dmb_setup(node: Node, size: int) -> str:
     computes from them, in the shader: ``N`` (texels), ``ymaj`` (steps go
     along y), the slope ``t`` (minor-axis texels per step), the radius
     ``R`` in steps, the tap count ``n`` either side, the end taps' weight
-    ``f``, and ``X0``, the image center the frame is sheared about.
+    ``f``, and ``X0``, the image center the frame is sheared about; with
+    ``lpx`` also ``Lpx``, the length in texels.
     """
     p = flag_params(
         node.fields[0],
@@ -1438,6 +1439,7 @@ def _dmb_setup(node: Node, size: int) -> str:
             "int n = int(ceil(R - 0.5));",
             "float f = R + 0.5 - float(n);",
             "float X0 = 0.5 * (N - 1.0);",
+            *([f"float Lpx = {num(k)} * N / 256.0;"] if lpx else []),
         ]
     )
 
@@ -1489,20 +1491,25 @@ def _dmb_s8(g: str) -> str:
         f"{g} $(name)_s8({g} v, float c) {{\n"
         f"\t{g} x = floor(clamp(v, 0.0, 1.0) * 4096.0 + c);\n"
         "\treturn floor((x * 255.0 + 2047.0) / 4096.0) / 255.0;\n"
-        "}\n"
-        # floor(log2(m)) and the power of two dividing s (s = 0: any).
-        "int $(name)_msb(int m) {\n"
-        "\tint l = 0;\n"
-        "\twhile ((2 << l) <= m) l++;\n"
-        "\treturn l;\n"
-        "}\n"
-        "int $(name)_lsb(int s) {\n"
-        "\tif (s == 0) return 99;\n"
-        "\tint l = 0;\n"
-        "\twhile (((s >> l) & 1) == 0) l++;\n"
-        "\treturn l;\n"
-        "}\n"
+        "}\n" + _DMB_BITS
     )
+
+
+_DMB_BITS = (
+    # floor(log2(m)) and the power of two dividing s (s = 0: any).
+    "int $(name)_msb(int m) {\n"
+    "\tint l = 0;\n"
+    "\twhile ((2 << l) <= m) l++;\n"
+    "\treturn l;\n"
+    "}\n"
+    "int $(name)_lsb(int s) {\n"
+    "\tif (s == 0) return 99;\n"
+    "\tint l = 0;\n"
+    "\twhile (((s >> l) & 1) == 0) l++;\n"
+    "\treturn l;\n"
+    "}\n"
+)
+"""GLSL the box's aligned blocks (_dmb_blocks) use."""
 
 
 def _dmb_blocks(size: int, use: str) -> list[str]:
@@ -1667,6 +1674,352 @@ def _dmb_eight(g: str, size: int) -> tuple[str, list[str]]:
     return helpers, axis + rotated
 
 
+_DMB_AMD = False
+"""Round a 16-bit graph's halves as AMD GPUs do, not NVIDIA's (always up).
+
+Internal: for checking the shader against renders made on AMD.
+"""
+
+
+def _dmb_sixteen_helpers(g: str) -> str:
+    """Return GLSL for a 16-bit graph's stores, on levels held in floats.
+
+    A level is the integer k of a stored k / 65535; sums of a few of them
+    stay exact in float32. ``_lv`` is an input texel's level; ``_val`` the
+    float32 nearest k / 65535, as a texture read returns it (built from
+    the integer quotient: GPU division is not rounded to nearest; ``up``
+    whether it rounded up); ``_rd`` a bilinear read of two levels, the
+    filter's exact result rounded to float32. ``_u16`` stores a computed
+    float32 to the nearest level (halves up), exactly; ``_sr`` stores a
+    bilinear read and ``_pm`` the pyramid's mean of two levels, a half
+    always up (NVIDIA) or as its float32 rounded (AMD). ``_nc`` passes a
+    product through an opaque bit operation, so it is not fused into the
+    sum it feeds.
+    """
+    u = "uvec4" if g == "vec4" else "uint"
+    i = "ivec4" if g == "vec4" else "int"
+    if _DMB_AMD:
+        stored = (
+            f"\t{g} s = (256.0 - j) * a + j * b;\n"
+            f"\t{g} h = floor(s / 256.0);\n"
+            f"\t{g} lo = s - 256.0 * h;\n"
+            f"\t{g} up;\n"
+            "\t$(name)_val(s, up);\n"
+            f"\t{g} tie = 1.0 - min(abs(lo - 128.0), {g}(1.0));\n"
+            f"\treturn h + step({g}(128.5), lo) + tie * up;\n"
+        )
+        mean = (
+            f"\t{g} s = a + b;\n"
+            f"\t{g} h = floor(s * 0.5);\n"
+            f"\t{g} up;\n"
+            "\t$(name)_val(s, up);\n"
+            "\treturn h + (s - 2.0 * h) * up;\n"
+        )
+    else:
+        stored = "\treturn floor(((256.0 - j) * a + j * b + 128.0) / 256.0);\n"
+        mean = "\treturn floor((a + b + 1.0) * 0.5);\n"
+    return (
+        _DMB_BITS + f"{g} $(name)_lv(float i, float j, bool ymaj) {{\n"
+        "\treturn floor($(name)_p(i, j, ymaj) * 65535.0 + 0.5);\n"
+        "}\n"
+        f"{g} $(name)_val({g} k, out {g} up) {{\n"
+        f"\t{u} n = {u}(max(k, {g}(1.0)));\n"
+        f"\t{i} m = findMSB(n);\n"
+        f"\t{u} a = n << {u}(23 - m);\n"
+        # The quotient reaching 2^24: it is in the next binade.
+        f"\t{u} hz = (a + a / 65535u) >> 24u;\n"
+        "\ta = a >> hz;\n"
+        f"\t{u} r = a % 65535u;\n"
+        f"\t{u} big = (2u * r) / 65536u;\n"
+        f"\tup = {g}(max(big, {u}(1u) - min(r, {u}(1u))));\n"
+        f"\t{u} bits = ({u}(m + 111) << 23u) + (hz << 23u) + a + a / 65535u + big"
+        " - 8388608u;\n"
+        f"\treturn uintBitsToFloat(bits) * min(k, {g}(1.0));\n"
+        "}\n"
+        f"{g} $(name)_v({g} k) {{\n"
+        f"\t{g} up;\n"
+        "\treturn $(name)_val(k, up);\n"
+        "}\n"
+        f"{g} $(name)_rd({g} a, {g} b, float j) {{\n"
+        "\treturn $(name)_v((256.0 - j) * a + j * b) / 256.0;\n"
+        "}\n"
+        # floor(65535 v + 0.5) = floor(65536 v) + floor(frac - v + 0.5).
+        f"{g} $(name)_u16({g} v) {{\n"
+        "\tv = clamp(v, 0.0, 1.0);\n"
+        f"\t{g} x = v * 65536.0;\n"
+        f"\t{g} k = floor(x);\n"
+        f"\t{g} fx = x - k;\n"
+        "\treturn k + step(v, fx - 0.5) + step(v, fx + 0.5) - 1.0;\n"
+        "}\n"
+        f"{g} $(name)_sr({g} a, {g} b, float j) {{\n{stored}}}\n"
+        f"{g} $(name)_pm({g} a, {g} b) {{\n{mean}}}\n"
+        f"{g} $(name)_nc({g} v, uint z) {{\n"
+        "\treturn uintBitsToFloat(floatBitsToUint(v) ^ z);\n"
+        "}\n"
+        "float $(name)_ncf(float v, uint z) {\n"
+        "\treturn uintBitsToFloat(floatBitsToUint(v) ^ z);\n"
+        "}\n"
+        # c + h t (c an integer, h a multiple of 1/2 under 2^12): its floor,
+        # and the fraction's Q-rounded weight j in 256ths. h times t's top
+        # 11 bits is exact, so only t's own rounding is left.
+        "float $(name)_at(float c, float h, float t, out float j) {\n"
+        "\tfloat th = uintBitsToFloat(floatBitsToUint(t) & 4294959104u);\n"
+        "\tfloat ph = h * th;\n"
+        "\tfloat b = floor(ph);\n"
+        "\tfloat fr = (ph - b) + h * (t - th);\n"
+        "\tfloat fl = floor(fr);\n"
+        "\tj = floor((fr - fl) * 256.0 + 0.5);\n"
+        "\treturn c + b + fl;\n"
+        "}\n"
+        # 1 / x to the nearest float32 (x > 0, normal): long division.
+        "float $(name)_rcp(float x) {\n"
+        "\tuint bits = floatBitsToUint(x);\n"
+        "\tuint e = bits >> 23u;\n"
+        "\tuint m = (bits & 8388607u) | 8388608u;\n"
+        "\tif (m == 8388608u) return uintBitsToFloat((254u - e) << 23u);\n"
+        "\tuint q = 0u;\n"
+        "\tuint r = 8388608u;\n"
+        "\tfor (int it = 0; it < 24; it++) {\n"
+        "\t\tr *= 2u;\n"
+        "\t\tq *= 2u;\n"
+        "\t\tif (r >= m) { r -= m; q += 1u; }\n"
+        "\t}\n"
+        "\tif (2u * r > m) q += 1u;\n"
+        "\treturn uintBitsToFloat(((253u - e) << 23u) + q - 8388608u);\n"
+        "}\n"
+    )
+
+
+def _dmb_sixteen(g: str, size: int) -> tuple[str, list[str]]:
+    """Return a 16-bit graph's paths past R = 0.5: GLSL helpers and body lines.
+
+    The 8-bit graph's passes (_dmb_eight), Substance's intermediates stored
+    in 16 bits: integer pair means in the pyramid, the rotated frame and
+    back-resample stored reads, its box stored with 0.4 of a level added.
+    R, 1 / 2R and every term are float32 as the engine computes them (max
+    |cos|, |sin| exactly 1 only at angle 0, an ulp below at other quarter
+    turns), the terms summed from the + end along x, the - end along y.
+    """
+    n = num(float(1 << size))
+    helpers = (
+        _dmb_sixteen_helpers(g)
+        # Level L at major index s0 along minor index mn: input levels.
+        + f"{g} $(name)_blk(float s0, int L, float mn, bool ymaj) {{\n"
+        f"\t{g} st[13];\n"
+        "\tfor (int j = 0; j < (1 << L); j++) {\n"
+        f"\t\t{g} v = $(name)_lv(s0 + float(j), mn, ymaj);\n"
+        "\t\tint l = 0;\n"
+        "\t\tfor (int jj = j; (jj & 1) == 1; jj >>= 1) {\n"
+        "\t\t\tv = $(name)_pm(st[l], v);\n"
+        "\t\t\tl++;\n"
+        "\t\t}\n"
+        "\t\tst[l] = v;\n"
+        "\t}\n"
+        "\treturn st[L];\n"
+        "}\n"
+        # Level L of the stored frame at row s0, columns c and c + 1, as
+        # read: past the seam a fractional column over, between two
+        # columns' levels.
+        f"void $(name)_blk2(float c, float s0, int L, float t, float X0, bool ymaj,"
+        f" out {g} a, out {g} b) {{\n"
+        f"\tfloat k = floor(s0 / {n});\n"
+        f"\tfloat rm = s0 - k * {n};\n"
+        "\tfloat phi;\n"
+        f"\tfloat ca = $(name)_at(c, k * {n}, t, phi);\n"
+        "\tbool seam = k != 0.0;\n"
+        f"\t{g} s0a[13]; {g} s1a[13]; {g} s2a[13];\n"
+        "\tfor (int j = 0; j < (1 << L); j++) {\n"
+        "\t\tfloat r = rm + float(j);\n"
+        "\t\tfloat w;\n"
+        "\t\tfloat y0 = $(name)_at(ca, r - X0, t, w);\n"
+        f"\t\t{g} p1 = $(name)_lv(r, y0 + 1.0, ymaj);\n"
+        f"\t\t{g} p2 = $(name)_lv(r, y0 + 2.0, ymaj);\n"
+        f"\t\t{g} v0 = $(name)_sr($(name)_lv(r, y0, ymaj), p1, w);\n"
+        f"\t\t{g} v1 = $(name)_sr(p1, p2, w);\n"
+        f"\t\t{g} v2 = seam ? $(name)_sr(p2, $(name)_lv(r, y0 + 3.0, ymaj), w)"
+        f" : {g}(0.0);\n"
+        "\t\tint l = 0;\n"
+        "\t\tfor (int jj = j; (jj & 1) == 1; jj >>= 1) {\n"
+        "\t\t\tv0 = $(name)_pm(s0a[l], v0);\n"
+        "\t\t\tv1 = $(name)_pm(s1a[l], v1);\n"
+        "\t\t\tif (seam) v2 = $(name)_pm(s2a[l], v2);\n"
+        "\t\t\tl++;\n"
+        "\t\t}\n"
+        "\t\ts0a[l] = v0; s1a[l] = v1; s2a[l] = v2;\n"
+        "\t}\n"
+        "\tif (!seam) {\n"
+        "\t\ta = $(name)_v(s0a[L]); b = $(name)_v(s1a[L]);\n"
+        "\t\treturn;\n"
+        "\t}\n"
+        "\ta = $(name)_rd(s0a[L], s1a[L], phi);\n"
+        "\tb = $(name)_rd(s1a[L], s2a[L], phi);\n"
+        "}\n"
+    )
+    # Every product a sum takes goes through _nc: the engine's sums, unfused.
+    setup = [
+        "uint z = uint(uv.x > 1e30);",
+        # cos and sin to about an ulp (the GPU's own are coarser, and the
+        # slope places every frame read): the angle less its nearest
+        # quarter turn, by series.
+        "float ra = A - floor(A + 0.5);",
+        "float qd = floor(ra * 4.0 + 0.5);",
+        "float x = (ra - 0.25 * qd) * 6.28318531;",
+        "float x2 = x * x;",
+        (
+            "float sx = x * (1.0 + x2 * (-1.0 / 6.0 + x2 * (1.0 / 120.0"
+            " + x2 * (-1.0 / 5040.0 + x2 * (1.0 / 362880.0)))));"
+        ),
+        (
+            "float cx = 1.0 + x2 * (-0.5 + x2 * (1.0 / 24.0 + x2 * (-1.0 / 720.0"
+            " + x2 * (1.0 / 40320.0 + x2 * (-1.0 / 3628800.0)))));"
+        ),
+        "float qm = mod(qd, 4.0);",
+        "cs = qm == 0.0 ? cx : qm == 1.0 ? -sx : qm == 2.0 ? -cx : sx;",
+        "sn = qm == 0.0 ? sx : qm == 1.0 ? cx : qm == 2.0 ? -sx : -cx;",
+        "if (abs(a8 - m8) >= 1e-5 || mod(m8, 2.0) != 1.0) {",
+        "\tt = ymaj ? cs / sn : sn / cs;",
+        "\tif (abs(t) < 1e-6) t = 0.0;",
+        "}",
+        "float mx = max(abs(cs), abs(sn));",
+        "if (abs(a8 - m8) < 1e-5 && mod(m8, 2.0) == 1.0) mx = 0.70710677;",
+        "float a4 = A * 4.0;",
+        "if (a4 == floor(a4)) mx = A == 0.0 ? 1.0 : 0.99999994;",
+        "R = 0.5 + $(name)_ncf((Lpx - 0.5) * mx, z);",
+        "n = int(ceil(R - 0.5));",
+        "f = R + 0.5 - float(n);",
+        "float inv = $(name)_rcp(2.0 * R);",
+    ]
+    small = [
+        "if (n <= 1) {",
+        "\tfloat ws = f * inv;",
+        "\tfloat j;",
+        "\tfloat y0 = $(name)_at(pq.y, 1.0, t, j);",
+        (
+            f"\t{g} p = $(name)_rd($(name)_lv(pq.x + 1.0, y0, ymaj),"
+            " $(name)_lv(pq.x + 1.0, y0 + 1.0, ymaj), j);"
+        ),
+        "\ty0 = $(name)_at(pq.y, -1.0, t, j);",
+        (
+            f"\t{g} m = $(name)_rd($(name)_lv(pq.x - 1.0, y0, ymaj),"
+            " $(name)_lv(pq.x - 1.0, y0 + 1.0, ymaj), j);"
+        ),
+        f"\t{g} c = $(name)_v($(name)_lv(pq.x, pq.y, ymaj));",
+        (
+            f"\t{g} v = ($(name)_nc(p * ws, z) + $(name)_nc(c * inv, z))"
+            " + $(name)_nc(m * ws, z);"
+        ),
+        "\treturn $(name)_v($(name)_u16(v));",
+        "}",
+    ]
+
+    # The box's terms are summed from its + end along x, from its - end
+    # along y: its aligned blocks found from that end (the same blocks).
+    def blocks(use: str) -> list[str]:
+        mask = (1 << size) - 1
+        return [
+            "if (ymaj) {",
+            "\tint start = sB;",
+            *("\t" + line for line in _dmb_blocks(size, use)),
+            "} else {",
+            "\tint e = eB;",
+            "\tfor (int it = 0; it < 64 && e - sB >= 2; it++) {",
+            f"\t\tint L = min($(name)_msb(e - sB), $(name)_lsb(e & {mask}));",
+            "\t\tint start = e - (1 << L);",
+            f"\t\t{use}",
+            "\t\te = start;",
+            "\t}",
+            "}",
+        ]
+
+    # The whole texels left at either end: the - end's when the first is
+    # odd, the + end's when one is over after the blocks.
+    ends = [
+        "int first = int(pq.x) - (n - 1);",
+        "int end = first + 2 * n - 1;",
+        "bool lo = (first & 1) == 1;",
+        "int sB = lo ? first + 1 : first;",
+        "bool hi = ((end - sB) & 1) == 1;",
+        "int eB = hi ? end - 1 : end;",
+    ]
+    # A partial end tap (at b) read with its whole neighbor (a) at once.
+    mrg = (
+        "$(name)_nc($(name)_rd($(name)_lv({a}, mn, ymaj), $(name)_lv({b}, mn, ymaj),"
+        " Qj) * (f + 1.0), z)"
+    )
+    lone = "$(name)_nc(f * $(name)_v($(name)_lv({a}, mn, ymaj)), z)"
+    axis = [
+        "if (t == 0.0) {",
+        "\tfloat Qj = 256.0 * $(name)_q(f / (1.0 + f));",
+        "\tfloat mn = pq.y;",
+        *("\t" + line for line in ends),
+        "\tif (n == 2) {",  # in this order on both axes
+        f"\t\t{g} e0 = " + mrg.format(a="float(first)", b="float(first - 1)") + ";",
+        f"\t\t{g} e1 = " + mrg.format(a="float(first + 2)", b="float(first + 3)") + ";",
+        f"\t\t{g} mid = $(name)_v($(name)_lv(float(first + 1), mn, ymaj));",
+        "\t\treturn $(name)_v($(name)_u16($(name)_nc(((e0 + mid) + e1) * inv, z)));",
+        "\t}",
+        # The ends: merged with their whole neighbors, or partial alone.
+        f"\t{g} e0 = lo ? "
+        + mrg.format(a="float(first)", b="float(first - 1)")
+        + " : "
+        + lone.format(a="float(first - 1)")
+        + ";",
+        f"\t{g} e1 = hi ? "
+        + mrg.format(a="float(eB)", b="float(eB + 1)")
+        + " : "
+        + lone.format(a="float(eB)")
+        + ";",
+        f"\t{g} acc = ymaj ? e0 : e1;",
+        *(
+            "\t" + line
+            for line in blocks(
+                "acc = acc + float(1 << L)"
+                " * $(name)_v($(name)_blk(float(start), L, mn, ymaj));"
+            )
+        ),
+        "\tacc = acc + (ymaj ? e1 : e0);",
+        "\treturn $(name)_v($(name)_u16($(name)_nc(acc * inv, z)));",
+        "}",
+    ]
+
+    def call(at: str, lv: str = "0") -> str:
+        return f"$(name)_blk2(c0, float({at}), {lv}, t, X0, ymaj, a, b);"
+
+    add = "accA = accA + {k}a; accB = accB + {k}b;"
+    whole = {
+        "lo": ["if (lo) {", "\t" + call("first"), "\t" + add.format(k=""), "}"],
+        "hi": ["if (hi) {", "\t" + call("end - 1"), "\t" + add.format(k=""), "}"],
+    }
+    rotated = [
+        "float jg;",
+        "float c0 = $(name)_at(pq.y, X0 - pq.x, t, jg);",
+        *ends,
+        f"{g} a; {g} b;",
+        call("first - 1"),
+        f"{g} e0A = $(name)_nc(f * a, z); {g} e0B = $(name)_nc(f * b, z);",
+        call("end"),
+        f"{g} e1A = $(name)_nc(f * a, z); {g} e1B = $(name)_nc(f * b, z);",
+        f"{g} accA = ymaj ? e0A : e1A; {g} accB = ymaj ? e0B : e1B;",
+        "if (ymaj) {",
+        *("\t" + line for line in whole["lo"]),
+        "} else {",
+        *("\t" + line for line in whole["hi"]),
+        "}",
+        *blocks(call("start", "L") + " " + add.format(k="float(1 << L) * ")),
+        "if (ymaj) {",
+        *("\t" + line for line in whole["hi"]),
+        "} else {",
+        *("\t" + line for line in whole["lo"]),
+        "}",
+        "accA = accA + (ymaj ? e1A : e0A); accB = accB + (ymaj ? e1B : e0B);",
+        # 0.4 of a level, added to the rounded product.
+        f"{g} gA = $(name)_u16($(name)_nc(accA * inv, z) + 6.103609e-06);",
+        f"{g} gB = $(name)_u16($(name)_nc(accB * inv, z) + 6.103609e-06);",
+        "return $(name)_v($(name)_sr(gA, gB, jg));",
+    ]
+    return helpers, setup + small + axis + rotated
+
+
 def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Directional motion blur: a box of half-width R steps along the angle.
 
@@ -1691,7 +2044,9 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     GPU's texture filter does; texels are read at their centers.
 
     A node stored in 8 bits follows Substance's 8-bit arithmetic instead
-    (_dmb_eight): its stores, its pyramid, its bias.
+    (_dmb_eight): its stores, its pyramid, its bias. One stored in 16 bits
+    follows the same passes with 16-bit stores (_dmb_sixteen), on its
+    input's exact levels (a 32-bit buffer).
 
     Intensity and angle are live: everything is computed from them in the
     shader, so the tap loops run to a bound counted per pixel.
@@ -1699,14 +2054,18 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     t = "rgba" if color else "f"
     g = "vec4" if color else "float"
     n = num(float(1 << size))
-    eight = (node.flags >> 4 & 3) == 0
+    fmt = node.flags >> 4 & 3
+    eight, sixteen = fmt == 0, fmt == 1
     start = [
-        _dmb_setup(node, size),
+        _dmb_setup(node, size, lpx=sixteen),
         f"vec2 pq = floor(uv * {n});",
         "if (ymaj) pq = pq.yx;",
         "if (R <= 0.5) return $(name)_p(pq.x, pq.y, ymaj);",
     ]
-    if eight:
+    if sixteen:
+        helpers, large = _dmb_sixteen(g, size)
+        lines = [*start, *large]
+    elif eight:
         helpers, large = _dmb_eight(g, size)
         lines = [
             *start,
@@ -1795,7 +2154,9 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
         + helpers
         + made["shader_model"]["instance"]
     )
-    return buffered(made, ["input"], {"input"}, size)
+    # 16 bits: the input's levels exactly, so a 32-bit buffer.
+    precise = {"input"} if sixteen else set()
+    return buffered(made, ["input"], {"input"}, size, precise=precise)
 
 
 def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:

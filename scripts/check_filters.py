@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.probe import COLOR
@@ -248,12 +249,15 @@ def dmb_cases() -> list[dict]:
     At 2048 px both intensities take the large path (R past 1.5 texels);
     intensity 0.15 (R 1.2 at most) the small one. Biomech's blurs are 1/8
     turn at 0.7326, in 8 bits; -1/8 and 1/4 take its other diagonal and the
-    y axis.
+    y axis. In 16 bits only: long boxes (R 128) on both axes, where the
+    pyramid's rounded halves add up, and 3/16 turn.
     """
     angles = ("0", "0.0625", "0.125", "0.4375")
-    grid = [(a, i) for a in angles for i in ("0.7326", "5.86")]
-    grid += [("0", "0.15"), ("0.0625", "0.15")]
-    grid += [("-0.125", "0.7326"), ("0.25", "5.86")]
+    both = (16, 8)
+    grid = [(a, i, both) for a in angles for i in ("0.7326", "5.86")]
+    grid += [("0", "0.15", both), ("0.0625", "0.15", both)]
+    grid += [("-0.125", "0.7326", both), ("0.25", "5.86", both)]
+    grid += [("0", "16", (16,)), ("0.25", "16", (16,)), ("0.1875", "5.86", (16,))]
     return [
         {
             "tag": f"dmb_{angle}_{intensity}_{bits}".replace(".", "p").replace(
@@ -264,8 +268,8 @@ def dmb_cases() -> list[dict]:
             "params": (("intensity", F1, intensity), ("mblurangle", F1, angle)),
             "format16": bits == 16,
         }
-        for angle, intensity in grid
-        for bits in (16, 8)
+        for angle, intensity, formats in grid
+        for bits in formats
     ]
 
 
@@ -790,7 +794,14 @@ def main() -> None:
     parser.add_argument("tags", nargs="*")
     parser.add_argument("--mm", type=Path, required=True, help="material_maker.exe")
     parser.add_argument("-o", "--out", type=Path, default=Path("check_out"))
+    parser.add_argument(
+        "--amd",
+        action="store_true",
+        help="16-bit directional motion blurs round halves as AMD GPUs do, to"
+        " compare with renders made on one (by default as NVIDIA's do)",
+    )
     args = parser.parse_args()
+    translate._DMB_AMD = args.amd  # noqa: SLF001
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     images = test_images(out)
