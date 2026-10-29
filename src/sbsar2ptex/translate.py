@@ -3496,7 +3496,9 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     )
     _CTX.helpers.append(fxglsl.store_glsl(layout))
     made = shader(name, inputs, t, "\n".join(lines))
-    sub = buffered(made, [nm for nm, _ in inputs], set(images), size, precise=set())
+    # (16-bit float buffers: an 8-bit image's levels come back exactly
+    # from them, fxglsl.levels_glsl, as from Material Maker's images)
+    sub = buffered(made, [nm for nm, _ in inputs], set(images), size)
     for k in mips:
         nodes, wires_, last = _fx_mip_atlas(name, k, f"{name}_pattern{k}_buf", layout)
         sub.nodes += nodes
