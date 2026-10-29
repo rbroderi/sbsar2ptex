@@ -1,9 +1,18 @@
 """The procedural material wiring and the library cache."""
 
+import json
 import pickle
+import re
+from pathlib import Path
 
 from sbsar2ptex import library
+from sbsar2ptex.archive import member
+from sbsar2ptex.archive import read_archive
+from sbsar2ptex.convert import describe
+from sbsar2ptex.procedural import build
 from sbsar2ptex.procedural import material
+
+DATA = Path(__file__).parent / "data"
 
 
 def test_material_wires_slots_and_converts_normals() -> None:
@@ -73,3 +82,19 @@ def test_excluded_graphs_are_published() -> None:
     text = library.publishable(hidden + rootless)
     assert library.DISABLED not in text
     assert '<root><rootOutputs><rootOutput><output v="9"/>' in text
+
+
+def test_experimental_graphs_say_what_they_require(tmp_path) -> None:
+    files = read_archive(DATA / "levels_gray.sbsar")
+    graph = describe(member(files, ".xml").decode("utf-8"))[0]
+    plain = build(files, graph, tmp_path, size=8, flat=True)
+    made = build(files, graph, tmp_path, size=8, flat=True, experimental=True)
+    assert "requires" not in plain
+    # no loop in it: the fork's version, no features
+    requires = {"material_maker_mod": ">=1.17", "features": []}
+    assert made.pop("requires") == requires
+    line = re.search(r"(?m)^requires: (\{.*\})$", made["longdesc"])
+    assert line is not None
+    assert json.loads(line.group(1)) == requires
+    made["longdesc"] = made["longdesc"][: line.start() - 1]
+    assert json.dumps(made) == json.dumps(plain)

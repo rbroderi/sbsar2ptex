@@ -32,6 +32,7 @@ from dataclasses import field
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from typing import Protocol
 
 from sbsar2ptex import fxmap
 from sbsar2ptex import fxsplat
@@ -72,9 +73,6 @@ class GraphInput:
     scope: str = ""
     """A library node instance's (libparams.knobs): its parameter is the
     instance's, INSTANCE_PARAM-named, not the graph's."""
-    fixed: bool = False
-    """Read as its default, a constant, not a parameter (one the cooked
-    graph's structure was made for)."""
 
 
 @dataclass
@@ -264,6 +262,17 @@ def param_name(identifier: str) -> str:
     return "p_" + "_".join(part for part in word.split("_") if part)
 
 
+def input_param(gi: GraphInput) -> str:
+    """Return the Material Maker parameter name of graph input ``gi``.
+
+    A library node instance's (its scope) is INSTANCE_PARAM-named.
+    """
+    name = param_name(gi.identifier)
+    if gi.scope:
+        return INSTANCE_PARAM + gi.scope + "_" + name.removeprefix(GRAPH_PARAM)
+    return name
+
+
 def _param_for(uid: int) -> str:
     """Declare graph input ``uid`` as a parameter of the next shader; return GLSL.
 
@@ -275,16 +284,7 @@ def _param_for(uid: int) -> str:
         msg = f"function reads unknown input {uid:#x}"
         raise UnsupportedError(msg)
     integer = gi.type >= IN_INT
-    if gi.fixed:
-        width = _INPUT_GLSL.get(gi.type, 1)
-        parts = [str(int(v)) if integer else num(float(v)) for v in gi.default[:width]]
-        if width == 1:
-            return parts[0]
-        kind = "ivec" if gi.type >= IN_INT2 else "vec"
-        return f"{kind}{width}({', '.join(parts)})"
-    name = param_name(gi.identifier)
-    if gi.scope:
-        name = INSTANCE_PARAM + gi.scope + "_" + name.removeprefix(GRAPH_PARAM)
+    name = input_param(gi)
     label = gi.label or gi.identifier
     if gi.type == IN_FLOAT4:
         r, g, b, a = (list(gi.default) + [0.0] * 4)[:4]
@@ -618,6 +618,27 @@ class Sub:
     wires: list[dict[str, Any]]
     ports: list[tuple[str, str, int]]
     output: str
+
+
+class Loop(Protocol):
+    """Library nodes made one Material Maker node (sbsar2ptex.loops).
+
+    ``members`` are the nodes it computes, ``inputs`` the nodes it reads,
+    by its Sub's port names.
+    """
+
+    @property
+    def members(self) -> set[int]: ...  # noqa: D102
+
+    inputs: dict[str, int]
+
+    def make(self, name: str, nodes: list[Node], size: int) -> Sub:
+        """Return it as Material Maker nodes, ``size`` (log2) square."""
+        ...
+
+    def rounds(self, nodes: list[Node]) -> bool:
+        """Return whether its image is stored in 8 or 16 bits (stored)."""
+        ...
 
 
 def buffer(
@@ -3490,6 +3511,7 @@ def translate_graph(
     origins: dict[str, int] | None = None,
     aliases: dict[str, str] | None = None,
     library: dict[int, tuple[Node, dict[int, GraphInput]]] | None = None,
+    loops: dict[int, Loop] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -3503,7 +3525,9 @@ def translate_graph(
     ``library`` gives the nodes of library node instances whose settings
     were recovered (libparams) their template node and the inputs its
     functions read: they are translated from it (node_shader), the
-    library node's parameters live knobs of the instance.
+    library node's parameters live knobs of the instance. ``loops``
+    (sbsar2ptex.loops), by their last node, are made one node each in
+    place of all theirs, which must be library ones.
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
     _CTX = _Context(size=size, inputs=dict(inputs or {}), data_dir=data_dir)
@@ -3526,6 +3550,15 @@ def translate_graph(
     # size, which larger nodes read through a cubic B-spline (Substance's
     # enlargement; bilinear leaves its texels' corners).
     sizes = {k: _output_size(nodes[k], size) for k in need}
+    # a loop's nodes all one size, or it stays unrolled
+    loops = {
+        k: loop
+        for k, loop in (loops or {}).items()
+        if k in need
+        and k in (library or {})
+        and len({sizes[m] for m in loop.members}) == 1
+    }
+    folded = {m for k, loop in loops.items() for m in loop.members if m != k}
     levels: dict[tuple[int, int], str] = {}
     rounded: set[str] = set()  # outputs stored in 8 or 16 bits (stored)
     smooth: dict[int, str] = {}
@@ -3577,7 +3610,11 @@ def translate_graph(
             if origins is not None:
                 origins[name] = k
             continue
+        if k in folded:
+            continue
         own = sizes[k]
+        loop = loops.get(k)
+        sources = loop.inputs if loop is not None else node.inputs
         if library and k in library:
             template, knobs = library[k]
             graph_wide = _CTX.inputs
@@ -3588,7 +3625,10 @@ def translate_graph(
                 for uid, gi in knobs.items()
             }
             try:
-                made = node_shader(node, name, own, template)
+                if loop is not None:
+                    made = loop.make(name, nodes, own)
+                else:
+                    made = node_shader(node, name, own, template)
             finally:
                 _CTX.inputs = graph_wide
         else:
@@ -3598,7 +3638,7 @@ def translate_graph(
             made = Sub(
                 [shader_node], [], [(n, name, i) for i, n in enumerate(names)], name
             )
-        if stored(made, node):
+        if stored(made, node) or (loop is not None and loop.rounds(nodes)):
             rounded.add(made.output)
         if own != size:
             made.nodes.append(buffer(f"{name}_size", own))
@@ -3609,7 +3649,7 @@ def translate_graph(
             origins.update((n["name"], k) for n in made.nodes)
         wires += made.wires
         wires += [
-            wire(fed(node.inputs[inp], own), to, port) for inp, to, port in made.ports
+            wire(fed(sources[inp], own), to, port) for inp, to, port in made.ports
         ]
         out_of[k] = made.output
     mm, wires = merge_buffers(mm, wires)
@@ -3642,12 +3682,19 @@ def output_type(node: dict[str, Any]) -> str:
 
 
 def declared_params(mm: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Return the parameters shader nodes declare, inside subgraphs too."""
+    """Return the parameters shader nodes declare, inside subgraphs too.
+
+    And a subgraph's named parameters (an iterate's count reads one: loops).
+    """
     out: dict[str, dict[str, Any]] = {}
     for node in mm:
         if node["type"] == "shader":
             for prm in node["shader_model"]["parameters"]:
                 out.setdefault(prm["name"], prm)
+        elif node["type"] == "remote":
+            for w in node["widgets"]:
+                if w["type"] == "named_parameter":
+                    out.setdefault(w["name"], {**w, "type": "float"})
         elif node["type"] == "graph":
             out.update(
                 (k, v)

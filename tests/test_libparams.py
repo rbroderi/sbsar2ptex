@@ -85,3 +85,14 @@ def test_an_instance_differing_where_the_template_is_fixed_is_declined() -> None
 
 def test_values_print_as_typed() -> None:
     assert _typed(struct.unpack("<f", struct.pack("<f", 3.22))[0]) == 3.22
+
+
+def test_an_integer_parameter_is_a_live_knob() -> None:
+    # Slope blur's Samples: its template is cooked for any value, so it is
+    # a knob like any other, not its solved value frozen.
+    m, _ = instance_of(0.15)
+    samples = 0x0BADF00D
+    m.template.inputs[samples] = GraphInput("Samples", 4, [8], "Samples")
+    reads = knobs(m, {RADIUS: [0.3], samples: [32]}, {})
+    assert (reads[samples].type, reads[samples].default) == (4, [32])
+    assert reads[samples].scope == "n0"

@@ -86,7 +86,13 @@ the rest keep their constants).
 - `--size` is the resolution the graph is built for (FX-Map textures, blur
   widths in texels); the material's own by default, as Substance renders it.
   Material Maker keeps every buffer in GPU memory, so a large graph built at
-  2048 px can need more than a graphics card has.
+  2048 px can need more than a graphics card has;
+- `--experimental` uses the [material-maker-mod](https://github.com/rbroderi/material-maker-mod)
+  fork's features (the graph says it requires them): a Slope blur becomes
+  one iterate buffer running its warp Samples times, not 63 nodes and some
+  30 buffers (Biomech: 341 buffers fewer). Its pixels are those of the
+  unrolled nodes, each reading the stored image of the one before
+  (`scripts/check_loops.py`).
 
 ## Decompile
 

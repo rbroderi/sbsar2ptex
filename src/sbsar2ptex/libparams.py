@@ -503,9 +503,11 @@ def knobs(
 
     Its solved parameters, as the instance's own (named after its root, so
     that 131 Highpasses keep 131 Radiuses); the template's $outputsize and
-    $randomseed as the graph's (``inputs``). An integer parameter often
-    decides the cooked graph's structure (Slope blur's Samples: its count
-    of steps), which a knob could not change: it stays the solved constant.
+    $randomseed as the graph's (``inputs``). Integer parameters are knobs
+    too: a solved one is read by the template's functions only, its nodes
+    cooked for any value of it (Slope blur's 32 warps and 31 blends,
+    whatever its Samples, which divides the warps' intensity and switches
+    the blends past it off).
     """
     by_identifier = {gi.identifier: gi for gi in inputs.values()}
     out = {}
@@ -514,7 +516,5 @@ def knobs(
             if gi.identifier in by_identifier:
                 out[uid] = by_identifier[gi.identifier]
         elif uid in solved:
-            out[uid] = replace(
-                gi, default=solved[uid], scope=f"n{m.root}", fixed=gi.type == IN_INT
-            )
+            out[uid] = replace(gi, default=solved[uid], scope=f"n{m.root}")
     return out

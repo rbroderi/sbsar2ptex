@@ -12,6 +12,7 @@ Files a graph needs (embedded bitmaps, precomputed FX-Map textures) go in
 a data folder beside the .ptex.
 """
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ from sbsar2ptex.convert import choose
 from sbsar2ptex.libparams import knobs
 from sbsar2ptex.libparams import solve
 from sbsar2ptex.library import recognized
+from sbsar2ptex.loops import FEATURES
+from sbsar2ptex.loops import slope_blurs
 from sbsar2ptex.recognize import Match
 from sbsar2ptex.recognize import Template
 from sbsar2ptex.recognize import resembler
@@ -35,6 +38,8 @@ from sbsar2ptex.translate import graph_inputs
 from sbsar2ptex.translate import translate_graph
 
 LENGTH_SIZE = 4
+MM_MOD = ">=1.17"
+"""The material-maker-mod version --experimental graphs need."""
 
 
 def bitmaps(asm: Asm, folder: Path) -> dict[int, str]:
@@ -133,6 +138,7 @@ def build(
     flat: bool = False,
     aliases: dict[str, str] | None = None,
     matches: Path | None = None,
+    experimental: bool = False,
 ) -> dict[str, Any]:
     """Return the Material Maker graph translating ``graph``.
 
@@ -140,7 +146,9 @@ def build(
     graph uses; ``library`` the templates for naming library nodes (none:
     groups are named by content); ``flat``: no subgraphs; ``aliases`` is
     filled as translate_graph fills it; ``matches`` a folder keeping the
-    library nodes found (library.recognized).
+    library nodes found (library.recognized). ``experimental`` uses the
+    material-maker-mod fork's features (sbsar2ptex.loops), and says so: a
+    "requires" key and long description line, as the fork reads them.
     """
     xml = member(files, ".xml").decode("utf-8")
     asm = Asm(member(files, ".sbsasm"))
@@ -159,6 +167,8 @@ def build(
         if library and not flat
         else []
     )
+    lib = library_nodes(found, nodes, inputs, size)
+    loops = slope_blurs(found, nodes, lib) if experimental else {}
     mm, wires, outs = translate_graph(
         nodes,
         wanted,
@@ -168,7 +178,8 @@ def build(
         data_dir=data / "fxmaps",
         origins=origins,
         aliases=aliases,
-        library=library_nodes(found, nodes, inputs, size),
+        library=lib,
+        loops=loops,
     )
     if not flat:
         instances = [
@@ -189,7 +200,7 @@ def build(
     extra, extra_wires = material(
         slots, normal_directx="opengl" not in normal_id, size=size
     )
-    return {
+    made = {
         "name": "material",
         "type": "graph",
         "label": graph.label or "Graph",
@@ -201,3 +212,9 @@ def build(
         "nodes": [*mm, *extra],
         "connections": [*wires, *extra_wires],
     }
+    if experimental:
+        used = FEATURES if any(loop.made for loop in loops.values()) else ()
+        requires = {"material_maker_mod": MM_MOD, "features": list(used)}
+        made["requires"] = requires
+        made["longdesc"] += f"\nrequires: {json.dumps(requires)}"
+    return made

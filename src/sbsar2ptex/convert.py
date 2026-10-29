@@ -391,6 +391,12 @@ def main() -> None:
         "--flat", action="store_true", help="with --procedural: no subgraphs"
     )
     parser.add_argument(
+        "--experimental",
+        action="store_true",
+        help="with --procedural: use the material-maker-mod fork's iterate"
+        " buffers for loops (Slope blur); the graph then requires the fork",
+    )
+    parser.add_argument(
         "--no-library",
         action="store_true",
         help="with --procedural: do not name Substance library nodes",
@@ -515,6 +521,7 @@ def procedural_main(
             library=templates,
             flat=args.flat,
             matches=(args.library or library.cache_dir()) / "matches",
+            experimental=args.experimental,
         )
     except ValueError as e:  # bytecode this decoder cannot read
         sys.exit(f"{args.sbsar}: {e}")
