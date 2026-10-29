@@ -42,6 +42,7 @@ from sbsar2ptex.probe import sbs
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import graph_inputs
+from sbsar2ptex.translate import no_auto_buffers
 from sbsar2ptex.translate import output_type
 from sbsar2ptex.translate import param_name
 from sbsar2ptex.translate import shader
@@ -773,7 +774,7 @@ def material_graph(mm_nodes, wires, source: tuple[str, int], color: bool) -> dic
             {"from": "export", "from_port": 0, "to": "alpha", "to_port": 0},
             {"from": "alpha", "from_port": 0, "to": "Material", "to_port": 7},
         ]
-    return {
+    graph = {
         "name": "check",
         "type": "graph",
         "label": "Graph",
@@ -785,6 +786,8 @@ def material_graph(mm_nodes, wires, source: tuple[str, int], color: bool) -> dic
         "nodes": nodes,
         "connections": wires,
     }
+    no_auto_buffers(graph)
+    return graph
 
 
 def case(c: tuple | dict) -> dict:

@@ -37,6 +37,7 @@ from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.structure import nest
 from sbsar2ptex.translate import GraphInput
 from sbsar2ptex.translate import graph_inputs
+from sbsar2ptex.translate import no_auto_buffers
 from sbsar2ptex.translate import translate_graph
 
 LENGTH_SIZE = 4
@@ -224,4 +225,5 @@ def build(
         requires = {"material_maker_mod": MM_MOD, "features": list(used)}
         made["requires"] = requires
         made["longdesc"] += f"\nrequires: {json.dumps(requires)}"
+    no_auto_buffers(made)
     return made
