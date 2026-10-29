@@ -8,7 +8,7 @@ single-filter graphs (see tests/test_translate.py and sbsasm-probe):
 - levels: v = clamp((x - in_low) / (in_high - in_low)), the range at least
   1e-4 wide; v = pow(v, g(mid)),
   g = 1 + 16 (mid - 0.5) above 0.5, 1 / (1 + 16 (0.5 - mid)) below; out =
-  mix(out_low, out_high, v).
+  mix(out_low, out_high, v); every setting clamped to [0, 1] first.
 - blend: out = clamp(d + (f(s, d) - d) * o), o = opacity (times the opacity
   input, and for color the source's alpha); color alpha is "over",
   sa o + da (1 - sa o); switch mixes rgba by o alone.
@@ -1059,11 +1059,12 @@ def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
               "out_low": "Output low", "out_high": "Output high"}  # fmt: skip
     p = {k: knob(k, labels[k], v) for k, v in p.items()}
     g = "vec4" if color else "float"
+    # every setting is clamped to [0, 1], as Substance's are
     lines = [
         f"{g} x = $input(uv);",
-        f"{g} lo = {vec(p['in_low'], n)};",
-        f"{g} hi = {vec(p['in_high'], n)};",
-        f"{g} m = {vec(p['in_mid'], n)};",
+        f"{g} lo = clamp({vec(p['in_low'], n)}, 0.0, 1.0);",
+        f"{g} hi = clamp({vec(p['in_high'], n)}, 0.0, 1.0);",
+        f"{g} m = clamp({vec(p['in_mid'], n)}, 0.0, 1.0);",
         # an input range narrower than 1e-4 is 1e-4 wide: an empty one ramps
         # over the 1e-4 above in_low, which a 16-bit input lands on
         f"{g} d = hi - lo;",
@@ -1077,7 +1078,8 @@ def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
             "x = pow(x, mix(1.0 / (1.0 + 16.0 * (0.5 - m)),"
             " 1.0 + 16.0 * (m - 0.5), step(0.5, m)));"
         ),
-        f"return mix({vec(p['out_low'], n)}, {vec(p['out_high'], n)}, x);",
+        f"{g} ol = clamp({vec(p['out_low'], n)}, 0.0, 1.0);",
+        f"return mix(ol, clamp({vec(p['out_high'], n)}, 0.0, 1.0), x);",
     ]
     return shader(name, [("input", t)], t, "\n".join(lines)), ["input"]
 

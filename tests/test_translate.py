@@ -97,6 +97,9 @@ def test_empty_levels_range_ramps(*, color: bool) -> None:
     assert "1e-4" in code
     assert "step(ceil" not in code
     assert "x = clamp((x - lo) / d, 0.0, 1.0);" in code
+    # settings outside [0, 1] are clamped, as Substance's are; still knobs
+    assert code.count("clamp(") == 6
+    assert "$in_low" in code
     nodes, wires, outs = translated("blend_gray")
     blend = outs["output"][0]
     by_port = {w["to_port"]: w["from"] for w in wires if w["to"] == blend}

@@ -89,6 +89,19 @@ def cases() -> list[tuple]:
                 )
                 for i, edges in enumerate(("0.5 0.5 0.5 0.5", "0 0.25 0.75 1"))
             ),
+            # settings outside [0, 1] (Biomech's in -1..1, out -0.125..1.125)
+            *(
+                (f"levels_wide{i}_{k}", "levels", kind, ((pname, F4, v),))
+                for i, (pname, v) in enumerate(
+                    (
+                        ("levelinlow", "-1 -0.5 -0.25 -1"),
+                        ("levelinhigh", "1.125 1.5 2 1.125"),
+                        ("leveloutlow", "-0.125 -0.5 -1 -0.125"),
+                        ("levelouthigh", "1.125 1.5 2 1.125"),
+                        ("levelinmid", "-0.25 1.25 -1 2"),
+                    )
+                )
+            ),
             # A computed 0.5 (half of min(2 v, 1), from v = 0.5 up) misses a
             # 0.5 threshold: stored in 8 bits it is 127 / 255 on NVIDIA, as
             # in Adobe's baked maps. An AMD GPU rounds the tie up, so render
