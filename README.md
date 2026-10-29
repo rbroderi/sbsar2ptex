@@ -99,7 +99,8 @@ the rest keep their constants).
   states). Its knobs are those of one period, all its periods alike;
   periods translated otherwise (the first or last, by what reads them)
   stay unrolled. Its pixels are the unrolled translation's
-  (`scripts/check_chains.py`).
+  (`scripts/check_chains.py`). Biomech, both kinds of loop: 1,205 buffers
+  and 3,449 nodes, not 2,519 and 5,980.
 
 ## Decompile
 
