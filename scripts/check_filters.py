@@ -413,7 +413,9 @@ def size_cases() -> list[dict]:
     down (a mipmap), then read bilinearly. 16-bit: in 8 bits each halving
     is stored truncated, which darkens a deep one (not emulated). And an
     absolute size (relativeTo 0, Biomech's n4677 at 2048 in a 1024 graph):
-    no size function, the size in the node word's second byte.
+    no size function, the size in the node word's second byte. Its
+    functions' $size is its own: a shift of 1.5 and 0.75 of its pixels
+    (Biomech's n4674 and n4677 shift by a pixel, a half).
     """
 
     def outputsize(rel: int, to: int = 1) -> str:
@@ -422,6 +424,12 @@ def size_cases() -> list[dict]:
             f'<constantValueInt2 v="{rel} {rel}"/></paramValue></parameter>'
         )
 
+    pixels = fn("const_float2", FLOAT2, data='<constantValueFloat2 v="1.5 0.75"/>')
+    shift = (
+        '<parameter><name v="offset"/><relativeTo v="0"/><paramValue><dynamicValue>'
+        + function_graph(fn("div", FLOAT2, a=pixels, b=get("$size", FLOAT2)))
+        + "</dynamicValue></paramValue></parameter>"
+    )
     full = (
         ("offset", "constantValueFloat2", "0 0"),
         ("outputsize", "constantValueInt2", "0 0", "1"),  # the parent's size
@@ -435,6 +443,10 @@ def size_cases() -> list[dict]:
         {"tag": f"size_{pre}_abs{log2}_g", "filter": "transformation", "kind": GRAY,
          "params": full, "chain": (pre, outputsize(log2, 0)), "format16": True}
         for pre, log2 in (("transformation", 12), ("levels", 6))
+    ] + [
+        {"tag": "size_shift_abs6_g", "filter": "transformation", "kind": GRAY,
+         "params": full, "chain": ("transformation", outputsize(6, 0) + shift),
+         "format16": True}
     ]  # fmt: skip
 
 

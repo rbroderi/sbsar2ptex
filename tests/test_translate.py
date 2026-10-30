@@ -4,6 +4,7 @@ Pixel accuracy is checked against sbsrender by scripts/check_filters.py
 (needs Substance Designer and Material Maker); these check the wiring.
 """
 
+import json
 import re
 import struct
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
+from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import UnsupportedError
@@ -316,6 +318,24 @@ def test_a_node_without_a_size_function_has_a_fixed_size() -> None:
     assert translate._output_size(wide, 10) == 10
     image = Node(index=0, start=0, end=4, op=32, flags=0, words=[0xBB20])
     assert translate._output_size(image, 10) == 10
+
+
+def test_a_functions_size_is_its_nodes() -> None:
+    # $size in a node's functions is the node's own size: Biomech's n4677
+    # (2048 in a 1024 graph, its words) shifts by 0.5 / $size, half of its
+    # pixels (Substance's render of it: n4676 shifted half a pixel, exact).
+    # The cooker folds it where it can (check_filters size_shift_abs6_g).
+    words = [0x0318BB04, 0x0400003F, 0x1244, 0xF80B54, 0x05410006, 0x09100001, 0,
+             0xD00, 0x3F000000, 0x00020915, 0x09000001, 0, 0x0003094D, 4]  # fmt: skip
+    start = words[3] + BASE - 16  # its offset function at the fifth word
+    n4677 = Node(index=1, start=start, end=start + 4 * len(words), op=4,
+                 flags=words[0] >> 16, fields=words[1:3], inline=words[3:],
+                 inputs={"input": 0}, words=words)  # fmt: skip
+    image = Node(index=0, start=0, end=4, op=32, uid=500)
+    mm, _, _ = translate_graph([image, n4677], {"out": 1}, {500: "a.png"}, size=10)
+    code = json.dumps(mm)
+    assert "vec2(2048.0)" in code
+    assert "vec2(1024.0)" not in code
 
 
 def test_transformation_shrinking_reads_a_mip_level() -> None:

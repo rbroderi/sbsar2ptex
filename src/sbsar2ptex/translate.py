@@ -82,6 +82,8 @@ class _Context:
     """What translating the current graph needs to know and collects."""
 
     size: int = 11
+    """The output size (log2) of the node being translated: its functions'
+    $size, its samples' grid; the graph's before the first."""
     inputs: dict[int, GraphInput] = field(default_factory=dict)
     helpers: list[str] = field(default_factory=list)
     """GLSL helper functions for the next shader node made."""
@@ -4096,6 +4098,7 @@ def translate_graph(
         if k in folded:
             continue
         own = sizes[k]
+        _CTX.size = own
         loop = loops.get(k)
         sources = loop.inputs if loop is not None else node.inputs
         if library and k in library:
