@@ -217,9 +217,6 @@ def encoded(mm_nodes: list, wires: list, source: tuple[str, int], size: int) -> 
         {"from": source[0], "from_port": source[1], "to": "enc", "to_port": 0},
         {"from": "enc", "from_port": 0, "to": "Material", "to_port": 0},
     ]
-    # No automatic buffers (a preference of Material Maker's): what the
-    # translation buffers, and nothing else, as in the graphs it writes.
-    wires = [{**w, "buffer": "never"} for w in wires]
     return {
         "name": "check", "type": "graph", "label": "Graph", "shortdesc": "",
         "longdesc": "", "node_position": {"x": 0, "y": 0}, "parameters": {},

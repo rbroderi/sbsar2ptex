@@ -3971,21 +3971,6 @@ def output_type(node: dict[str, Any]) -> str:
     return "rgba"
 
 
-def no_auto_buffers(graph: dict[str, Any]) -> None:
-    """Pin every connection of ``graph``, its subgraphs' too, unbuffered.
-
-    The translation buffers what Substance stores, as Substance stores it;
-    Material Maker's automatic buffers (its auto_buffer setting) would
-    store more, rounding and filtering images Substance computes inline.
-    A connection already pinned keeps its pin.
-    """
-    for c in graph["connections"]:
-        c.setdefault("buffer", "never")
-    for n in graph["nodes"]:
-        if n["type"] == "graph":
-            no_auto_buffers(n)
-
-
 def declared_params(mm: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Return the parameters shader nodes declare, inside subgraphs too.
 

@@ -15,9 +15,6 @@ iteration count edited) against the unrolled image of that period's end;
 and both with every Intensity and Radius knob of the chain's library
 nodes changed, which the iterate must follow as the unrolled nodes do.
 The iterate must be identical to the unrolled translation in every pixel.
-Every connection is pinned unbuffered (check_loops.encoded): Material
-Maker's automatic buffers (16-bit, where it judges a node costly) fall
-differently in the two graphs and change pixels of both.
 """
 
 import argparse

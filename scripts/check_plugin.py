@@ -44,7 +44,6 @@ from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.translate import PLUGIN_LINKS
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import graph_inputs
-from sbsar2ptex.translate import no_auto_buffers
 from sbsar2ptex.translate import output_type
 from sbsar2ptex.translate import param_name
 from sbsar2ptex.translate import shader
@@ -77,14 +76,12 @@ def material(*, color: bool) -> dict:
 
 
 def graph(nodes: list, wires: list) -> dict:
-    """Return the graph of ``nodes``, no connection buffered automatically."""
-    made = {
+    """Return the graph of ``nodes``."""
+    return {
         "name": "check", "type": "graph", "label": "Graph", "shortdesc": "",
         "longdesc": "", "node_position": {"x": 0, "y": 0}, "parameters": {},
         "seed_int": 0, "nodes": nodes, "connections": wires,
     }  # fmt: skip
-    no_auto_buffers(made)
-    return made
 
 
 def pixels(mm: list, wires: list, source: tuple[str, int], kind: str) -> dict:

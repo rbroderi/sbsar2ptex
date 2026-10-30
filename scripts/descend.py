@@ -79,7 +79,6 @@ from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
-from sbsar2ptex.translate import no_auto_buffers
 from sbsar2ptex.translate import output_type
 from sbsar2ptex.translate import shader
 
@@ -343,7 +342,6 @@ def build(
     g["connections"].append(
         {"from": out, "from_port": 0, "to": "Material", "to_port": 0}
     )
-    no_auto_buffers(g)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(g), encoding="utf-8")
     return path

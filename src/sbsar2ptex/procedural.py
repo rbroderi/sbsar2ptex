@@ -40,7 +40,6 @@ from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.structure import nest
 from sbsar2ptex.translate import GraphInput
 from sbsar2ptex.translate import graph_inputs
-from sbsar2ptex.translate import no_auto_buffers
 from sbsar2ptex.translate import strip_links
 from sbsar2ptex.translate import translate_graph
 
@@ -249,6 +248,5 @@ def build(
             requires["plugins"] = {PLUGIN_ID: f">={VERSION}"}
         made["requires"] = requires
         made["longdesc"] += f"\nrequires: {json.dumps(requires)}"
-    no_auto_buffers(made)
     strip_links(made)
     return made

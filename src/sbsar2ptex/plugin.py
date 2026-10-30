@@ -635,8 +635,6 @@ def _graph_atom(
     links.append(
         {"from": output[0], "from_port": output[1], "to": "gen_outputs", "to_port": 0}
     )
-    for w in [*wires, *links]:
-        w["buffer"] = "never"
     io = {"node_position": {"x": 0, "y": 0}, "parameters": {}, "type": "ios"}
     params = [p for p, _ in knobs]
     values = {p["name"]: p["default"] for p in params}

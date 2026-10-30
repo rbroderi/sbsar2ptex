@@ -11,7 +11,6 @@ from sbsar2ptex.archive import read_archive
 from sbsar2ptex.convert import describe
 from sbsar2ptex.procedural import build
 from sbsar2ptex.procedural import material
-from sbsar2ptex.translate import no_auto_buffers
 
 DATA = Path(__file__).parent / "data"
 
@@ -99,21 +98,3 @@ def test_experimental_graphs_say_what_they_require(tmp_path) -> None:
     assert json.loads(line.group(1)) == requires
     made["longdesc"] = made["longdesc"][: line.start() - 1]
     assert json.dumps(made) == json.dumps(plain)
-
-
-def test_no_connection_is_buffered_automatically() -> None:
-    # Material Maker's auto_buffer would store images Substance computes
-    # inline: every connection, subgraphs' too, is pinned unbuffered.
-    w = {"from": "a", "from_port": 0, "to": "b", "to_port": 0}
-    inner = {"type": "graph", "nodes": [], "connections": [dict(w)]}
-    made = {"nodes": [inner], "connections": [dict(w), {**w, "buffer": "always"}]}
-    no_auto_buffers(made)
-    assert made["connections"][1]["buffer"] == "always"  # a pin is kept
-    made["connections"].pop()
-    pins, graphs = [], [made]
-    while graphs:
-        g = graphs.pop()
-        pins += [c.get("buffer") for c in g["connections"]]
-        graphs += [n for n in g["nodes"] if n["type"] == "graph"]
-    assert pins
-    assert set(pins) == {"never"}

@@ -193,11 +193,6 @@ class SlopeBlur:
         graph["connections"].append(
             {"from": "gen_inputs", "from_port": 1, "to": w, "to_port": 1}
         )
-        # Never an automatic buffer in the loop's body: one there is rendered
-        # again on every pass, which starts the loop over.
-        for c in graph["connections"]:
-            if c["to"] in (w0, w, mean):
-                c["buffer"] = "never"
         default = float(self.samples.default[0])
         controls = next(n for n in graph["nodes"] if n["name"] == "gen_parameters")
         controls["widgets"].append(
@@ -953,10 +948,6 @@ def _fold(
     links.append(
         {"from": loop, "from_port": out_state, "to": "gen_outputs", "to_port": 0}
     )
-    # Never an automatic buffer in the loop's body (one restarts the loop).
-    for w in links:
-        if w["to"] != "gen_outputs":
-            w["buffer"] = "never"
     iterate = {
         "name": loop,
         "type": "iterate_buffer_v2",

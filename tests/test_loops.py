@@ -225,11 +225,6 @@ def test_the_iterate_replaces_the_unrolled_nodes(fmt: int, steps: str) -> None:
         (wp, 0, lp, 2), (mp, 0, lp, 3),
         (lp, 1, "gen_outputs", 0),
     }  # fmt: skip
-    assert all(
-        x.get("buffer") == "never"
-        for x in sub["connections"]
-        if x["to"] in (w0p, wp, mp)
-    )
 
 
 def test_samples_is_live_in_the_unrolled_translation() -> None:
@@ -355,11 +350,6 @@ def test_a_chain_becomes_one_iterate() -> None:
         ("loop", 3, "state1", 0), ("state1", 0, "loop", 3),
         ("loop", 1, "gen_outputs", 0),
     } == links  # fmt: skip
-    assert all(
-        x.get("buffer") == "never"
-        for x in sub["connections"]
-        if x["to"] != "gen_outputs"
-    )
 
 
 def test_a_chain_read_inside_stays_unrolled_there() -> None:
