@@ -282,6 +282,8 @@ def cases() -> list[tuple]:
         # Biomech's n2373: a long warp, so its intensity's levels move samples
         ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
         ("normal_g", "normal", GRAY, (("intensity", F1, "3"),), "", True),
+        # Biomech's n3896: steep enough that most slopes lie flat
+        ("normal60_g", "normal", GRAY, (("intensity", F1, "60"),), "", True),
         (
             "normal_inv_g",
             "normal",
