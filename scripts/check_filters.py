@@ -158,6 +158,16 @@ def cases() -> list[tuple]:
                 (("matrix22", F4, "3 0 0 3"),),
             )
         )
+        # nearest filtering (Biomech's n3902: a 2x zoom out; n3901: a flip)
+        out += [
+            (
+                f"transform_near{tag}_{k}",
+                "transformation",
+                kind,
+                (("matrix22", F4, m), ("filtering", "constantValueInt32", "1")),
+            )
+            for tag, m in (("x2", "2 0 0 2"), ("flip", "-1 0 0 -1"), ("x3", "3 0 0 3"))
+        ]
         out += [
             (
                 f"blend{m}_{k}",
@@ -200,6 +210,23 @@ def cases() -> list[tuple]:
         ]
     )
     gray = (("colorswitch", "constantValueBool", "0"),)
+    across = fn("const_float2", FLOAT2, data='<constantValueFloat2 v="1 0"/>')
+    ramp = (
+        '<parameter><name v="perpixel"/><relativeTo v="0"/><paramValue><dynamicValue>'
+        + function_graph(fn("dot", a=get("$pos", FLOAT2), b=across))
+        + "</dynamicValue></paramValue></parameter>"
+        '<parameter><name v="format"/><relativeTo v="0"/><paramValue>'
+        '<constantValueInt32 v="1"/></paramValue></parameter>'  # 16 bits
+    )
+    # Biomech's n3904: a sawtooth, 1 to 0 between keys 0.00421 apart
+    saw = gradient_array(
+        [
+            (0.0, (0.0, 0.0, 0.0, 1.0)),
+            (0.50001, (1.0, 1.0, 1.0, 1.0)),
+            (0.50422, (0.0, 0.0, 0.0, 1.0)),
+            (1.0, (1.0, 1.0, 1.0, 1.0)),
+        ]
+    )
     curve = [
         ((0, 0.1), (0, 0.1), (0.2, 0.15)),
         ((0.5, 0.7), (0.35, 0.6), (0.65, 0.8)),
@@ -210,6 +237,11 @@ def cases() -> list[tuple]:
     out += [
         ("gradient_c", "gradient", GRAY, (), keys),
         ("gradient_g", "gradient", GRAY, gray, keys),
+        # fed a 16-bit ramp computed in the graph: an image reaches Material
+        # Maker's shader in half floats, which a 256-entry table magnifies
+        {"tag": "gradient_saw16_ramp_g", "filter": "gradient", "kind": GRAY,
+         "params": gray, "arrays": saw, "format16": True,
+         "chain": ("pixelprocessor", ramp)},
         ("hsl_c", "hsl", COLOR, (
             ("hue", "constantValueFloat1", "0.62"),
             ("saturation", "constantValueFloat1", "0.4"),

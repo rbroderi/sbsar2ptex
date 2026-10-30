@@ -1536,16 +1536,35 @@ def _gradient_keys(node: Node, *, color: bool) -> list[tuple[float, list[float]]
 
 
 def _gradient(node: Node, name: str, *, color: bool, size: int) -> Made:
+    """Gradient map: a table of 256 entries read bilinearly.
+
+    Entry i is the keys' gradient at i / 255, stored in 16 bits; the input
+    x reads entries floor(255 x) and the next, the fraction rounded to
+    1/256 (a texture's filtering). Biomech's sawtooth maps (n3904: a drop
+    from 1 to 0 between keys 0.00421 apart) blend across the drop: within
+    one level of Substance's from its own input, the exact gradient 46%
+    exact and up to 14120/65535 off at the drop.
+    """
     keys = _gradient_keys(node, color=color)
     t, n = ("rgba", 4) if color else ("f", 1)
     g = "vec4" if color else "float"
-    lines = ["float x = $input(uv);", f"{g} v = {vec(keys[0][1], n)};"]
+    ramp = [f"\t{g} v = {vec(keys[0][1], n)};"]
     for (p0, _), (p1, c1) in itertools.pairwise(keys):
-        lines.append(
-            f"v = mix(v, {vec(c1, n)},"
+        ramp.append(
+            f"\tv = mix(v, {vec(c1, n)},"
             f" clamp((x - {num(p0)}) / max({num(p1 - p0)}, 1e-9), 0.0, 1.0));"
         )
-    lines.append("return v;")
+    _CTX.helpers.append(
+        f"{g} gmentry_$(name)(float i) {{\n\tfloat x = i / 255.0;\n"
+        + "\n".join(ramp)
+        + "\n\treturn floor(v * 65535.0 + 0.5) / 65535.0;\n}\n"
+    )
+    lines = [
+        "float t = clamp($input(uv), 0.0, 1.0) * 255.0;",
+        "float i = min(floor(t), 254.0);",
+        "float f = floor((t - i) * 256.0 + 0.5) / 256.0;",
+        "return mix(gmentry_$(name)(i), gmentry_$(name)(i + 1.0), f);",
+    ]
     return shader(name, [("input", "f")], t, "\n".join(lines)), ["input"]
 
 
