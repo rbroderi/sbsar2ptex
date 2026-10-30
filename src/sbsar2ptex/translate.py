@@ -93,6 +93,8 @@ class _Context:
     """Parameter name -> the MM nodes declaring it (for the remote node)."""
     sampled: list[str] | None = None
     """A pixel processor's input names by index, while translating it."""
+    sampled_read: set[str] = field(default_factory=set)
+    """Those of them a function has sampled."""
     value_seed: str = "0"
     """Resolved random seed of the ordinary filter currently being translated."""
     count: int = 0
@@ -346,6 +348,7 @@ def _sample(kind: str, index: int, pos: str, filtering: int) -> str:
     at = f"fract({pos})"
     if filtering:
         at = f"(floor(fract({pos}) * {n}) + 0.5) / {n}"
+    _CTX.sampled_read.add(_CTX.sampled[index])
     value = f"${_CTX.sampled[index]}({at})"
     # samplelum is the mean of R, G and B (a grayscale input's value).
     return f"dot({value}.rgb, vec3(1.0 / 3.0))" if kind == "lum" else value
@@ -3565,6 +3568,7 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     inputs = [(nm, "rgba") for nm in images]
     root = None
     start: list[str] = []
+    _CTX.sampled_read = set()
     if splats is None:
         _CTX.sampled = images  # functions may sample the pattern inputs
         if stateful:
@@ -3683,8 +3687,13 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     _CTX.helpers.append(fxglsl.store_glsl(layout))
     made = shader(name, inputs, t, "\n".join(lines))
     # (16-bit float buffers: an 8-bit image's levels come back exactly
-    # from them, fxglsl.levels_glsl, as from Material Maker's images)
-    sub = buffered(made, [nm for nm, _ in inputs], set(images), size)
+    # from them, fxglsl.levels_glsl, as from Material Maker's images; a
+    # function's samples, as a pixel processor's, read 32-bit ones: a 16-bit
+    # input's value, which can place a pattern, to the level)
+    sub = buffered(
+        made, [nm for nm, _ in inputs], set(images), size, precise=_CTX.sampled_read
+    )
+    _CTX.sampled_read = set()
     for k in mips:
         nodes, wires_, last = _fx_mip_atlas(name, k, f"{name}_pattern{k}_buf", layout)
         sub.nodes += nodes
