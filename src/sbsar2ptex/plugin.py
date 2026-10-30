@@ -48,6 +48,7 @@ from sbsar2ptex.translate import PLUGIN_LINKS
 from sbsar2ptex.translate import PLUGIN_PREFIX
 from sbsar2ptex.translate import RCP_GLSL
 from sbsar2ptex.translate import TORUS_GLSL
+from sbsar2ptex.translate import TRANSFORM_MIP_LINES
 from sbsar2ptex.translate import Sub
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import _dynamic_offset
@@ -59,6 +60,8 @@ from sbsar2ptex.translate import f32
 from sbsar2ptex.translate import graph_input
 from sbsar2ptex.translate import input_params
 from sbsar2ptex.translate import levels_glsl
+from sbsar2ptex.translate import transform_minifies
+from sbsar2ptex.translate import transform_mip_glsl
 from sbsar2ptex.translate import wire
 
 VERSION = "1.0"
@@ -336,8 +339,15 @@ def _transformation(*, color: bool) -> Atom:
         "q += vec2(0.5) + vec2($offset_x, $offset_y);",
         f"if (($tiling & 1) == 0 && (q.x < 0.0 || q.x >= 1.0)) return {empty};",
         f"if (($tiling & 2) == 0 && (q.y < 0.0 || q.y >= 1.0)) return {empty};",
+        *(
+            ln.format(
+                a="$matrix22_x", b="$matrix22_y", c="$matrix22_z", d="$matrix22_w",
+                n=f"int({N})", fmt="$format", x="" if color else ".x",
+            )
+            for ln in TRANSFORM_MIP_LINES
+        ),
         "return $input1(fract(q));",
-    ]
+    ]  # fmt: skip
     params = [
         _float(f"matrix22_{k}", f"Transform matrix {k}", float(k in "xw"), -2.0, 2.0)
         for k in "xyzw"
@@ -348,8 +358,9 @@ def _transformation(*, color: bool) -> Atom:
         f"sbs_transformation{sfx}", "Transformation 2D",
         "Substance's Transformation 2D: the input sampled at M^T (uv - 0.5) + 0.5"
         " + offset (matrix22 x y z w: M = [[x, y], [z, w]]), empty past its edges"
-        " where it does not tile.",
+        " where it does not tile; a mip level of it where it shrinks it.",
         [Port("input1", t, "Input", "input")], t, "\n".join(lines), params,
+        helpers=transform_mip_glsl("input1", range(4)),
     )  # fmt: skip
 
 
@@ -1248,13 +1259,20 @@ class Maker:
             made[PLUGIN_LINKS] = knobs.links
         # Its inputs buffered as the inline translation buffers them.
         precise = set(op.precise)
+        sampled = set(op.sampled)
         if op.base == "dirmotionblur" and fmt == 1:  # 16 bits: the input's levels
             precise.add("input")
+        if op.base == "transformation" and transform_minifies(
+            [knobs.values[f"matrix22_{c}"] for c in "xyzw"]
+        ):  # its mip levels are of the input as stored
+            sampled.add("input")
+            if fmt == 1:
+                precise.add("input")
         nodes, wires, ports = [made], [], []
         for port, p in enumerate(atom.ports):
             if p.key not in node.inputs:
                 continue
-            if p.key in op.sampled:
+            if p.key in sampled:
                 buf = f"{name}_{p.key}_buf"
                 nodes.append(buffer(buf, size, precise=p.key in precise))
                 wires.append(wire(buf, name, port))

@@ -282,3 +282,26 @@ def test_directional_blur_knobs_stay_live(bits: int, kind: str) -> None:
         assert ("uvec4" in code) == color
         assert "floor((a + b + 1.0) * 0.5)" in code
         assert "1048576.0" in code
+
+
+def test_transformation_shrinking_reads_a_mip_level() -> None:
+    # A mip level from log2 of the longer texel step, from 1.5x: 3x reads
+    # level 2 (Biomech's n2333: tiling seams' rows blend, check_filters
+    # transform_x3_g). Its input is buffered then, as stored; the matrix
+    # stays knobs, the level found from them in the shader.
+    assert translate.transform_minifies([3.0, 0.0, 0.0, 3.0])
+    assert translate.transform_minifies([1.5, 0.0, 0.0, 1.0])
+    assert not translate.transform_minifies([1.4, 0.0, 0.0, 1.4])
+    assert not translate.transform_minifies([0.25, 0.0, 0.0, 0.25])
+    assert not translate.transform_minifies([0.0, 0.0, 0.0, 0.0])
+    three = struct.unpack("<I", struct.pack("<f", 3.0))[0]
+    node = Node(
+        index=0, start=0, end=4, op=4, fields=[1 << 6], inline=[three, 0, 0, three]
+    )
+    made = translate._transformation(node, "tf", color=False, size=8)
+    assert isinstance(made, translate.Sub)
+    by_type = {n["type"]: n for n in made.nodes}
+    assert set(by_type) == {"buffer", "shader"}
+    code = by_type["shader"]["shader_model"]["instance"]
+    assert "tmread_$(name)(q, L, 256, 0)" in code
+    assert "$m11" in code

@@ -149,6 +149,15 @@ def cases() -> list[tuple]:
             )
             for tiling in range(3)
         ]
+        # Biomech's n2333: a 3x zoom out, three tiles across
+        out.append(
+            (
+                f"transform_x3_{k}",
+                "transformation",
+                kind,
+                (("matrix22", F4, "3 0 0 3"),),
+            )
+        )
         out += [
             (
                 f"blend{m}_{k}",
@@ -202,6 +211,10 @@ def cases() -> list[tuple]:
         ("dyngrad_c", "dyngradient", COLOR, (("coordinate", "constantValueFloat1", "0.3"),)),
         ("dyngrad_uv_c", "dyngradient", COLOR, (
             ("coordinate", "constantValueFloat1", "0.3"), ("uvselector", i32, "1"),
+        )),
+        # Biomech's n2334 and n2266: vertical, at a texel boundary
+        ("dyngrad_uv05_g", "dyngradient", GRAY, (
+            ("coordinate", "constantValueFloat1", "0.5"), ("uvselector", i32, "1"),
         )),
     ]  # fmt: skip
     hi = ("highlightcolor", F4, "0.9 0.7 0.5 1")
@@ -797,6 +810,9 @@ def distance_cases() -> list[dict]:
         {"tag": "distance_g", "filter": "distance", "kind": GRAY, "params": reach},
         {"tag": "distance_mask_g", "filter": "distance", "kind": GRAY, "params": reach,
          "connect": 1},
+        # Biomech's n2327: a short reach, the mask alone
+        {"tag": "distance_mask5_g", "filter": "distance", "kind": GRAY,
+         "params": (("distance", F1, "5.12"),), "connect": 1},
         {"tag": "distance_c", "filter": "distance", "kind": COLOR, "params": reach},
     ]  # fmt: skip
 
