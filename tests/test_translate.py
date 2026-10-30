@@ -303,6 +303,21 @@ def test_blend_cropping_area() -> None:
     assert "$crop_left" in sh["shader_model"]["instance"]
 
 
+def test_a_node_without_a_size_function_has_a_fixed_size() -> None:
+    # The node word's second byte, log2 width and height, whatever the
+    # graph's size (Biomech's n4677: 2048 in a 1024 graph, then read
+    # averaged down; check_filters size_levels_abs6_g). Not square: the
+    # graph's, as for a size function's.
+    word = 0x0318BB04
+    n4677 = Node(index=0, start=0, end=4, op=4, flags=word >> 16, words=[word])
+    assert translate._output_size(n4677, 10) == 11
+    assert translate._output_size(n4677, 12) == 11
+    wide = Node(index=0, start=0, end=4, op=4, flags=0x318, words=[0x03184804])
+    assert translate._output_size(wide, 10) == 10
+    image = Node(index=0, start=0, end=4, op=32, flags=0, words=[0xBB20])
+    assert translate._output_size(image, 10) == 10
+
+
 def test_transformation_shrinking_reads_a_mip_level() -> None:
     # A mip level from log2 of the longer texel step, from 1.5x: 3x reads
     # level 2 (Biomech's n2333: tiling seams' rows blend, check_filters

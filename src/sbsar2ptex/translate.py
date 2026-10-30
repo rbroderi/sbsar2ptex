@@ -3805,15 +3805,21 @@ def _bspline(name: str, size: int, t: str) -> dict[str, Any]:
 
 
 def _output_size(node: Node, size: int) -> int:
-    """Return ``node``'s output size (log2), ``size`` unless its function says.
+    """Return ``node``'s output size (log2), ``size`` unless the node says.
 
-    The size function is the node's first code block, or the block its first
-    inline word points at (node_shader drops that word); a gradient's or a
-    curve's first block is its data instead. Square sizes only, one pixel
-    at least.
+    A node without a size function (node word bit 16 clear) has a fixed
+    size: the node word's second byte, log2 width (low nibble) and height
+    (high nibble), whatever the graph's size. The size function is the
+    node's first code block, or the block its first inline word points at
+    (node_shader drops that word); a gradient's or a curve's first block is
+    its data instead. Square sizes only, one pixel at least. A graph
+    input's image is its own size.
     """
-    if node.op in (0, 1, 44, 45):
+    if node.op in (0, 1, 32, 33, 44, 45):
         return size
+    if not node.flags & 1 and node.words:
+        fixed = node.words[0] >> 8 & 0xFF
+        return fixed & 15 if fixed & 15 == fixed >> 4 else size
     offsets = list(node.code[:1])
     if not offsets and node.inline and node.start < node.inline[0] + BASE < node.end:
         offsets = [node.inline[0] + BASE]

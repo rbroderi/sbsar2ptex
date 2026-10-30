@@ -411,12 +411,14 @@ def size_cases() -> list[dict]:
     node (pre) smaller than the graph by a relative output size (relativeTo
     1: to the parent; 2 would be to the input): rendered from A averaged
     down (a mipmap), then read bilinearly. 16-bit: in 8 bits each halving
-    is stored truncated, which darkens a deep one (not emulated).
+    is stored truncated, which darkens a deep one (not emulated). And an
+    absolute size (relativeTo 0, Biomech's n4677 at 2048 in a 1024 graph):
+    no size function, the size in the node word's second byte.
     """
 
-    def outputsize(rel: int) -> str:
+    def outputsize(rel: int, to: int = 1) -> str:
         return (
-            '<parameter><name v="outputsize"/><relativeTo v="1"/><paramValue>'
+            f'<parameter><name v="outputsize"/><relativeTo v="{to}"/><paramValue>'
             f'<constantValueInt2 v="{rel} {rel}"/></paramValue></parameter>'
         )
 
@@ -429,6 +431,10 @@ def size_cases() -> list[dict]:
          "params": full, "chain": (pre, outputsize(rel)), "format16": True}
         # deep enough that averaging, not point sampling, shows on test images
         for pre, rel in (("transformation", -6), ("transformation", -11), ("levels", -5))
+    ] + [
+        {"tag": f"size_{pre}_abs{log2}_g", "filter": "transformation", "kind": GRAY,
+         "params": full, "chain": (pre, outputsize(log2, 0)), "format16": True}
+        for pre, log2 in (("transformation", 12), ("levels", 6))
     ]  # fmt: skip
 
 
