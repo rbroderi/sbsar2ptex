@@ -612,6 +612,23 @@ def fxmap_cases() -> list[dict]:
         {"tag": "fx_state_g", "filter": "fxmaps", "kind": GRAY, "params": flat,
          "extra": fxmap_graph(state), "connect": 1, "format16": True}
     )  # fmt: skip
+    # Biomech's n1500: a sample, between texels, places a pattern across (a
+    # sharp input shows the sample's filtering)
+    row = lin(0.0417, 0.0123)
+    across = fn(
+        "samplelum", pos=vec2(const(0.5), row), data='<constantValueInt2 v="0 0"/>'
+    )
+    placed = pat(
+        3,
+        dyn("frameoffset", vec2(fn("sub", a=across, b=const(0.5)),
+                                fn("sub", a=row, b=const(0.5)))),
+        ("patternsize", f2, "0.02 0.02"),
+    )  # fmt: skip
+    out.append(
+        {"tag": "fx_sampled_x_g", "filter": "fxmaps", "kind": GRAY, "params": flat,
+         "extra": fxmap_graph(fx("iterate", (("numberadded", i1, "24"),), {1: placed})),
+         "connect": 1, "format16": True}
+    )  # fmt: skip
     # The input image drawn (pattern type 1), off the pixel grid: each image
     # filtering (bilinear+mipmaps, bilinear, nearest: Quadrant.image_flags).
     out += [

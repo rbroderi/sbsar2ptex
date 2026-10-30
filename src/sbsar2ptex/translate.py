@@ -95,6 +95,9 @@ class _Context:
     """A pixel processor's input names by index, while translating it."""
     sampled_read: set[str] = field(default_factory=set)
     """Those of them a function has sampled."""
+    sample_nearest: bool = False
+    """Whether samples read the nearest texel whatever their filtering (an
+    FX-Map's functions: check_filters fx_sampled_x_g on a sharp input)."""
     value_seed: str = "0"
     """Resolved random seed of the ordinary filter currently being translated."""
     count: int = 0
@@ -339,14 +342,15 @@ def _sample(kind: str, index: int, pos: str, filtering: int) -> str:
     """Return GLSL sampling a pixel processor's input ``index`` at ``pos``.
 
     Filtering 0 is bilinear (the inputs are buffered with filtering);
-    otherwise the nearest texel. Positions wrap.
+    otherwise, and always in an FX-Map's functions, the nearest texel.
+    Positions wrap.
     """
     if _CTX.sampled is None or index >= len(_CTX.sampled):
         msg = f"sample of input {index} outside a pixel processor"
         raise UnsupportedError(msg)
     n = num(float(1 << _CTX.size))
     at = f"fract({pos})"
-    if filtering:
+    if filtering or _CTX.sample_nearest:
         at = f"(floor(fract({pos}) * {n}) + 0.5) / {n}"
     _CTX.sampled_read.add(_CTX.sampled[index])
     value = f"${_CTX.sampled[index]}({at})"
@@ -3571,6 +3575,7 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     _CTX.sampled_read = set()
     if splats is None:
         _CTX.sampled = images  # functions may sample the pattern inputs
+        _CTX.sample_nearest = True
         if stateful:
             shared = fxsplat.variable_types(node, tree, st)
             _CTX.fx_variables = {k: (f"fxv{k}_$(name)", t) for k, t in shared.items()}
@@ -3592,6 +3597,7 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
                     )
         finally:
             _CTX.sampled = None
+            _CTX.sample_nearest = False
             _CTX.fx_variables = None
 
     def run(grp: int, at: str = "P") -> str:
