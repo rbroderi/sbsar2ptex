@@ -3819,7 +3819,7 @@ def _output_size(node: Node, size: int) -> int:
         return size
     if not node.flags & 1 and node.words:
         fixed = node.words[0] >> 8 & 0xFF
-        return fixed & 15 if fixed & 15 == fixed >> 4 else size
+        return fixed & 15 if fixed & 15 == fixed >> 4 and fixed & 15 > size else size
     offsets = list(node.code[:1])
     if not offsets and node.inline and node.start < node.inline[0] + BASE < node.end:
         offsets = [node.inline[0] + BASE]
