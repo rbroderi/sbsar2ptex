@@ -3871,17 +3871,19 @@ def _output_size(node: Node, size: int) -> int:
     (high nibble), whatever the graph's size. The size function is the
     node's first code block, or the block its first inline word points at
     (node_shader drops that word); a gradient's or a curve's first block is
-    its data instead, an FX-Map's its tree: its size function is the block
+    its data instead (its size function, if any, the inline word's: Biomech's
+    n3904, 32 pixels), an FX-Map's its tree: its size function is the block
     that also sets its variables (fxmap.Settings.setup_code; Biomech's
     n3900, 16 pixels in a 1024 graph). Square sizes only, one pixel at
     least. A graph input's image is its own size.
     """
-    if node.op in (0, 1, 32, 33, 44, 45):
+    if node.op in (32, 33):
         return size
-    if not node.flags & 1 and node.words:
+    data = node.op in (0, 1, 44, 45)  # its first block its keys or points
+    if not data and not node.flags & 1 and node.words:
         fixed = node.words[0] >> 8 & 0xFF
         return fixed & 15 if fixed & 15 == fixed >> 4 else size
-    offsets = list(node.code[:1])
+    offsets = [] if data else list(node.code[:1])
     if node.op in (8, 9):
         setup = fxmap.read_settings(node, color=node.op == 9).setup_code  # noqa: PLR2004
         offsets = [setup] if setup is not None else []

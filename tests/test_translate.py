@@ -338,6 +338,29 @@ def test_a_functions_size_is_its_nodes() -> None:
     assert "vec2(1024.0)" not in code
 
 
+def test_a_gradient_maps_size_function_follows_its_keys() -> None:
+    # Biomech's n3904 (its words): the keys, then a size function of
+    # $outputsize (32 pixels in a 1024 graph), the inline word's
+    words = [0x01195500, 0xF3F, 4, 0xF578B0, 0xF578C8, 0, 0x80008000, 0x8000FFFF,
+             0x8114, 0xFFFF8000, 0x8000FFFF, 0xA420015, 0xE3411820, 0x551, 0x10910,
+             0x9100000, 0x10001, 0x2085F, 0x9130003, 0x30002, 0xD00, 0, 0x5094D,
+             0x9130006, 0x20003, 0xD00, 0, 0x9094D, 0xD490008, 0x70004, 0x1140000A,
+             0x40A00000, 0x40A00000, 0xC0952, 0x953000B, 0x1000D, 0xE0947,
+             0x11400000, 0, 0, 0xE0970, 0x6510010, 0xA4C0011, 0x12000F, 0xA52,
+             0x13]  # fmt: skip
+    start = 16087248
+    n3904 = Node(index=1, start=start, end=start + 4 * len(words), op=0,
+                 flags=words[0] >> 16, fields=words[1:3], code=[words[3] + BASE],
+                 inline=[words[4]], inputs={"input": 0}, words=words)  # fmt: skip
+    image = Node(index=0, start=0, end=4, op=32, uid=500)
+    size = translate.GraphInput("$outputsize", 5, [10, 10])
+    mm, _, _ = translate_graph(
+        [image, n3904], {"out": 1}, {500: "a.png"}, size=10, inputs={words[12]: size}
+    )
+    buffers = {n["name"]: n["parameters"]["size"] for n in mm if n["type"] == "buffer"}
+    assert buffers["n1_size"] == 5
+
+
 def test_transformation_shrinking_reads_a_mip_level() -> None:
     # A mip level from log2 of the longer texel step, from 1.5x: 3x reads
     # level 2 (Biomech's n2333: tiling seams' rows blend, check_filters
