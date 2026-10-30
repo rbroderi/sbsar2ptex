@@ -284,6 +284,25 @@ def test_directional_blur_knobs_stay_live(bits: int, kind: str) -> None:
         assert "1048576.0" in code
 
 
+def test_blend_cropping_area() -> None:
+    # Two words of 16-bit values times 32768: left and top, right and
+    # bottom, after the opacity's words (check_filters blendcrop_g: 0.1 0.6
+    # 0.2 0.7; Biomech's n1623: its right half). Live knobs.
+    crop = Node(index=0, start=0, end=4, op=2, fields=[0x175])
+    got = translate.blend_crop(crop, [0x199A0CCD, 0x599A4CCD])
+    assert got == pytest.approx([0.1, 0.6, 0.2, 0.7], abs=1e-4)
+    n1623 = Node(index=0, start=0, end=4, op=2, fields=[0x145])
+    assert translate.blend_crop(n1623, [0x4000, 0x80008000]) == [0.5, 1.0, 0.0, 1.0]
+    plain = Node(index=0, start=0, end=4, op=2, fields=[0x105])
+    assert translate.blend_crop(plain, []) == [0.0, 1.0, 0.0, 1.0]
+    node = Node(
+        index=0, start=0, end=4, op=2, fields=[0x145], inline=[0x4000, 0x80008000]
+    )
+    sh, _ = translate._blend(node, "b", color=False, size=8)
+    assert sh["parameters"]["crop_left"] == 0.5
+    assert "$crop_left" in sh["shader_model"]["instance"]
+
+
 def test_transformation_shrinking_reads_a_mip_level() -> None:
     # A mip level from log2 of the longer texel step, from 1.5x: 3x reads
     # level 2 (Biomech's n2333: tiling seams' rows blend, check_filters

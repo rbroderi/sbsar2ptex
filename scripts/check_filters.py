@@ -170,6 +170,28 @@ def cases() -> list[tuple]:
             )
             for m in range(12)
         ]
+        # Biomech's n1623: a cropping area (outside it, the destination)
+        out.append(
+            (
+                f"blendcrop_{k}",
+                "blend",
+                kind,
+                (
+                    ("blendingmode", "constantValueInt32", "5"),
+                    ("maskrectangle", F4, "0.1 0.6 0.2 0.7"),
+                ),
+            )
+        )
+    # its edges at other fractions of a pixel (2048 px: .4 .2 .1 .9; .25 .75)
+    out += [
+        (f"blendcrop{k}_g", "blend", GRAY, (
+            ("blendingmode", "constantValueInt32", "5"), ("maskrectangle", F4, rect),
+        ))
+        for k, rect in (
+            (2, "0.3 0.55 0.15 0.85"), (3, "0.250122 0.750366 0.5 0.2"),
+            (4, "0.05 0.45 0.05 0.45"),  # a right edge (921.6) where B shows
+        )
+    ]  # fmt: skip
     keys = gradient_array(
         [
             (0.0, (0.1, 0.2, 0.3, 0.4)),

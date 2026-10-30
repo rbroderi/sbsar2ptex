@@ -1162,6 +1162,43 @@ def levels_glsl(
     return "\n".join(lines)
 
 
+CROP_SIDES = ("left", "right", "top", "bottom")
+"""A blend's cropping area (Substance's maskrectangle), in its order."""
+
+
+def blend_crop(node: Node, inline: list[int]) -> list[Any]:
+    """Return a blend's cropping area: left, right, top and bottom (uv).
+
+    Its state is in the node's bits 6-7, its words follow the opacity's
+    (``inline`` starts at them): inline, two words of four 16-bit values,
+    left and top, right and bottom, each a value times 32768; a function,
+    its block's offset (a float4 in maskrectangle's order).
+    """
+    state = node.fields[0] >> 6 & 3
+    if state == 1:
+        w0, w1 = inline[:2]
+        return [x / 32768 for x in (w0 & 0xFFFF, w1 & 0xFFFF, w0 >> 16, w1 >> 16)]
+    if state == 2:  # noqa: PLR2004
+        return list(dynamic(node, inline[0] + BASE))
+    return [0.0, 1.0, 0.0, 1.0]
+
+
+def crop_glsl(crop: Sequence[str], n: str, *, color: bool) -> str:
+    """Return a blend's lines giving the destination outside its cropping area.
+
+    In pixels of an image of side ``n``: from floor(left n) up to, not
+    including, floor(right n); the same down (check_filters blendcrop*).
+    """
+    left, right, top, bottom = crop
+    d = "d" if color else "d.x"
+    return (
+        f"vec2 cpx = floor(uv * {n});\n"
+        f"vec2 clo = floor(vec2({left}, {top}) * {n});\n"
+        f"vec2 chi = floor(vec2({right}, {bottom}) * {n});\n"
+        f"if (any(lessThan(cpx, clo)) || any(greaterThanEqual(cpx, chi))) return {d};"
+    )
+
+
 def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
     t = "rgba" if color else "f"
     flags = node.fields[0]
@@ -1183,6 +1220,12 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
         opacity = f32(inline[0]) if state == 1 else 1.0
     opacity = knob("opacity_mult", "Opacity", opacity)
     o = num(opacity) + (" * $opacity(uv)" if has_input else "")
+    if state in (1, 2):
+        inline = inline[1:]
+    crop = [
+        knob(f"crop_{side}", f"Cropping {side}", v)
+        for side, v in zip(CROP_SIDES, blend_crop(node, inline), strict=True)
+    ]
     expr = BLEND_MODES[mode]
     if mode != 7:  # noqa: PLR2004 (switch mixes, it does not blend)
         modes = [m for m in BLEND_MODES if m != 7]  # noqa: PLR2004
@@ -1199,8 +1242,13 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
     inputs = [("source", t), ("destination", t)]
     if has_input:
         inputs.append(("opacity", "f"))
+    outside = crop_glsl([num(v) for v in crop], num(float(1 << size)), color=color)
     if color:
-        lines = ["vec4 s = $source(uv); vec4 d = $destination(uv);", f"float o = {o};"]
+        lines = [
+            "vec4 s = $source(uv); vec4 d = $destination(uv);",
+            outside,
+            f"float o = {o};",
+        ]
         if mode == 7:  # noqa: PLR2004 (switch)
             lines.append("return mix(d, s, o);")
         else:
@@ -1213,6 +1261,7 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
     else:
         lines = [
             "vec4 s = vec4($source(uv)); vec4 d = vec4($destination(uv));",
+            outside,
             f"float o = {o};",
             f"vec4 f = {expr};",
             "return clamp(d.x + (f.x - d.x) * o, 0.0, 1.0);",

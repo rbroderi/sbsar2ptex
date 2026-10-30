@@ -40,6 +40,7 @@ from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import BLEND_MODES
 from sbsar2ptex.translate import BLEND_NAMES
+from sbsar2ptex.translate import CROP_SIDES
 from sbsar2ptex.translate import HSL_GLSL
 from sbsar2ptex.translate import IN_FLOAT
 from sbsar2ptex.translate import IN_FLOAT4
@@ -51,8 +52,10 @@ from sbsar2ptex.translate import TORUS_GLSL
 from sbsar2ptex.translate import Sub
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import _dynamic_offset
+from sbsar2ptex.translate import blend_crop
 from sbsar2ptex.translate import box_glsl_live
 from sbsar2ptex.translate import buffer
+from sbsar2ptex.translate import crop_glsl
 from sbsar2ptex.translate import dmb_glsl
 from sbsar2ptex.translate import dmb_setup_glsl
 from sbsar2ptex.translate import f32
@@ -298,7 +301,11 @@ def _blend(*, color: bool) -> Atom:
         if color
         else "vec4 s = vec4($source(uv)); vec4 d = vec4($destination(uv));"
     )
-    lines = [head, "float o = $opacitymult * $opacity(uv);"]
+    lines = [
+        head,
+        crop_glsl([f"$crop_{side}" for side in CROP_SIDES], N, color=color),
+        "float o = $opacitymult * $opacity(uv);",
+    ]
     if color:
         lines += [
             "if ($blendingmode == 7) return mix(d, s, o);",
@@ -322,7 +329,9 @@ def _blend(*, color: bool) -> Atom:
          Port("opacity", "f", "Opacity", "opacity", "1.0")],
         t, "\n".join(lines),
         [_float("opacitymult", "Opacity", 1.0, 0.0, 1.0),
-         _enum("blendingmode", "Blending mode", modes, 0)],
+         _enum("blendingmode", "Blending mode", modes, 0),
+         *(_float(f"crop_{side}", f"Cropping area {side}", v, 0.0, 1.0)
+           for side, v in zip(CROP_SIDES, (0.0, 1.0, 0.0, 1.0), strict=True))],
         shared=BLEND_GLOBAL,
     )  # fmt: skip
 
@@ -1028,6 +1037,12 @@ def _read_blend(node: Node, k: _Knobs, *, color: bool) -> None:
     else:
         k.float("opacitymult", f32(inline[0]) if state == 1 else 1.0)
     k.plain("blendingmode", mode)
+    if state in (1, 2):
+        inline = inline[1:]
+    if flags >> 6 & 3 == 2:  # noqa: PLR2004 (a float4 function: no knob of it)
+        raise _Unpluggable
+    for side, v in zip(CROP_SIDES, blend_crop(node, inline), strict=True):
+        k.float(f"crop_{side}", v)
 
 
 def _read_transformation(node: Node, k: _Knobs, *, color: bool) -> None:
