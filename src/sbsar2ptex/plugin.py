@@ -360,7 +360,7 @@ def _transformation(*, color: bool) -> Atom:
         " + offset (matrix22 x y z w: M = [[x, y], [z, w]]), empty past its edges"
         " where it does not tile; a mip level of it where it shrinks it.",
         [Port("input1", t, "Input", "input")], t, "\n".join(lines), params,
-        helpers=transform_mip_glsl("input1", range(4)),
+        helpers=transform_mip_glsl("input1", (0, 1, 2)),  # 16F and 32F: floats
     )  # fmt: skip
 
 

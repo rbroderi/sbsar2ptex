@@ -1225,11 +1225,12 @@ def transform_mip_glsl(inp: str, formats: Iterable[int]) -> str:
 
     ``tmlevel_$(name)(gx, gy, n)``: the level read at texel-coordinate
     derivatives gx and gy (per pixel) in an image of side n, as
-    fxdraw.level. ``tmread_$(name)(q, L, n, fmt)``: the input ``$<inp>``
-    at q, wrapped, bilinear (fractions to 1/256) in its mip level L, whose
-    texels are the stored 2x2 means of the input's levels (fxglsl's), the
-    input stored in ``fmt`` (0: 8 bits, 1: 16 bits, else floats). Only
-    ``formats`` are read; for one format, ``fmt`` is not looked at.
+    fxdraw.level, at most MIP_LIVE_MAX. ``tmread_$(name)(q, L, n, fmt)``:
+    the input ``$<inp>`` at q, wrapped, bilinear (fractions to 1/256) in its
+    mip level L, whose texels are the stored 2x2 means of the input's levels
+    (fxglsl's), the input stored in ``fmt`` (0: 8 bits, 1: 16 bits, else
+    floats). Only ``formats`` are read; for one format, ``fmt`` is not
+    looked at.
     """
     formats = list(formats)
     out = ""
@@ -1244,7 +1245,7 @@ def transform_mip_glsl(inp: str, formats: Iterable[int]) -> str:
         # each four completed replaced by their mean (fxglsl.mip_readers).
         out += (
             f"vec4 tmmip{tag}(ivec2 t, int L, int n) {{\n"
-            "\tvec4 v[64];\n"
+            f"\tvec4 v[{4 * MIP_LIVE_MAX}];\n"
             "\tvec4 m = vec4(0.0);\n"
             "\tfor (int i = 0; i < 1 << (2 * L); i++) {\n"
             "\t\tivec2 o = ivec2(0);\n"
@@ -1292,10 +1293,19 @@ def transform_mip_glsl(inp: str, formats: Iterable[int]) -> str:
             if _FX_AMD
             else "\tfloat lq = lam;\n"
         )
-        + "\treturn int(clamp(floor(lq + 0.5), 0.0, log2(float(n))));\n"
+        # (not a number, say a matrix of infinities: level 0)
+        + "\tif (!(lq >= 0.5)) return 0;\n"
+        f"\treturn int(min(floor(lq + 0.5), min(log2(float(n)), {MIP_LIVE_MAX}.0)));\n"
         "}\n"
     )
     return out
+
+
+MIP_LIVE_MAX = 4
+"""The deepest mip level a transformation reads (4^level input reads a
+texel, built on the fly): beyond it, it reads this one. Translated graphs'
+static matrices read at most level 3 (Biomech's); a level from a knob or a
+function past it is a sharper image than Substance's, not a stalled render."""
 
 
 TRANSFORM_MIP_LINES = (
@@ -1323,7 +1333,8 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
 
     Where it shrinks the image, Substance reads a mip level of it (as an
     FX-Map's image patterns, fxdraw.level): transform_mip_glsl, the input
-    buffered (as stored) then.
+    buffered (as stored) where the matrix shrinks it with the graph's
+    defaults.
     """
     t = "rgba" if color else "f"
     flags = node.fields[0]
@@ -1369,7 +1380,9 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
     ]  # fmt: skip
     lines.append("return $input(fract(q));")
     made = shader(name, [("input", t)], t, "\n".join(lines))
-    if state_m == 2 or transform_minifies(matrix):  # noqa: PLR2004
+    # A function's matrix by its value with the graph's defaults (zero, so
+    # no buffer, where it varies per pixel)
+    if transform_minifies([float(v) for v in matrix]):
         # its mip levels are of the input as stored
         return buffered(made, ["input"], {"input"}, size, ["input"] if fmt == 1 else [])
     return made, ["input"]
