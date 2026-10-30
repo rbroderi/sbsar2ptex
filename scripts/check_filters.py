@@ -983,6 +983,20 @@ def pixel_cases() -> list[dict]:
             "set": {"$randomseed": 3},
         }
     )
+    # the node's own seed, on the graph's (Biomech's n3987)
+    out.append(
+        {
+            "tag": "pp_rand_nodeseed",
+            "filter": "pixelprocessor",
+            "kind": GRAY,
+            "params": (
+                *per(fn("rand", a=const(1.0))),
+                ("randomseed", "constantValueInt32", "5"),
+            ),
+            "floats": floats,
+            "set": {"$randomseed": 3},
+        }
+    )
     # A parameter function sets a variable, once per node with its value
     # generator; the per-pixel function reads it. Biomech hides one in an
     # output size relative to the input's, adding (0, 0); Substance renders

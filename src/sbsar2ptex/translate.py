@@ -102,6 +102,9 @@ class _Context:
     FX-Map's functions: check_filters fx_sampled_x_g on a sharp input)."""
     value_seed: str = "0"
     """Resolved random seed of the ordinary filter currently being translated."""
+    pixel_seed: str = "0"
+    """The pixel processor being translated's seed (GLSL): its own, the
+    graph's unless set; its per-pixel generators start from it."""
     count: int = 0
     data_dir: Path | None = None
     fx_variables: dict[int, tuple[str, str]] | None = None
@@ -455,7 +458,7 @@ def dynamic(node: Node, offset: int, before: Sequence[int] = ()) -> GLExpr:
     t = glsl_type(last.type, last.width)
     if _CTX.sampled is not None and any(i.op == RAND for i in block.instrs):
         # rand: the pixel's generator, from the graph seed and the pixel.
-        lines.insert(0, f"uint rng = sbs_rng_init(uint({_seed_glsl()}), uv);")
+        lines.insert(0, f"uint rng = sbs_rng_init(uint({_CTX.pixel_seed}), uv);")
         if RNG_GLSL not in _CTX.globals:
             _CTX.globals.append(RNG_GLSL)
     elif any(i.op == RAND for i in block.instrs):
@@ -2681,14 +2684,20 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
 def _pixelprocessor(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Pixel processor: its per-pixel function (the last code block) as GLSL.
 
-    $pos is the pixel (uv); samples read the inputs, buffered.
+    $pos is the pixel (uv); samples read the inputs, buffered. Its own
+    seed (inline, or a function: the first block) replaces the graph's
+    for the per-pixel generators (check_filters pp_rand_nodeseed).
     """
     count = node.fields[0]
     names = [f"input{n or ''}" for n in range(count)]
     params = node.code[:-1]
-    if (node.flags >> 6) & 3 == 2:  # noqa: PLR2004 (a seed function: the first block)
+    state = (node.flags >> 6) & 3
+    _CTX.pixel_seed = _seed_glsl()
+    if state == 1:
+        _CTX.value_seed = _CTX.pixel_seed = str(node.inline[0])
+    elif state == 2:  # noqa: PLR2004
         _CTX.value_seed = "0"
-        _CTX.value_seed = num(dynamic(node, params[0]))
+        _CTX.value_seed = _CTX.pixel_seed = num(dynamic(node, params[0]))
         params = params[1:]
     _CTX.sampled = names
     try:

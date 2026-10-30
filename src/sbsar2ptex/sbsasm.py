@@ -311,12 +311,17 @@ class Asm:
                 if k < len(rest) and is_offset(rest[k]):
                     node.code.append(rest[k] + BASE)
                     k += 1
-        else:
+        seed: list[int] = []
+        if fixed is None:
+            # A pixel processor's constant random seed (bits 6-7: 1) comes
+            # before its code offsets: kept as its first inline word.
+            if node.op in (40, 41) and node.flags >> 6 & 3 == 1:
+                seed, k = rest[k : k + 1], k + 1
             while k < len(rest) and is_offset(rest[k]):
                 node.code.append(rest[k] + BASE)
                 k += 1
         stop = (min(node.code) - start) // 4 - 1 if node.code else len(rest)
-        node.inline = rest[k:stop]
+        node.inline = seed + rest[k:stop]
         node.reads = [w for w in words if w in known]
         self._inputs(node)
         return node
