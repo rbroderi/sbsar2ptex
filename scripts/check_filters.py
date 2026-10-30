@@ -672,6 +672,34 @@ def fxmap_cases() -> list[dict]:
                                   ("imagefiltering", i1, str(f))))}
         for f in (0, 1, 2)
     ]  # fmt: skip
+    # Biomech's n1500 reduced: 30 rows of input A drawn nearest, by max,
+    # each shifted by input B sampled on its row. Rows and columns whose
+    # texel coordinate is within 1/512 below a texel read that texel.
+    row = fn(
+        "add",
+        a=const(0.016666668),
+        b=fn("mul", a=fn("floor", a=number), b=const(0.033333335)),
+    )
+    s = fn("samplelum", pos=vec2(const(0.5), row), data='<constantValueInt2 v="1 0"/>')
+    rows = pat(
+        1,
+        ("imagefiltering", i1, "2"),
+        ("blendingmode", i1, "1"),
+        dyn("frameoffset", vec2(
+            fn("add", a=fn("add", a=fn("mul", a=const(-1.0), b=s), b=const(-0.5)),
+               b=const(0.5)),
+            fn("add", a=fn("add", a=row, b=const(-1.0)), b=const(0.5)))),
+        dyn("patternsize", vec2(const(1.0), fn("mul", a=const(0.033333335),
+                                               b=const(25.41)))),
+    )  # fmt: skip
+    rows_map = fxmap_graph(fx("iterate", (("numberadded", i1, "30"),), {1: rows}))
+    out += [
+        {"tag": tag, "filter": "fxmaps", "kind": GRAY, "params": flat,
+         "extra": rows_map, "connect": 2, "format16": True, "size": 10,
+         "inputs": inputs}
+        for tag, inputs in (("fx_nearest_rows_g", {"a": "noise"}),
+                            ("fx_nearest_s8_g", {"a": "strip", "b": "smooth"}))
+    ]  # fmt: skip
     # Patterns larger than the map, many: baked (fxsplat.bake).
     blob = pat(
         6,  # gaussian
@@ -983,8 +1011,23 @@ def pixel_cases() -> list[dict]:
     return out
 
 
+def strip(n: int) -> np.ndarray:
+    """Return thin bright horizontal traces on black, ``n`` px, softer at the edges."""
+    rng = np.random.default_rng(11)
+    out = np.zeros((n, n))
+    for _ in range(n // 8):
+        r, w = int(rng.integers(0, n)), int(rng.integers(1, 4))
+        x0, length = int(rng.integers(0, n)), int(rng.integers(n // 16, n // 2))
+        cols = np.arange(x0, x0 + length) % n
+        v = rng.uniform(0.6, 1.0)
+        for dy, k in ((-1, 0.3), *((d, 1.0) for d in range(w)), (w, 0.3)):
+            rows = (r + dy) % n
+            out[rows, cols] = np.maximum(out[rows, cols], k * v)
+    return out
+
+
 def test_images(out: Path, size: int = SIZE) -> dict[str, Path]:  # noqa: PT028
-    """Write gray a, b, c and color A, B (alpha varying) test images."""
+    """Write gray a, b, c (and noise, strip, smooth), color A, B (alpha varying)."""
     n = 1 << size
     tail = "" if size == SIZE else f"_{size}"
     y, x = np.mgrid[0:n, 0:n] / n
@@ -994,6 +1037,11 @@ def test_images(out: Path, size: int = SIZE) -> dict[str, Path]:  # noqa: PT028
         + 0.25 * y * np.cos(2 * np.pi * 2 * y),
         "b": x * 0.7 + 0.3 * (0.5 + 0.5 * np.sin(2 * np.pi * 5 * (x + y))),
         "c": 0.5 + 0.5 * np.cos(2 * np.pi * 2 * x) * np.sin(2 * np.pi * 3 * y),
+        # cases' own inputs (case "inputs"): 8-bit noise; thin bright
+        # horizontal traces on black (a circuit strip); a smooth input to sample
+        "noise": np.random.default_rng(7).integers(0, 256, (n, n)) / 255,
+        "strip": strip(n),
+        "smooth": 0.5 + 0.35 * np.sin(2 * np.pi * (1.3 * y + 0.1)) + 0.1 * x,
     }
     color = {
         "A": np.stack(
@@ -1113,7 +1161,8 @@ def case(c: tuple | dict) -> dict:
 
     Keys: tag, filter, kind, params, arrays, format16, floats (graph float
     inputs and defaults) and set (input values to render with, in both
-    Substance and Material Maker); optionally engine (sbsrender's).
+    Substance and Material Maker); optionally engine (sbsrender's) and
+    inputs (test images for "a" and "b" by name, as test_images makes them).
     """
     if isinstance(c, dict):
         return {"arrays": "", "format16": False, "floats": {}, "set": {}, **c}
@@ -1226,6 +1275,7 @@ def main() -> None:
         ka, kb, _ = input_kinds(filt, kind)
         a = "A" if ka == COLOR else "a"
         b = "B" if kb == COLOR else "b"
+        a, b = c.get("inputs", {}).get("a", a), c.get("inputs", {}).get("b", b)
         subprocess.run(
             [
                 str(SBSRENDER), "render", "--input", str(out / f"{tag}.sbsar"),

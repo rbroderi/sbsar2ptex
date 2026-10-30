@@ -19,8 +19,9 @@ model is what tests and fxsplat.bake check it with.
 - Value: the pattern's (``value``) times the instance color (gray, or
   premultiplied rgba), plus the supplement after for gradation offset and
   hemisphere. An image is read at its texels' centers, zero past its
-  edges: nearest, bilinear with fractions rounded to 1/256, or bilinear in
-  one level of a mip chain of stored 2x2 means (``mip_chain``, ``level``).
+  edges: nearest (the texel coordinate rounded to 1/256, then floored),
+  bilinear with fractions rounded to 1/256, or bilinear in one level of a
+  mip chain of stored 2x2 means (``mip_chain``, ``level``).
 - Blending: into a float32 accumulator started at the background, never
   clamped: gray adds or takes the max; color adds or blends over (rgb), and
   always composites alpha over.
@@ -261,6 +262,27 @@ def frac256(f: np.ndarray) -> np.ndarray:
     return np.floor(f * 256 + 0.5) / 256
 
 
+NEAREST_STEP_AMD = 256
+"""Nearest filtering's texel coordinate is rounded to 1/this, then floored."""
+NEAREST_STEP_NVIDIA = 256
+"""NVIDIA's: AMD's assumed (not measured)."""
+
+
+def nearest_step(*, amd: bool) -> int:
+    """Return the steps per texel a nearest read rounds its coordinate to."""
+    return NEAREST_STEP_AMD if amd else NEAREST_STEP_NVIDIA
+
+
+def nearest(t: np.ndarray, step: int) -> np.ndarray:
+    """Return the texels a nearest read takes at texel coordinates ``t``.
+
+    ``t`` rounded to 1/``step`` (halves up), then floored: a coordinate
+    within a half step below a texel reads that texel (M: the border).
+    Function samples are not rounded (exact floor).
+    """
+    return np.floor(np.floor(t * step + 0.5) / step).astype(int)
+
+
 @dataclass
 class Instance:
     """A pattern drawn: fxsplat.Splat's fields."""
@@ -413,7 +435,8 @@ def render(
                     return np.where(ok[..., None], got, 0.0)
 
                 if filtering == fxmap.NEAREST:
-                    c = texel(np.floor(u * m).astype(int), np.floor(w * m).astype(int))
+                    step = nearest_step(amd=amd)
+                    c = texel(nearest(u * m, step), nearest(w * m, step))
                 else:
                     tx, ty = u * m - 0.5, w * m - 0.5
                     x0, y0 = np.floor(tx), np.floor(ty)
