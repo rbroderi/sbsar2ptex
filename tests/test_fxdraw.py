@@ -146,10 +146,12 @@ def test_the_mip_tie_goes_as_float32_rounds() -> None:
     assert 0.3 < up.mean() < 0.7
 
 
-def test_nearest_rounds_the_texel_coordinate_to_a_256th() -> None:
+def test_nearest_rounds_the_texel_coordinate_to_a_256th_on_amd() -> None:
     # within 1/512 below a texel reads it; at the image's edge, the border
     t = np.array([511.5, 511.997, 511.9985, 512.0, 1023.999, 1023.9975])
     assert list(fxdraw.nearest(t, 256)) == [511, 511, 512, 512, 1024, 1023]
+    # NVIDIA's: floored as it is
+    assert list(fxdraw.nearest(t, 0)) == [511, 511, 511, 512, 1023, 1023]
 
 
 def test_a_mip_level_is_drawn_at_its_size() -> None:

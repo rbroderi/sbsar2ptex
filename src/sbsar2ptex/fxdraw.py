@@ -264,12 +264,13 @@ def frac256(f: np.ndarray) -> np.ndarray:
 
 NEAREST_STEP_AMD = 256
 """Nearest filtering's texel coordinate is rounded to 1/this, then floored."""
-NEAREST_STEP_NVIDIA = 256
-"""NVIDIA's: AMD's assumed (not measured)."""
+NEAREST_STEP_NVIDIA = 0
+"""NVIDIA's: none, the coordinate floored (an RTX 3090: every rounding to
+1/128..1/1024 matches fewer of Substance's pixels than floor)."""
 
 
 def nearest_step(*, amd: bool) -> int:
-    """Return the steps per texel a nearest read rounds its coordinate to."""
+    """Return the steps per texel a nearest read rounds its coordinate to (0: none)."""
     return NEAREST_STEP_AMD if amd else NEAREST_STEP_NVIDIA
 
 
@@ -278,9 +279,11 @@ def nearest(t: np.ndarray, step: int) -> np.ndarray:
 
     ``t`` rounded to 1/``step`` (halves up), then floored: a coordinate
     within a half step below a texel reads that texel (M: the border).
-    Function samples are not rounded (exact floor).
+    Step 0, and function samples, floor ``t`` itself.
     """
-    return np.floor(np.floor(t * step + 0.5) / step).astype(int)
+    if step:
+        t = np.floor(t * step + 0.5) / step
+    return np.floor(t).astype(int)
 
 
 @dataclass

@@ -295,7 +295,10 @@ def draw_glsl(
     """
     n = 1 << layout.size
     nf = num(float(n))
-    st = num(float(fxdraw.nearest_step(amd=layout.amd)))
+    step = fxdraw.nearest_step(amd=layout.amd)
+    st = num(float(step))
+    # the texel coordinate to the nearest 1/step, floored (fxdraw.nearest)
+    near = f"floor(u * {nf} * {st} + 0.5) / {st}" if step else f"u * {nf}"
     rx0, rx1, ry0, ry1 = layout.render
     tx0, tx1, ty0, ty1 = layout.tiling
     tw, th = tx1 - tx0, ty1 - ty0
@@ -330,8 +333,7 @@ def draw_glsl(
             "vec4 fximg_$(name)(int k, int filtering, int L, vec2 q) {\n"
             "\tvec2 u = 0.5 * q + 0.5;\n"
             f"\tif (filtering == {fxmap.NEAREST}) {{\n"
-            # the texel coordinate to the nearest 1/step, floored (fxdraw.nearest)
-            f"\t\tvec2 t = floor(u * {nf} * {st} + 0.5) / {st};\n"
+            f"\t\tvec2 t = {near};\n"
             "\t\treturn fxtex_$(name)(k, 0, ivec2(floor(t)));\n"
             "\t}\n"
             f"\tvec2 t = u * float({n} >> L) - 0.5;\n"
