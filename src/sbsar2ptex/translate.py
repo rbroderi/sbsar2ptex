@@ -4115,6 +4115,25 @@ def translate_graph(
             src = levels[m, s]
         return src
 
+    near: dict[tuple[int, int], str] = {}
+
+    def fed_nearest(m: int, own: int) -> str:
+        """Return input ``m`` as a nearest-filtering transformation reads it.
+
+        An unfiltered buffer: of the input itself where it is smaller (not
+        enlarged: its texels stay whole), else of fed's level. Biomech's
+        max pyramids enlarge each level back to the graph's size and halve
+        it again: whole texels averaged back are the level's own.
+        """
+        s = min(sizes[m], own)
+        if (m, s) not in near:
+            near[m, s] = f"n{m}_near{s}"
+            mm.append(buffer(near[m, s], s, filtering=False))
+            wires.append(
+                wire(out_of[m] if sizes[m] <= own else fed(m, own), near[m, s])
+            )
+        return near[m, s]
+
     for k in sorted(need):
         node = nodes[k]
         name = f"n{k}"
@@ -4186,8 +4205,13 @@ def translate_graph(
         wires += made.wires
         for inp, to, port in made.ports:
             m = sources[inp]
-            at = transform_feed(node, sizes[m], own) if node.op in (4, 5) else own
-            wires.append(wire(fed(m, at), to, port))
+            if node.op not in (4, 5):
+                wires.append(wire(fed(m, own), to, port))
+                continue
+            at = transform_feed(node, sizes[m], own)
+            # filtering, flag word bit 5: 1 bilinear, 0 nearest
+            nearest = not node.fields[0] >> 5 & 1
+            wires.append(wire((fed_nearest if nearest else fed)(m, at), to, port))
         out_of[k] = made.output
     mm, wires = merge_buffers(mm, wires)
     mm, wires = cache_shared(mm, wires, size, origins)

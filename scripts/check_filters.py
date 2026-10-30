@@ -440,6 +440,10 @@ def size_cases() -> list[dict]:
             ("offset", "constantValueFloat2", "0.25 -0.25"),
         )
     )
+    near = (
+        '<parameter><name v="filtering"/><relativeTo v="0"/><paramValue>'
+        '<constantValueInt32 v="1"/></paramValue></parameter>'
+    )
     full = (
         ("offset", "constantValueFloat2", "0 0"),
         ("outputsize", "constantValueInt2", "0 0", "1"),  # the parent's size
@@ -462,6 +466,13 @@ def size_cases() -> list[dict]:
         {"tag": "size_zoom_abs4_g", "filter": "transformation", "kind": GRAY,
          "params": full, "chain": ("transformation", outputsize(4, 0) + zoom),
          "format16": True},
+        # nearest filtering, the pyramid's own (n4117 down, n4119 back up)
+        {"tag": "size_zoom_near_abs4_g", "filter": "transformation", "kind": GRAY,
+         "params": full, "chain": ("transformation", outputsize(4, 0) + zoom + near),
+         "format16": True},
+        {"tag": "size_transformation6_near_g", "filter": "transformation",
+         "kind": GRAY, "params": (*full, ("filtering", "constantValueInt32", "1")),
+         "chain": ("transformation", outputsize(-6)), "format16": True},
     ]  # fmt: skip
 
 
