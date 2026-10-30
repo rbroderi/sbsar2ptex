@@ -244,6 +244,8 @@ def cases() -> list[tuple]:
             ),
         ]
     out += [
+        # Biomech's n2373: a long warp, so its intensity's levels move samples
+        ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
         ("normal_g", "normal", GRAY, (("intensity", F1, "3"),), "", True),
         (
             "normal_inv_g",
