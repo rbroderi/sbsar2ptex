@@ -1220,72 +1220,37 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
     return shader(name, inputs, t, "\n".join(lines)), [i for i, _ in inputs]
 
 
-def transform_mip_glsl(inp: str, formats: Iterable[int]) -> str:
-    """Return a transformation's mip filtering (Substance's, when it shrinks).
+def transform_mip_glsl(formats: Iterable[int]) -> str:
+    """Return a transformation's mip filtering helpers (transform_read_lines).
 
     ``tmlevel_$(name)(gx, gy, n)``: the level read at texel-coordinate
     derivatives gx and gy (per pixel) in an image of side n, as
-    fxdraw.level, at most MIP_LIVE_MAX. ``tmread_$(name)(q, L, n, fmt)``:
-    the input ``$<inp>`` at q, wrapped, bilinear (fractions to 1/256) in its
-    mip level L, whose texels are the stored 2x2 means of the input's levels
-    (fxglsl's), the input stored in ``fmt`` (0: 8 bits, 1: 16 bits, else
-    floats). Only ``formats`` are read; for one format, ``fmt`` is not
-    looked at.
+    fxdraw.level, at most MIP_LIVE_MAX. ``tmlvin``, ``tmlvval`` and
+    ``tmmean`` ``_$(name)(..., fmt)``: fxglsl's levels and 2x2 means of a
+    format (0: 8 bits, 1: 16 bits, else floats), of ``formats`` only; for
+    one format, ``fmt`` is not looked at. None reads the input.
     """
     formats = list(formats)
     out = ""
     for fmt in formats:
         bits = {0: 8, 1: 16}.get(fmt)
-        tag = f"{fmt}_$(name)"
         helpers = fxglsl.levels_glsl(bits) + fxglsl.mean_glsl(bits, amd=_FX_AMD)
         if bits is not None:
             helpers = fxglsl.val_glsl() + helpers
-        out += helpers.replace("_$(name)", tag)
-        # A level-L texel's level: its 4^L texels below, in Morton order,
-        # each four completed replaced by their mean (fxglsl.mip_readers).
-        out += (
-            f"vec4 tmmip{tag}(ivec2 t, int L, int n) {{\n"
-            f"\tvec4 v[{4 * MIP_LIVE_MAX}];\n"
-            "\tvec4 m = vec4(0.0);\n"
-            "\tfor (int i = 0; i < 1 << (2 * L); i++) {\n"
-            "\t\tivec2 o = ivec2(0);\n"
-            "\t\tfor (int l = 0; l < L; l++) {\n"
-            "\t\t\tint c = (i >> (2 * l)) & 3;\n"
-            "\t\t\to += ivec2(c & 1, c >> 1) << l;\n"
-            "\t\t}\n"
-            "\t\tvec2 at = (vec2((t << L) + o) + 0.5) / float(n);\n"
-            f"\t\tm = fxlvin{tag}(vec4(${inp}(at)));\n"
-            "\t\tfor (int l = 0; l < L; l++) {\n"
-            "\t\t\tint c = (i >> (2 * l)) & 3;\n"
-            "\t\t\tv[4 * l + c] = m;\n"
-            "\t\t\tif (c != 3) break;\n"
-            f"\t\t\tm = fxmean{tag}(v[4 * l], v[4 * l + 1],"
-            " v[4 * l + 2], v[4 * l + 3]);\n"
-            "\t\t}\n"
-            "\t}\n"
-            f"\treturn fxlvval{tag}(m);\n"
-            "}\n"
+        out += helpers.replace("_$(name)", f"{fmt}_$(name)")
+    for fn, args, call in (
+        ("tmlvin", "vec4 x", "fxlvin{}_$(name)(x)"),
+        ("tmlvval", "vec4 x", "fxlvval{}_$(name)(x)"),
+        ("tmmean", "vec4 a, vec4 b, vec4 c, vec4 d", "fxmean{}_$(name)(a, b, c, d)"),
+    ):
+        picks = "".join(
+            f"\tif (fmt == {fmt}) return {call.format(fmt)};\n" for fmt in formats[:-1]
         )
-    picks = "".join(
-        f"\tif (fmt == {fmt}) return tmmip{fmt}_$(name)(t, L, n);\n"
-        for fmt in formats[:-1]
-    )
+        out += (
+            f"vec4 {fn}_$(name)({args}, int fmt) {{\n"
+            f"{picks}\treturn {call.format(formats[-1])};\n}}\n"
+        )
     out += (
-        "vec4 tmtex_$(name)(ivec2 t, int L, int n, int fmt) {\n"
-        f"{picks}\treturn tmmip{formats[-1]}_$(name)(t, L, n);\n"
-        "}\n"
-        "vec4 tmread_$(name)(vec2 q, int L, int n, int fmt) {\n"
-        "\tint ml = n >> L;\n"
-        "\tvec2 t = fract(q) * float(ml) - 0.5;\n"
-        "\tvec2 b = floor(t);\n"
-        "\tvec2 f = floor((t - b) * 256.0 + 0.5) / 256.0;\n"
-        "\tivec2 i0 = (ivec2(b) + ml) % ml;\n"
-        "\tivec2 i1 = (i0 + 1) % ml;\n"
-        "\treturn (1.0 - f.x) * (1.0 - f.y) * tmtex_$(name)(i0, L, n, fmt)"
-        " + f.x * (1.0 - f.y) * tmtex_$(name)(ivec2(i1.x, i0.y), L, n, fmt)"
-        " + (1.0 - f.x) * f.y * tmtex_$(name)(ivec2(i0.x, i1.y), L, n, fmt)"
-        " + f.x * f.y * tmtex_$(name)(i1, L, n, fmt);\n"
-        "}\n"
         "int tmlevel_$(name)(vec2 gx, vec2 gy, int n) {\n"
         "\tfloat lam = 0.5 * log2(max(dot(gx, gx), dot(gy, gy)));\n"
         + (
@@ -1308,12 +1273,61 @@ static matrices read at most level 3 (Biomech's); a level from a knob or a
 function past it is a sharper image than Substance's, not a stalled render."""
 
 
-TRANSFORM_MIP_LINES = (
-    "int L = tmlevel_$(name)(vec2({a}, {b}), vec2({c}, {d}), {n});",
-    "if (L > 0) return tmread_$(name)(q, L, {n}, {fmt}){x};",
-)
-"""A transformation's lines reading a mip level (transform_mip_glsl) where it
-shrinks: its matrix (a, b, c, d), image side n, input format fmt."""
+def transform_read_lines(
+    inp: str, matrix: Sequence[str], n: str, fmt: str, *, color: bool
+) -> list[str]:
+    """Return a transformation's last lines: its input ``$<inp>`` read at q.
+
+    At level 0 (tmlevel, from ``matrix`` a, b, c, d: GLSL), at q itself;
+    past it bilinear (fractions to 1/256), wrapped, in that mip level of
+    the input of side ``n`` stored in ``fmt`` (GLSL ints): each texel the
+    level of its 4^L texels below, in Morton order, each four completed
+    replaced by their mean (fxglsl.mip_readers). One read of the input in
+    the code: a chain of transformations inlined in one shader grows as
+    the chain, not 4^k times.
+    """
+    a, b, c, d = matrix
+    return [
+        f"int L = tmlevel_$(name)(vec2({a}, {b}), vec2({c}, {d}), {n});",
+        f"int ml = {n} >> L;",
+        "vec2 tt = fract(q) * float(ml) - 0.5;",
+        "vec2 tb = floor(tt);",
+        "vec2 tf = floor((tt - tb) * 256.0 + 0.5) / 256.0;",
+        "ivec2 i0 = (ivec2(tb) + ml) % ml;",
+        "vec4 acc = vec4(0.0);",
+        f"vec4 v[{4 * MIP_LIVE_MAX}];",
+        "for (int k = 0; k < (L > 0 ? 4 : 1); k++) {",
+        "\tivec2 corner = ivec2(k & 1, k >> 1);",
+        "\tivec2 tc = (i0 + corner) % ml;",
+        "\tvec2 w = mix(1.0 - tf, tf, vec2(corner));",
+        "\tvec4 m = vec4(0.0);",
+        "\tfor (int i = 0; i < 1 << (2 * L); i++) {",
+        "\t\tivec2 o = ivec2(0);",
+        "\t\tfor (int l = 0; l < L; l++) {",
+        "\t\t\tint c = (i >> (2 * l)) & 3;",
+        "\t\t\to += ivec2(c & 1, c >> 1) << l;",
+        "\t\t}",
+        f"\t\tvec2 at = L > 0 ? (vec2((tc << L) + o) + 0.5) / float({n}) : fract(q);",
+        f"\t\tvec4 x = vec4(${inp}(at));",
+        "\t\tif (L == 0) {",
+        "\t\t\tm = x;",
+        "\t\t\tbreak;",
+        "\t\t}",
+        f"\t\tm = tmlvin_$(name)(x, {fmt});",
+        "\t\tfor (int l = 0; l < L; l++) {",
+        "\t\t\tint c = (i >> (2 * l)) & 3;",
+        "\t\t\tv[4 * l + c] = m;",
+        "\t\t\tif (c != 3) break;",
+        (
+            "\t\t\tm = tmmean_$(name)(v[4 * l], v[4 * l + 1], v[4 * l + 2],"
+            f" v[4 * l + 3], {fmt});"
+        ),
+        "\t\t}",
+        "\t}",
+        f"\tacc += L > 0 ? w.x * w.y * tmlvval_$(name)(m, {fmt}) : m;",
+        "}",
+        "return acc;" if color else "return acc.x;",
+    ]
 
 
 def transform_minifies(matrix: Sequence[float]) -> bool:
@@ -1332,7 +1346,7 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
     """Read the input at M^T (uv - 0.5) + 0.5 + offset: Transformation 2D.
 
     Where it shrinks the image, Substance reads a mip level of it (as an
-    FX-Map's image patterns, fxdraw.level): transform_mip_glsl, the input
+    FX-Map's image patterns, fxdraw.level): transform_read_lines, the input
     buffered (as stored) where the matrix shrinks it with the graph's
     defaults.
     """
@@ -1370,15 +1384,10 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
             empty = "vec4(0.0)" if color else "0.0"
             lines.append(f"if (q.{axis} < 0.0 || q.{axis} >= 1.0) return {empty};")
     fmt = node.flags >> 4 & 3
-    _CTX.helpers.append(transform_mip_glsl("input", [fmt]))
-    lines += [
-        ln.format(
-            a=num(a), b=num(b), c=num(c), d=num(d), n=1 << size, fmt=fmt,
-            x="" if color else ".x",
-        )
-        for ln in TRANSFORM_MIP_LINES
-    ]  # fmt: skip
-    lines.append("return $input(fract(q));")
+    _CTX.helpers.append(transform_mip_glsl([fmt]))
+    lines += transform_read_lines(
+        "input", [num(x) for x in (a, b, c, d)], str(1 << size), str(fmt), color=color
+    )
     made = shader(name, [("input", t)], t, "\n".join(lines))
     # A function's matrix by its value with the graph's defaults (zero, so
     # no buffer, where it varies per pixel)

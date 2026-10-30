@@ -48,7 +48,6 @@ from sbsar2ptex.translate import PLUGIN_LINKS
 from sbsar2ptex.translate import PLUGIN_PREFIX
 from sbsar2ptex.translate import RCP_GLSL
 from sbsar2ptex.translate import TORUS_GLSL
-from sbsar2ptex.translate import TRANSFORM_MIP_LINES
 from sbsar2ptex.translate import Sub
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import _dynamic_offset
@@ -62,6 +61,7 @@ from sbsar2ptex.translate import input_params
 from sbsar2ptex.translate import levels_glsl
 from sbsar2ptex.translate import transform_minifies
 from sbsar2ptex.translate import transform_mip_glsl
+from sbsar2ptex.translate import transform_read_lines
 from sbsar2ptex.translate import wire
 
 VERSION = "1.0"
@@ -339,14 +339,10 @@ def _transformation(*, color: bool) -> Atom:
         "q += vec2(0.5) + vec2($offset_x, $offset_y);",
         f"if (($tiling & 1) == 0 && (q.x < 0.0 || q.x >= 1.0)) return {empty};",
         f"if (($tiling & 2) == 0 && (q.y < 0.0 || q.y >= 1.0)) return {empty};",
-        *(
-            ln.format(
-                a="$matrix22_x", b="$matrix22_y", c="$matrix22_z", d="$matrix22_w",
-                n=f"int({N})", fmt="$format", x="" if color else ".x",
-            )
-            for ln in TRANSFORM_MIP_LINES
+        *transform_read_lines(
+            "input1", [f"$matrix22_{k}" for k in "xyzw"], f"int({N})", "$format",
+            color=color,
         ),
-        "return $input1(fract(q));",
     ]  # fmt: skip
     params = [
         _float(f"matrix22_{k}", f"Transform matrix {k}", float(k in "xw"), -2.0, 2.0)
@@ -360,7 +356,7 @@ def _transformation(*, color: bool) -> Atom:
         " + offset (matrix22 x y z w: M = [[x, y], [z, w]]), empty past its edges"
         " where it does not tile; a mip level of it where it shrinks it.",
         [Port("input1", t, "Input", "input")], t, "\n".join(lines), params,
-        helpers=transform_mip_glsl("input1", (0, 1, 2)),  # 16F and 32F: floats
+        helpers=transform_mip_glsl((0, 1, 2)),  # 16F and 32F: floats
     )  # fmt: skip
 
 
