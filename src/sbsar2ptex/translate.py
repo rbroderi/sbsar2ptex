@@ -1394,24 +1394,40 @@ def transform_minifies(matrix: Sequence[float]) -> bool:
     g = max(math.hypot(a, b), math.hypot(c, d))
     if g == 0:
         return False
+    return transform_level(g) > 0
+
+
+def transform_level(g: float) -> int:
+    """Return the mip level a transformation reads where a pixel spans ``g`` texels."""
+    if g <= 0:
+        return 0
     lam = math.log2(g)
     if _FX_AMD:
         lam = math.ceil(lam * 256 - 0.5 - fxdraw.LOD_TIE) / 256
-    return lam >= 0.5  # noqa: PLR2004
+    return math.floor(lam + 0.5) if lam >= 0.5 else 0  # noqa: PLR2004
 
 
-def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | Sub:
-    """Read the input at M^T (uv - 0.5) + 0.5 + offset: Transformation 2D.
+def transform_feed(node: Node, have: int, own: int) -> int:
+    """Return the size (log2) a transformation ``own`` in size reads its input at.
 
-    Where it shrinks the image, Substance reads a mip level of it (as an
-    FX-Map's image patterns, fxdraw.level): transform_read_lines, the input
-    buffered (as stored) where the matrix shrinks it with the graph's
-    defaults.
+    An input larger than the node is read in the mip level the matrix
+    picks for its texels (Biomech's 16-pixel min/max pyramid zooms into
+    its 1024-pixel input: level 5, not 6 as the node's size): that level
+    averaged down, which the shader reads at level 0. A constant matrix
+    only: a function's is read at the node's size.
     """
-    t = "rgba" if color else "f"
+    if have <= own or (node.fields[0] >> 6) & 3 == 2:  # noqa: PLR2004
+        return own
+    a, b, c, d = (float(v) for v in _transform_matrix(node)[0])
+    g = max(math.hypot(a, b), math.hypot(c, d)) * (1 << have - own)
+    return min(max(have - transform_level(g), own), have)
+
+
+def _transform_matrix(node: Node) -> tuple[list[Any], list[Any]]:
+    """Return a transformation's matrix and offset: numbers or GLExprs."""
     flags = node.fields[0]
-    matrix = [1.0, 0.0, 0.0, 1.0]
-    offset = [0.0, 0.0]
+    matrix: list[Any] = [1.0, 0.0, 0.0, 1.0]
+    offset: list[Any] = [0.0, 0.0]
     inline = list(node.inline)
     state_m = (flags >> 6) & 3
     state_o = (flags >> 25) & 3
@@ -1423,6 +1439,19 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
         offset = [f32(w) for w in inline[:2]]
     elif state_o == 2:  # noqa: PLR2004
         offset = dynamic(node, inline[0] + BASE)
+    return matrix, offset
+
+
+def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | Sub:
+    """Read the input at M^T (uv - 0.5) + 0.5 + offset: Transformation 2D.
+
+    Where it shrinks the image, Substance reads a mip level of it (as an
+    FX-Map's image patterns, fxdraw.level): transform_read_lines, the input
+    buffered (as stored) where the matrix shrinks it with the graph's
+    defaults.
+    """
+    t = "rgba" if color else "f"
+    matrix, offset = _transform_matrix(node)
     a, b, c, d = (knob(k, f"Matrix {k}", v, -2.0, 2.0) for k, v in zip(
         ("m11", "m12", "m21", "m22"), matrix, strict=True))  # fmt: skip
     offset = knob("offset", "Offset", offset, -1.0, 1.0)
@@ -4053,7 +4082,9 @@ def translate_graph(
 
         Smaller, it is enlarged (_bspline). Larger, it is averaged down: each
         halving buffer samples the one above at its texels' shared corners,
-        so linear filtering averages them two by two (a mipmap).
+        so linear filtering averages them two by two (a mipmap). A
+        transformation reads it in the level its matrix picks (transform_feed),
+        no smaller than ``own``: pass that as ``own``.
         """
         if sizes[m] < own:
             if m not in smooth:
@@ -4144,9 +4175,10 @@ def translate_graph(
         if origins is not None:
             origins.update((n["name"], k) for n in made.nodes)
         wires += made.wires
-        wires += [
-            wire(fed(sources[inp], own), to, port) for inp, to, port in made.ports
-        ]
+        for inp, to, port in made.ports:
+            m = sources[inp]
+            at = transform_feed(node, sizes[m], own) if node.op in (4, 5) else own
+            wires.append(wire(fed(m, at), to, port))
         out_of[k] = made.output
     mm, wires = merge_buffers(mm, wires)
     mm, wires = cache_shared(mm, wires, size, origins)

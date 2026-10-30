@@ -432,6 +432,14 @@ def size_cases() -> list[dict]:
         + function_graph(fn("div", FLOAT2, a=pixels, b=get("$size", FLOAT2)))
         + "</dynamicValue></paramValue></parameter>"
     )
+    zoom = "".join(
+        f'<parameter><name v="{k}"/><relativeTo v="0"/><paramValue>'
+        f'<{t} v="{v}"/></paramValue></parameter>'
+        for k, t, v in (
+            ("matrix22", "constantValueFloat4", "0.5 0 0 0.5"),
+            ("offset", "constantValueFloat2", "0.25 -0.25"),
+        )
+    )
     full = (
         ("offset", "constantValueFloat2", "0 0"),
         ("outputsize", "constantValueInt2", "0 0", "1"),  # the parent's size
@@ -448,7 +456,12 @@ def size_cases() -> list[dict]:
     ] + [
         {"tag": "size_shift_abs6_g", "filter": "transformation", "kind": GRAY,
          "params": full, "chain": ("transformation", outputsize(6, 0) + shift),
-         "format16": True}
+         "format16": True},
+        # Biomech's min/max pyramid (n4171): 16 px, a quarter of the
+        # graph-size input zoomed in twice
+        {"tag": "size_zoom_abs4_g", "filter": "transformation", "kind": GRAY,
+         "params": full, "chain": ("transformation", outputsize(4, 0) + zoom),
+         "format16": True},
     ]  # fmt: skip
 
 
