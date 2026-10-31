@@ -102,6 +102,9 @@ class _Context:
     FX-Map's functions: check_filters fx_sampled_x_g on a sharp input)."""
     value_seed: str = "0"
     """Resolved random seed of the ordinary filter currently being translated."""
+    transform_in: int | None = None
+    """The size (log2) the transformation being translated reads its input
+    at (translate_graph's transform_feed, or a nearest read's own size)."""
     pixel_seed: str = "0"
     """The pixel processor being translated's seed (GLSL): its own, the
     graph's unless set; its per-pixel generators start from it."""
@@ -1335,22 +1338,31 @@ function past it is a sharper image than Substance's, not a stalled render."""
 
 
 def transform_read_lines(
-    inp: str, matrix: Sequence[str], n: str, fmt: str, *, color: bool
+    inp: str,
+    matrix: Sequence[str],
+    n: str,
+    fmt: str,
+    *,
+    color: bool,
+    scale: str = "1.0",
 ) -> list[str]:
     """Return a transformation's last lines: its input ``$<inp>`` read at q.
 
     At level 0 (tmlevel, from ``matrix`` a, b, c, d: GLSL), at q itself;
     past it bilinear (fractions to 1/256), wrapped, in that mip level of
-    the input of side ``n`` stored in ``fmt`` (GLSL ints): each texel the
-    level of its 4^L texels below, in Morton order, each four completed
-    replaced by their mean (fxglsl.mip_readers). One read of the input in
-    the code: a chain of transformations inlined in one shader grows as
-    the chain, not 4^k times.
+    the input, of side ``n`` (the node's) times ``scale`` (GLSL: the input
+    as fed, translate_graph's transform_in), stored in ``fmt`` (GLSL ints):
+    each texel the level of its 4^L texels below, in Morton order, each
+    four completed replaced by their mean (fxglsl.mip_readers). One read
+    of the input in the code: a chain of transformations inlined in one
+    shader grows as the chain, not 4^k times.
     """
     a, b, c, d = matrix
     return [
-        f"int L = tmlevel_$(name)(vec2({a}, {b}), vec2({c}, {d}), {n});",
-        f"int ml = {n} >> L;",
+        f"float sc = {scale};",
+        f"int nin = int(float({n}) * sc + 0.5);",
+        f"int L = tmlevel_$(name)(vec2({a}, {b}) * sc, vec2({c}, {d}) * sc, nin);",
+        "int ml = nin >> L;",
         "vec2 tt = fract(q) * float(ml) - 0.5;",
         "vec2 tb = floor(tt);",
         "vec2 tf = floor((tt - tb) * 256.0 + 0.5) / 256.0;",
@@ -1368,7 +1380,7 @@ def transform_read_lines(
         "\t\t\tint c = (i >> (2 * l)) & 3;",
         "\t\t\to += ivec2(c & 1, c >> 1) << l;",
         "\t\t}",
-        f"\t\tvec2 at = L > 0 ? (vec2((tc << L) + o) + 0.5) / float({n}) : fract(q);",
+        "\t\tvec2 at = L > 0 ? (vec2((tc << L) + o) + 0.5) / float(nin) : fract(q);",
         f"\t\tvec4 x = vec4(${inp}(at));",
         "\t\tif (L == 0) {",
         "\t\t\tm = x;",
@@ -1475,14 +1487,18 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
             lines.append(f"if (q.{axis} < 0.0 || q.{axis} >= 1.0) return {empty};")
     fmt = node.flags >> 4 & 3
     _CTX.helpers.append(transform_mip_glsl([fmt]))
-    lines += transform_read_lines(
-        "input", [num(x) for x in (a, b, c, d)], str(1 << size), str(fmt), color=color
-    )
-    made = shader(name, [("input", t)], t, "\n".join(lines))
+    # The input as fed (translate_graph): its texels' size against the node's
+    scale = 2.0 ** ((size if _CTX.transform_in is None else _CTX.transform_in) - size)
     # A function's matrix by its value with the graph's defaults (zero, so
     # no buffer, where it varies per pixel)
-    if transform_minifies([float(v) for v in matrix]):
-        # its mip levels are of the input as stored
+    minifies = transform_minifies([float(v) * scale for v in matrix])
+    lines += transform_read_lines(
+        "input", [num(x) for x in (a, b, c, d)], str(1 << size), str(fmt),
+        color=color, scale=num(1.0 if minifies else scale),
+    )  # fmt: skip
+    made = shader(name, [("input", t)], t, "\n".join(lines))
+    if minifies:
+        # its mip levels are of the input as stored, at the node's size
         return buffered(made, ["input"], {"input"}, size, ["input"] if fmt == 1 else [])
     return made, ["input"]
 
@@ -4136,7 +4152,9 @@ def translate_graph(
         for s in range(top, own - 1, -1):
             if (m, s) not in levels:
                 levels[m, s] = f"n{m}_level{s}"
-                mm.append(buffer(levels[m, s], s))
+                # 32-bit: a half float drops one of its steps (32/65535 near
+                # 1) at each level of Biomech's max pyramids
+                mm.append(buffer(levels[m, s], s, precise=True))
                 wires.append(wire(src, levels[m, s]))
             src = levels[m, s]
         return src
@@ -4186,6 +4204,11 @@ def translate_graph(
         _CTX.size = own
         loop = loops.get(k)
         sources = loop.inputs if loop is not None else node.inputs
+        _CTX.transform_in = None
+        if node.op in (4, 5) and "input" in sources:  # its input as fed below
+            m = sources["input"]
+            at = transform_feed(node, sizes[m], own)
+            _CTX.transform_in = min(sizes[m], at) if not node.fields[0] >> 5 & 1 else at
         if library and k in library:
             template, knobs = library[k]
             graph_wide = _CTX.inputs

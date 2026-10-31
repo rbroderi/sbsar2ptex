@@ -476,6 +476,15 @@ def size_cases() -> list[dict]:
         '<parameter><name v="filtering"/><relativeTo v="0"/><paramValue>'
         '<constantValueInt32 v="1"/></paramValue></parameter>'
     )
+    # a 16-bit image both compute exactly: x + 0.37 y, wrapped
+    tilt = fn("const_float2", FLOAT2, data='<constantValueFloat2 v="1 0.37"/>')
+    ramp16 = (
+        '<parameter><name v="perpixel"/><relativeTo v="0"/><paramValue><dynamicValue>'
+        + function_graph(fn("dot", a=get("$pos", FLOAT2), b=tilt))
+        + "</dynamicValue></paramValue></parameter>"
+        '<parameter><name v="format"/><relativeTo v="0"/><paramValue>'
+        '<constantValueInt32 v="1"/></paramValue></parameter>'
+    )
     full = (
         ("offset", "constantValueFloat2", "0 0"),
         ("outputsize", "constantValueInt2", "0 0", "1"),  # the parent's size
@@ -505,6 +514,13 @@ def size_cases() -> list[dict]:
         {"tag": "size_transformation6_near_g", "filter": "transformation",
          "kind": GRAY, "params": (*full, ("filtering", "constantValueInt32", "1")),
          "chain": ("transformation", outputsize(-6)), "format16": True},
+        # Biomech's n3902: a 32-pixel nearest 2x zoom out of a 16-pixel
+        # image, a texel a pixel (no mip level)
+        {"tag": "size_near_x2_abs5_g", "filter": "transformation", "kind": GRAY,
+         "params": (("matrix22", F4, "2 0 0 2"),
+                    ("filtering", "constantValueInt32", "1"),
+                    ("outputsize", "constantValueInt2", "5 5", "0")),
+         "chain": ("pixelprocessor", outputsize(4, 0) + ramp16), "format16": True},
     ]  # fmt: skip
 
 
@@ -1141,8 +1157,17 @@ def material_graph(
     """Return a graph: ``source`` into a Material's albedo (and alpha into opacity).
 
     With ``channel`` (0 for a grayscale source), that channel's 16-bit level
-    instead: the albedo's red its high byte, green its low (--levels).
+    instead: the albedo's red its high byte, green its low (--levels). A
+    source smaller than the graph (its buffer) is read unfiltered: exported
+    larger, each of its texels a block (levels_line reads one a block).
     """
+    mm_nodes = [
+        {**n, "parameters": {**n["parameters"], "filter": False, "f32": True}}
+        if n["name"] == source[0] and n["type"] == "buffer"
+        and n["parameters"]["size"] < size
+        else n
+        for n in mm_nodes
+    ]  # fmt: skip
     material = {
         "name": "Material",
         "type": "material",
@@ -1254,11 +1279,11 @@ def levels_line(
         enc = np.asarray(Image.open(path)).astype(np.int64)
         got = enc[..., 0] * 256 + enc[..., 1]
         want = ref[..., 0 if ch is None else min(ch, ref.shape[-1] - 1)]
-        if ch == 3 and ref.shape[-1] < 4:
-            want = np.full_like(got, 65535)
         if got.shape[0] > want.shape[0]:  # exported larger: the shader's pixels
             k = got.shape[0] // want.shape[0]
             got = got[k // 2 :: k, k // 2 :: k]
+        if ch == 3 and ref.shape[-1] < 4:
+            want = np.full_like(got, 65535)
         if want.shape != got.shape:
             return f"{tag:16} sizes differ: {want.shape} {got.shape}"
         diffs.append(np.abs(got - want))

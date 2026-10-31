@@ -33,6 +33,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from sbsar2ptex import translate
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
 from sbsar2ptex.function import decode
 from sbsar2ptex.sbsasm import BASE
@@ -350,7 +351,7 @@ def _transformation(*, color: bool) -> Atom:
         f"if (($tiling & 2) == 0 && (q.y < 0.0 || q.y >= 1.0)) return {empty};",
         *transform_read_lines(
             "input1", [f"$matrix22_{k}" for k in "xyzw"], f"int({N})", "$format",
-            color=color,
+            color=color, scale="exp2($inscale)",
         ),
     ]  # fmt: skip
     params = [
@@ -359,6 +360,8 @@ def _transformation(*, color: bool) -> Atom:
     ]
     params += [_float(f"offset_{k}", f"Offset {k}", 0.0, -1.0, 1.0) for k in "xy"]
     params.append(_enum("tiling", "Tiling mode", TILINGS, 3))
+    # the input's texels against the node's, log2 (translate_graph feeds it)
+    params.append(_float("inscale", "Input scale (log2)", 0.0, -12.0, 12.0))
     return _shader_atom(
         f"sbs_transformation{sfx}", "Transformation 2D",
         "Substance's Transformation 2D: the input sampled at M^T (uv - 0.5) + 0.5"
@@ -1273,12 +1276,17 @@ class Maker:
         sampled = set(op.sampled)
         if op.base == "dirmotionblur" and fmt == 1:  # 16 bits: the input's levels
             precise.add("input")
-        if op.base == "transformation" and transform_minifies(
-            [knobs.values[f"matrix22_{c}"] for c in "xyzw"]
-        ):  # its mip levels are of the input as stored
-            sampled.add("input")
-            if fmt == 1:
-                precise.add("input")
+        if op.base == "transformation":
+            fed = translate._CTX.transform_in  # noqa: SLF001
+            inscale = 0 if fed is None else fed - size
+            if transform_minifies(
+                [knobs.values[f"matrix22_{c}"] * 2.0**inscale for c in "xyzw"]
+            ):  # its mip levels are of the input as stored, at its size
+                sampled.add("input")
+                if fmt == 1:
+                    precise.add("input")
+                inscale = 0
+            made["parameters"]["inscale"] = float(inscale)
         nodes, wires, ports = [made], [], []
         for port, p in enumerate(atom.ports):
             if p.key not in node.inputs:

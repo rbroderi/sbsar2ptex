@@ -380,7 +380,8 @@ def test_transformation_shrinking_reads_a_mip_level() -> None:
     by_type = {n["type"]: n for n in made.nodes}
     assert set(by_type) == {"buffer", "shader"}
     code = by_type["shader"]["shader_model"]["instance"]
-    assert "int ml = 256 >> L;" in code
+    assert "int nin = int(float(256) * sc + 0.5);" in code
+    assert "int ml = nin >> L;" in code
     assert "tmlvin_$(name)(x, 0)" in code
     assert "$m11" in code
     # one read of the input: a chain inlined in one shader stays its length
