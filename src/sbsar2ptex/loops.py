@@ -208,10 +208,15 @@ class SlopeBlur:
         )
         controls["parameters"][samples] = default
         graph["parameters"][samples] = default
-        # the warps' buffers, as the unrolled ones have
+        # the warps' buffers, as the unrolled ones have (16 bits: levels)
         source, gradient = f"{name}_input_buf", f"{name}_gradient_buf"
+        exact = first.flags >> 4 & 3 == 1
         out = Sub(
-            [graph, buffer(source, size), buffer(gradient, size, precise=True)],
+            [
+                graph,
+                buffer(source, size, precise=exact),
+                buffer(gradient, size, precise=True),
+            ],
             [wire(source, name, 0), wire(gradient, name, 1)],
             [("source", source, 0), ("gradient", gradient, 0)],
             name,

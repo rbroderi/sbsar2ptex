@@ -50,6 +50,8 @@ from sbsar2ptex.translate import PLUGIN_LINKS
 from sbsar2ptex.translate import PLUGIN_PREFIX
 from sbsar2ptex.translate import RCP_GLSL
 from sbsar2ptex.translate import TORUS_GLSL
+from sbsar2ptex.translate import WARP_GLSL
+from sbsar2ptex.translate import WARP_SIN_GLSL
 from sbsar2ptex.translate import Sub
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import _dynamic_offset
@@ -59,6 +61,7 @@ from sbsar2ptex.translate import buffer
 from sbsar2ptex.translate import crop_glsl
 from sbsar2ptex.translate import dmb_glsl
 from sbsar2ptex.translate import dmb_setup_glsl
+from sbsar2ptex.translate import dwarp_body
 from sbsar2ptex.translate import f32
 from sbsar2ptex.translate import graph_input
 from sbsar2ptex.translate import input_params
@@ -66,6 +69,8 @@ from sbsar2ptex.translate import levels_glsl
 from sbsar2ptex.translate import transform_minifies
 from sbsar2ptex.translate import transform_mip_glsl
 from sbsar2ptex.translate import transform_read_lines
+from sbsar2ptex.translate import warp_body
+from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
 VERSION = "1.0"
@@ -467,41 +472,61 @@ def _sharpen(*, color: bool) -> Atom:
     )  # fmt: skip
 
 
+def _by_format(g: str, body: Any) -> tuple[str, str]:
+    """Return a warp's helpers and body: warp_glsl's for each format, by $format.
+
+    ``body`` is the body for helpers named ``$(name)_`` (a function of
+    nothing, read once per format).
+    """
+    helpers, calls = [WARP_GLSL], []
+    for fmt in (0, 1, 2):
+        tag = f"$(name)_v{fmt}_"
+        helpers.append(warp_glsl(g, fmt, N, "$input1").replace("$(name)_", tag))
+        helpers.append(
+            f"{g} {tag}body(vec2 uv) {{\n{body().replace('$(name)_', tag)}\n}}\n"
+        )
+        calls.append(f"{tag}body(uv)")
+    text = (
+        f"if ($format == 0) return {calls[0]};\n"
+        f"if ($format == 1) return {calls[1]};\n"
+        f"return {calls[2]};"
+    )
+    return "".join(helpers), text
+
+
 def _warp(*, color: bool) -> Atom:
-    t, _, sfx = _kinds(color=color)
-    lines = [
-        f"vec2 e = vec2(1.0 / {N}, 0.0);",
-        "float h = $inputgradient(uv);",
-        (
-            "vec2 g = vec2(h - $inputgradient(fract(uv - e)),"
-            " h - $inputgradient(fract(uv - e.yx)));"
-        ),
-        f"return $input1(fract(uv + (($intensity * {N}) / 256.0) * g));",
-    ]
+    t, g, sfx = _kinds(color=color)
+    helpers, body = _by_format(g, lambda: warp_body(N, "$intensity", "$inputgradient"))
     return _shader_atom(
         f"sbs_warp{sfx}", "Warp",
         "Substance's Warp: the input sampled at uv + intensity / 256 times the"
-        " gradient input's slope (per UV unit).",
+        " gradient input's slope (per UV unit), as Substance's GPU engine"
+        " samples and stores it. Its inputs are read by texel (buffer them;"
+        " 32 bits for the gradient, and the input of a 16 bits warp).",
         [Port("input1", t, "Input", "input"),
          Port("inputgradient", "f", "Gradient input", "gradient")],
-        t, "\n".join(lines), [_float("intensity", "Intensity", 1.0, 0.0, 32.0)],
+        t, body, [_float("intensity", "Intensity", 1.0, 0.0, 32.0)],
+        helpers=helpers,
     )  # fmt: skip
 
 
 def _directionalwarp(*, color: bool) -> Atom:
-    t, _, sfx = _kinds(color=color)
-    a = "6.28318531 * $warpangle"
-    d = f"$intensity / 256.0 * vec2(cos({a}), sin({a}))"
-    body = f"return $input1(fract(uv + $inputintensity(uv) * {d}));"
+    t, g, sfx = _kinds(color=color)
+    helpers, body = _by_format(
+        g, lambda: dwarp_body(N, "$intensity", "$warpangle", "$inputintensity")
+    )
     return _shader_atom(
         f"sbs_directionalwarp{sfx}", "Directional warp",
         "Substance's Directional warp: the input sampled at uv + intensity /"
-        " 256 times the intensity input along the angle (turns).",
+        " 256 times the intensity input along the angle (turns), as"
+        " Substance's GPU engine samples and stores it. Its input is read by"
+        " texel (buffer it; 32 bits for a 16 bits warp).",
         [Port("input1", t, "Input", "input"),
          Port("inputintensity", "f", "Intensity input", "intensity")],
         t, body,
         [_float("intensity", "Intensity", 10.0, 0.0, 64.0),
          _float("warpangle", "Warp angle", 0.0, 0.0, 1.0)],
+        helpers=WARP_SIN_GLSL + helpers,
     )  # fmt: skip
 
 
@@ -1274,7 +1299,8 @@ class Maker:
         # Its inputs buffered as the inline translation buffers them.
         precise = set(op.precise)
         sampled = set(op.sampled)
-        if op.base == "dirmotionblur" and fmt == 1:  # 16 bits: the input's levels
+        # 16 bits: the input's levels, read by texel
+        if op.base in ("dirmotionblur", "warp", "directionalwarp") and fmt == 1:
             precise.add("input")
         if op.base == "transformation":
             fed = translate._CTX.transform_in  # noqa: SLF001

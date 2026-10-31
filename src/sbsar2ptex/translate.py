@@ -2602,41 +2602,363 @@ def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:
     )  # fmt: skip
 
 
-def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
-    """Warp: sample at uv + intensity / 256 times the gradient's slope.
+def _limbs_mul(dst: str, a: str, b: str) -> list[str]:
+    """Return GLSL setting ``dst`` to ``a`` times ``b``: WARP_SIN_GLSL's limbs.
 
-    The slope is a backward difference over one texel, per UV unit.
+    Six 16-bit limbs, 2^-80 the lowest: the product's columns summed in
+    16-bit halves, carried, the 80 bits below dropped.
+    """
+    return [
+        "\tfor (int k = 0; k < 12; k++) col[k] = 0u;",
+        "\tfor (int i = 0; i < 6; i++) {",
+        "\t\tfor (int j = 0; j < 6; j++) {",
+        f"\t\t\tuint p = {a}[i] * {b}[j];",
+        "\t\t\tcol[i + j] += p & 65535u;",
+        "\t\t\tcol[i + j + 1] += p >> 16u;",
+        "\t\t}",
+        "\t}",
+        "\tcy = 0u;",
+        "\tfor (int k = 0; k < 11; k++) {",
+        "\t\tuint v = col[k] + cy;",
+        f"\t\tif (k >= 5) {dst}[k - 5] = v & 65535u;",
+        "\t\tcy = v >> 16u;",
+        "\t}",
+    ]
+
+
+_HALF_PI_LIMBS = (35213, 33897, 17105, 46404, 37407, 1)
+"""pi / 2 to 2^-80, in 16-bit limbs from the lowest."""
+
+
+WARP_SIN_GLSL = "\n".join(
+    [
+        # sin x to the nearest float32, in integers: x (exact) less its
+        # nearest multiple of pi / 2, by series, in fixed point (_limbs_mul).
+        # |x| up to 2^16; past it x is first reduced in floats.
+        "float wsin_$(name)(float x) {",
+        "\tif (abs(x) >= 65536.0) x -= 6.2831855 * floor(x / 6.2831855);",
+        "\tfloat ax = abs(x);",
+        "\tif (ax < 0.000244140625) return x;",  # sin x rounds to x
+        "\tuint bx = floatBitsToUint(ax);",
+        "\tint sh = int(bx >> 23u) - 70;",
+        "\tuint m = (bx & 8388607u) | 8388608u;",
+        "\tuint a[6]; uint b[6]; uint r[6]; uint r2[6]; uint s[6]; uint t[6];",
+        "\tuint col[12];",
+        "\tuint cy = 0u;",
+        "\tfor (int i = 0; i < 6; i++) {",
+        "\t\tint d = 16 * i - sh;",
+        "\t\tuint hi = d < 32 ? (m >> uint(max(d, 0))) & 65535u : 0u;",
+        "\t\ta[i] = d >= 0 ? hi : (d > -16 ? (m << uint(-d)) & 65535u : 0u);",
+        "\t}",
+        "\tuint q = uint(floor(ax * 0.63661977 + 0.5));",
+        *(
+            f"\tcy = {limb}u * q + cy; b[{i}] = cy & 65535u; cy >>= 16u;"
+            for i, limb in enumerate(_HALF_PI_LIMBS)
+        ),
+        "\tbool ge = true;",
+        "\tfor (int i = 5; i >= 0; i--) {",
+        "\t\tif (a[i] != b[i]) { ge = a[i] > b[i]; break; }",
+        "\t}",
+        "\tcy = 0u;",
+        "\tfor (int i = 0; i < 6; i++) {",
+        "\t\tuint hi = ge ? a[i] : b[i];",
+        "\t\tuint lo = (ge ? b[i] : a[i]) + cy;",
+        "\t\tcy = lo > hi ? 1u : 0u;",
+        "\t\tr[i] = (hi + 65536u * cy - lo) & 65535u;",
+        "\t}",
+        *_limbs_mul("r2", "r", "r"),
+        "\tbool odd = (q & 1u) == 1u;",
+        "\tfor (int i = 0; i < 6; i++) s[i] = i == 5 ? 1u : 0u;",
+        # 1 - r^2 / (2k (2k + 1)) (...), or (2k - 1) 2k for the cosine
+        "\tfor (int k = 11; k >= 1; k--) {",
+        "\t\tuint d = uint(odd ? (2 * k - 1) * 2 * k : 2 * k * (2 * k + 1));",
+        *("\t" + line for line in _limbs_mul("t", "r2", "s")),
+        "\t\tuint rm = 0u;",
+        "\t\tfor (int i = 5; i >= 0; i--) {",
+        "\t\t\tuint cur = rm * 65536u + t[i];",
+        "\t\t\tt[i] = cur / d;",
+        "\t\t\trm = cur - t[i] * d;",
+        "\t\t}",
+        "\t\tcy = 0u;",
+        "\t\tfor (int i = 0; i < 6; i++) {",
+        "\t\t\tuint one = i == 5 ? 1u : 0u;",
+        "\t\t\tuint lo = t[i] + cy;",
+        "\t\t\tcy = lo > one ? 1u : 0u;",
+        "\t\t\ts[i] = (one + 65536u * cy - lo) & 65535u;",
+        "\t\t}",
+        "\t}",
+        "\tif (odd) {",
+        "\t\tfor (int i = 0; i < 6; i++) t[i] = s[i];",
+        "\t} else {",
+        *("\t" + line for line in _limbs_mul("t", "r", "s")),
+        "\t}",
+        # to 24 bits, the rest rounding it to nearest, ties to even
+        "\tint top = -1;",
+        "\tfor (int p = 95; p >= 0 && top < 0; p--) {",
+        "\t\tif (((t[p >> 4] >> uint(p & 15)) & 1u) == 1u) top = p;",
+        "\t}",
+        "\tif (top < 0) return 0.0;",
+        "\tuint mant = 0u;",
+        "\tfor (int p = top; p > top - 25; p--) {",
+        "\t\tmant = mant * 2u + (p >= 0 ? (t[p >> 4] >> uint(p & 15)) & 1u : 0u);",
+        "\t}",
+        "\tbool sticky = false;",
+        "\tfor (int p = 0; p < top - 24; p++) {",
+        "\t\tsticky = sticky || ((t[p >> 4] >> uint(p & 15)) & 1u) == 1u;",
+        "\t}",
+        "\tuint rb = mant & 1u;",
+        "\tmant >>= 1u;",
+        "\tint ex = top - 80;",
+        "\tif (rb == 1u && (sticky || (mant & 1u) == 1u)) mant += 1u;",
+        "\tif (mant == 16777216u) { mant >>= 1u; ex += 1; }",
+        "\tbool neg = (x < 0.0) != ((q & 2u) == 2u);",
+        "\tif (!odd && !ge) neg = !neg;",
+        "\tuint sign = neg ? 2147483648u : 0u;",
+        "\treturn uintBitsToFloat(sign | (uint(ex + 127) << 23u) | (mant & 8388607u));",
+        "}",
+        "",
+    ]
+)
+"""GLSL ``wsin_$(name)(x)``: sin x correctly rounded, for a warp's direction.
+
+Substance's direction constants are float32 sines, computed on the CPU (a
+GPU's sin and cos are too coarse); this reproduces them in the shader so
+the angle stays a live knob.
+"""
+
+
+WARP_GLSL = (
+    "float wnc_$(name)(float v, uint z) {\n"
+    "\treturn uintBitsToFloat(floatBitsToUint(v) ^ z);\n"
+    "}\n"
+    # L 65537 is L / 65535 in 2^-32 (less than 2^-32 L below); its top 24
+    # bits rounded up at a half, as that tail rounds it.
+    "float wf_$(name)(uint L) {\n"
+    "\tif (L == 0u) return 0.0;\n"
+    "\tuint K = L * 65537u;\n"
+    "\tint sh = max(findMSB(K) - 23, 0);\n"
+    "\tuint M = (K >> uint(sh)) + (sh > 0 ? (K >> uint(sh - 1)) & 1u : 0u);\n"
+    "\treturn float(M) * uintBitsToFloat(uint(sh + 95) << 23u);\n"
+    "}\n"
+)
+"""GLSL every warp shares: ``wnc_$(name)`` passes a product through an
+opaque bit operation (so it is not fused into a sum), ``wf_$(name)(L)`` is
+the float32 nearest L / 65535, from integers."""
+
+
+def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
+    """Return GLSL for a warp's sample, as Substance's GPU engine takes it.
+
+    ``$(name)_read(q)`` samples ``inp`` (a buffer, read by texel; ``n`` the
+    image width, a GLSL float) bilinearly at q, in 256ths of a texel from
+    the first texel's center, wrapping; ``$(name)_val(v)`` is the float32
+    nearest the level of a stored value v, which the coordinates are
+    computed from. In 8 and 16 bits (``fmt``, the node's output format)
+    the blend is exact, in integer levels (an 8-bit k as 257 k), stored
+    as the GPU stores a bilinear read: on AMD (_DMB_AMD) its float32
+    rounded (16 bits: a tie up or down by that float32's rounding; 8 bits:
+    through a half float's 11 bits), on NVIDIA its exact value, halves up
+    (8 bits: _dmb_s8's). Floats blend in floats. Uses WARP_GLSL.
+    """
+    texel = f"{inp}((mod(ij, {n}) + 0.5) / {n})"
+    read = f"{g} $(name)_tx(vec2 ij) {{\n\treturn {texel};\n}}\n"
+    corners = "p00{c}, p10{c}, p01{c}, p11{c}, f"
+    blend = (
+        "vec4("
+        + ", ".join(f"$(name)_mix({corners.format(c='.' + c)})" for c in "xyzw")
+        + ")"
+        if g == "vec4"
+        else f"$(name)_mix({corners.format(c='')})"
+    )
+    read += (
+        f"{g} $(name)_read(vec2 q) {{\n"
+        "\tvec2 b = floor(q / 256.0);\n"
+        "\tvec2 f = q - 256.0 * b;\n"
+        f"\t{g} p00 = $(name)_tx(b);\n"
+        f"\t{g} p10 = $(name)_tx(b + vec2(1.0, 0.0));\n"
+        f"\t{g} p01 = $(name)_tx(b + vec2(0.0, 1.0));\n"
+        f"\t{g} p11 = $(name)_tx(b + vec2(1.0));\n"
+        f"\treturn {blend};\n"
+        "}\n"
+    )
+    if fmt not in (0, 1):
+        return (
+            "float $(name)_val(float v) {\n\treturn v;\n}\n"
+            "float $(name)_mix(float a, float b, float c, float d, vec2 f) {\n"
+            "\tvec2 w = f / 256.0;\n"
+            "\treturn mix(mix(a, b, w.x), mix(c, d, w.x), w.y);\n"
+            "}\n"
+        ) + read
+    level = (
+        "uint(floor(v * 65535.0 + 0.5))"
+        if fmt == 1
+        else "257u * uint(floor(v * 255.0 + 0.5))"
+    )
+    if fmt == 1 and _DMB_AMD:
+        # A tie goes up when float32((m + 1/2) / 65535) is above it: a bit
+        # 8 below the top of (2m + 1) 65537.
+        store = (
+            "\tuint m = num >> 16u;\n"
+            "\tuint lo = num & 65535u;\n"
+            "\tif (lo != 32768u) return float(m + (lo > 32768u ? 1u : 0u));\n"
+            "\tuint p = 2u * m + 1u;\n"
+            "\treturn float(m + (((p * 65537u) >> uint(findMSB(p) + 8)) & 1u));\n"
+        )
+    elif fmt == 1:
+        store = "\treturn float((num + 32768u) >> 16u);\n"
+    elif _DMB_AMD:
+        store = (
+            "\tfloat h = uintBitsToFloat(floatBitsToUint($(name)_rv(num))"
+            " & 4294959104u);\n"
+            "\treturn floor(h * 255.0 + 0.5);\n"
+        )
+    else:
+        store = (
+            "\tfloat x = floor($(name)_rv(num) * 4096.0 + " + _DMB_READ + ");\n"
+            "\treturn floor((x * 255.0 + 2047.0) / 4096.0);\n"
+        )
+    steps = "65535.0" if fmt == 1 else "255.0"
+    rv = (
+        ""
+        if fmt == 1
+        # num / (65536 65535) to the nearest float32 (num > 0): long division.
+        else (
+            "float $(name)_rv(uint num) {\n"
+            "\tif (num == 0u) return 0.0;\n"
+            "\tuint q = num / 65535u;\n"
+            "\tuint r = num - q * 65535u;\n"
+            "\tint e = 0;\n"
+            "\tfor (int it = 0; it < 48 && q < 16777216u; it++) {\n"
+            "\t\tr *= 2u;\n"
+            "\t\tq = q * 2u + (r >= 65535u ? 1u : 0u);\n"
+            "\t\tif (r >= 65535u) r -= 65535u;\n"
+            "\t\te--;\n"
+            "\t}\n"
+            "\tuint rb = q & 1u;\n"
+            "\tq >>= 1u;\n"
+            "\tif (rb == 1u && (r != 0u || (q & 1u) == 1u)) q += 1u;\n"
+            "\treturn float(q) * uintBitsToFloat(uint(e + 112) << 23u);\n"
+            "}\n"
+        )
+    )
+    return (
+        "uint $(name)_lv(float v) {\n\tv = clamp(v, 0.0, 1.0);\n"
+        f"\treturn {level};\n}}\n"
+        "float $(name)_val(float v) {\n\treturn wf_$(name)($(name)_lv(v));\n}\n"
+        + rv
+        + f"float $(name)_st(uint num) {{\n{store}}}\n"
+        "float $(name)_mix(float a, float b, float c, float d, vec2 f) {\n"
+        "\tuint fx = uint(f.x);\n"
+        "\tuint fy = uint(f.y);\n"
+        "\tuint num = (256u - fx) * (256u - fy) * $(name)_lv(a)"
+        " + fx * (256u - fy) * $(name)_lv(b)\n"
+        "\t\t+ (256u - fx) * fy * $(name)_lv(c) + fx * fy * $(name)_lv(d);\n"
+        f"\treturn $(name)_st(num) / {steps};\n"
+        "}\n"
+    ) + read
+
+
+def warp_body(n: str, k: str, gradient: str = "$gradient") -> str:
+    """Return a warp's GLSL body (warp_glsl's helpers): K = intensity N / 256.
+
+    The sample is at the pixel's center plus K times the gradient's slope,
+    backward differences over a texel of exact level values: all float32,
+    in Substance's order. ``k`` is the intensity, ``n`` the image width
+    (GLSL values).
+    """
+    at = f"((mod(px - vec2({{}}), {n}) + 0.5) / {n})"
+    return "\n".join(
+        [
+            "uint z = uint(uv.x > 1e30);",
+            f"vec2 px = floor(uv * {n});",
+            f"vec2 c = (px + 0.5) / {n};",
+            f"float h = $(name)_val({gradient}(c));",
+            f"float hx = $(name)_val({gradient}{at.format('1.0, 0.0')});",
+            f"float hy = $(name)_val({gradient}{at.format('0.0, 1.0')});",
+            f"float K = {k} * ({n} / 256.0);",
+            "float ox = wnc_$(name)((h - hx) * K, z);",
+            "vec2 o = vec2(ox, wnc_$(name)((h - hy) * K, z));",
+            f"return $(name)_read(roundEven((c + o) * ({n} * 256.0) - 128.0));",
+        ]
+    )
+
+
+def dwarp_body(n: str, k: str, turn: str, intensity: str = "$intensity") -> str:
+    """Return a directional warp's GLSL body (warp_glsl's helpers, WARP_SIN_GLSL).
+
+    The direction (C, S) is sin(2 pi turn + pi / 2) and sin(2 pi turn), all
+    float32 as Substance's CPU computes it (the angle, its right angle
+    added, rounded first); (C, S) times intensity / 256 first, then times
+    the intensity image's level value at the pixel, added to its center.
+    ``k`` and ``turn`` are the intensity and the angle, ``n`` the image
+    width (GLSL values).
+    """
+    return "\n".join(
+        [
+            "uint z = uint(uv.x > 1e30);",
+            f"vec2 c = (floor(uv * {n}) + 0.5) / {n};",
+            f"float arg = wnc_$(name)({turn} * 6.2831855, z);",
+            "float C = wsin_$(name)(arg + 1.5707964);",
+            "float S = wsin_$(name)(arg);",
+            f"float i8 = {k} * 0.00390625;",
+            "vec2 kv = vec2(i8 * C, i8 * S);",
+            f"float v = $(name)_val({intensity}(c));",
+            "vec2 o = vec2(wnc_$(name)(v * kv.x, z), wnc_$(name)(v * kv.y, z));",
+            f"return $(name)_read(roundEven((c + o) * ({n} * 256.0) - 128.0));",
+        ]
+    )
+
+
+def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Warp: sample at uv + intensity N / 256 times the gradient's slope.
+
+    The slope is a backward difference over one texel, of the gradient's
+    levels; one bilinear read, rounded and stored as Substance's GPU engine
+    takes it (warp_glsl, warp_body). Both inputs are read by texel; a
+    16-bit one's levels exactly, so 32-bit buffers.
     """
     t = "rgba" if color else "f"
+    g = "vec4" if color else "float"
+    fmt = node.flags >> 4 & 3
     k = word_params(node, [("intensity", 5, 1.0)], {})["intensity"]
     k = knob("intensity", "Intensity", k, 0.0, 32.0)
-    n = 1 << size
-    lines = [
-        f"vec2 e = vec2({num(1 / n)}, 0.0);",
-        "float h = $gradient(uv);",
-        "vec2 g = vec2(h - $gradient(fract(uv - e)), h - $gradient(fract(uv - e.yx)));",
-        f"return $input(fract(uv + {num(k * n / 256)} * g));",
-    ]
-    made = shader(name, [("input", t), ("gradient", "f")], t, "\n".join(lines))
+    n = num(float(1 << size))
+    made = shader(name, [("input", t), ("gradient", "f")], t, warp_body(n, num(k)))
+    model = made["shader_model"]
+    model["instance"] = WARP_GLSL + warp_glsl(g, fmt, n) + model["instance"]
+    precise = {"input", "gradient"} if fmt == 1 else {"gradient"}
     return buffered(
-        made, ["input", "gradient"], {"input", "gradient"}, size, precise={"gradient"}
+        made, ["input", "gradient"], {"input", "gradient"}, size, precise=precise
     )
 
 
 def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
-    """Directional warp: sample at uv + intensity / 256 map(uv) (cos, sin)."""
+    """Directional warp: sample at uv + intensity / 256 map(uv) (cos, sin).
+
+    The map is read at the pixel itself, its level exactly; the direction
+    is computed in the shader as Substance's CPU computes it (dwarp_body),
+    so intensity and angle stay live. One bilinear read, rounded and
+    stored as Substance's GPU engine takes it (warp_glsl), of the input
+    by texel: a 16-bit one's levels exactly, so a 32-bit buffer.
+    """
     t = "rgba" if color else "f"
+    g = "vec4" if color else "float"
+    fmt = node.flags >> 4 & 3
     flags = node.fields[0]
     p = flag_params(
         flags, node.inline, [("intensity", 1, 10.0), ("angle", 3, 0.0)], 1, node
     )
     k = knob("warp_intensity", "Intensity", p["intensity"], 0.0, 64.0)
     turn = knob("angle", "Angle", p["angle"])
-    a = f"6.28318531 * {num(turn)}"
-    d = f"{num(k)} / 256.0 * vec2(cos({a}), sin({a}))"
-    body = f"return $input(fract(uv + $intensity(uv) * {d}));"
+    n = num(float(1 << size))
+    body = dwarp_body(n, num(k), num(turn))
     made = shader(name, [("input", t), ("intensity", "f")], t, body)
-    return buffered(made, ["input", "intensity"], {"input"}, size)
+    model = made["shader_model"]
+    model["instance"] = (
+        WARP_SIN_GLSL + WARP_GLSL + warp_glsl(g, fmt, n) + model["instance"]
+    )
+    precise = {"input"} if fmt == 1 else set()
+    return buffered(made, ["input", "intensity"], {"input"}, size, precise=precise)
 
 
 def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:

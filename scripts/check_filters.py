@@ -313,6 +313,7 @@ def cases() -> list[tuple]:
     out += [
         # Biomech's n2373: a long warp, so its intensity's levels move samples
         ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
+        *warp_cases(),
         ("normal_g", "normal", GRAY, (("intensity", F1, "3"),), "", True),
         # Biomech's n3896: steep enough that most slopes lie flat
         ("normal60_g", "normal", GRAY, (("intensity", F1, "60"),), "", True),
@@ -334,6 +335,34 @@ def cases() -> list[tuple]:
         ),
     ]
     return out + dmb_cases() + function_cases()
+
+
+def warp_cases() -> list[tuple]:
+    """Return more warps: long and oblique directions, other intensities, 8 bits.
+
+    Biomech's chain is 0.64 at 0.3 turn. At 30 (240 px) an ulp of the
+    direction moves samples: 0.9 turn is one the shader's sines get
+    exactly, 0.61 one they miss by an ulp. The 8-bit graphs store the
+    sample in 8 bits.
+    """
+    dw, wp = "directionalwarp", "warp"
+    out = [
+        (f"dwarp{tag}_g", dw, GRAY, (("intensity", F1, i), ("warpangle", F1, a)))
+        for tag, i, a in (
+            ("_bio", "0.64", "0.3"), ("30_90", "30", "0.9"),
+            ("30_61", "30", "0.61"), ("12_83", "12", "0.83"),
+        )
+    ]  # fmt: skip
+    out += [(f"warp{t}_g", wp, GRAY, (("intensity", F1, i),)) for t, i in (
+        ("7", "7.3"), ("037", "0.37"),
+    )]  # fmt: skip
+    out = [(*c, "", True) for c in out]
+    return [
+        *out,
+        ("dwarp_8", dw, GRAY, (("intensity", F1, "4"), ("warpangle", F1, "0.1"))),
+        ("dwarp30_8", dw, GRAY, (("intensity", F1, "30"),)),
+        ("warp_8", wp, GRAY, (("intensity", F1, "7.3"),)),
+    ]
 
 
 def dmb_cases() -> list[dict]:
@@ -1238,6 +1267,38 @@ def material_graph(
     }
 
 
+def image_codes(mm_nodes: list[dict], wires: list[dict]) -> tuple[list, list]:
+    """Return the graph with its test images read back as their 8-bit codes.
+
+    Material Maker hands an 8-bit image to a shader truncated to a half
+    float (up to 16 levels in 65535 low), where a 16-bit graph in Substance
+    reads code j as exactly 257 j levels: a shader after each image rounds
+    back to j / 255 (the truncation is under half a 255th), and the
+    buffers it feeds are 32-bit, which keep it.
+    """
+    images = {n["name"] for n in mm_nodes if n["type"] == "image"}
+    by_name = {n["name"]: n for n in mm_nodes}
+    out_wires = []
+    for w in wires:
+        if w["from"] in images:
+            w = {**w, "from": f"{w['from']}_code"}  # noqa: PLW2901
+            to = by_name.get(w["to"], {})
+            if to.get("type") == "buffer":
+                to["parameters"] = {**to["parameters"], "f32": True}
+        out_wires.append(w)
+    codes = []
+    for name in sorted(images):
+        made = shader(
+            f"{name}_code", [("input", "rgba")], "rgba",
+            "return floor($input(uv) * 255.0 + 0.5) / 255.0;",
+        )  # fmt: skip
+        codes.append(made)
+        out_wires.append(
+            {"from": name, "from_port": 0, "to": made["name"], "to_port": 0}
+        )
+    return [*mm_nodes, *codes], out_wires
+
+
 def case(c: tuple | dict) -> dict:
     """Return a case as a dict.
 
@@ -1396,6 +1457,8 @@ def main() -> None:
         except UnsupportedError as e:
             print(f"{tag:14} unsupported: {e}")
             continue
+        if c["format16"]:
+            mm_nodes, wires = image_codes(mm_nodes, wires)
         for k, v in c["set"].items():  # the same input values in Material Maker
             k = param_name(k)  # noqa: PLW2901
             for n in mm_nodes:
