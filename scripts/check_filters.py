@@ -311,6 +311,11 @@ def cases() -> list[tuple]:
             ),
         ]
     out += [
+        # Biomech's n667 (and each cell's blur above n725): a fractional
+        # radius (25.76 texels), so the box's end taps weigh less than one
+        ("blur322_g", "blur", GRAY, (("intensity", F1, "3.22"),), "", True),
+        ("blur322_8", "blur", GRAY, (("intensity", F1, "3.22"),)),
+        ("blur05_g", "blur", GRAY, (("intensity", F1, "0.05"),), "", True),
         # Biomech's n2373: a long warp, so its intensity's levels move samples
         ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
         *warp_cases(),
