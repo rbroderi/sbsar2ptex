@@ -295,7 +295,7 @@ func get_output_dimensions() -> Vector2i:
 			if material != null and material.parameters.has("size"):
 				size = int(material.parameters.size)+roundi(float(get_parameter("size_offset")))
 		MMGenBuffer.SIZE_MODE_RELATIVE_TO_INPUT:
-			var width : int = MMGenBuffer.find_texture_width(get_source(0))
+			var width : int = MMGenBuffer.find_texture_dimensions(get_source(0)).x
 			if width > 0:
 				size = roundi(log(float(width))/log(2.0))+roundi(float(get_parameter("size_offset")))
 	size = clampi(size, 0, 14)
