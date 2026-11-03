@@ -2754,11 +2754,14 @@ def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
     the first texel's center, wrapping; ``$(name)_val(v)`` is the float32
     nearest the level of a stored value v, which the coordinates are
     computed from. In 8 and 16 bits (``fmt``, the node's output format)
-    the blend is exact, in integer levels (an 8-bit k as 257 k), stored
-    as the GPU stores a bilinear read: on AMD (_DMB_AMD) its float32
-    rounded (16 bits: a tie up or down by that float32's rounding; 8 bits:
-    through a half float's 11 bits), on NVIDIA its exact value, halves up
-    (8 bits: _dmb_s8's). Floats blend in floats. Uses WARP_GLSL.
+    the blend is in integer levels (an 8-bit k as 257 k), stored as the
+    GPU stores a bilinear read. On AMD (_DMB_AMD) the blend is exact and
+    its float32 is stored (16 bits: a tie up or down by that float32's
+    rounding; 8 bits: through a half float's 11 bits). NVIDIA weighs the
+    four texels in 256ths, the corner's fx fy / 256 rounded half up and
+    the others what is left of fx, fy and 256 (an RTX 3090: 100%), and
+    stores the sum's 256th halves up (8 bits: _dmb_s8's, presumed). Floats
+    blend in floats. Uses WARP_GLSL.
     """
     texel = f"{inp}((mod(ij, {n}) + 0.5) / {n})"
     read = f"{g} $(name)_tx(vec2 ij) {{\n\treturn {texel};\n}}\n"
@@ -2805,7 +2808,7 @@ def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
             "\treturn float(m + (((p * 65537u) >> uint(findMSB(p) + 8)) & 1u));\n"
         )
     elif fmt == 1:
-        store = "\treturn float((num + 32768u) >> 16u);\n"
+        store = "\treturn float(((num >> 8u) + 128u) >> 8u);\n"
     elif _DMB_AMD:
         store = (
             "\tfloat h = uintBitsToFloat(floatBitsToUint($(name)_rv(num))"
@@ -2818,6 +2821,20 @@ def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
             "\treturn floor((x * 255.0 + 2047.0) / 4096.0);\n"
         )
     steps = "65535.0" if fmt == 1 else "255.0"
+    if _DMB_AMD:
+        num = (
+            "\tuint num = (256u - fx) * (256u - fy) * $(name)_lv(a)"
+            " + fx * (256u - fy) * $(name)_lv(b)\n"
+            "\t\t+ (256u - fx) * fy * $(name)_lv(c) + fx * fy * $(name)_lv(d);\n"
+        )
+    else:
+        # 256ths: the corner's weight rounded half up, the rest by subtraction.
+        num = (
+            "\tuint w11 = (fx * fy + 128u) >> 8u;\n"
+            "\tuint num = ((256u - fx - fy + w11) * $(name)_lv(a)"
+            " + (fx - w11) * $(name)_lv(b)\n"
+            "\t\t+ (fy - w11) * $(name)_lv(c) + w11 * $(name)_lv(d)) << 8u;\n"
+        )
     rv = (
         ""
         if fmt == 1
@@ -2849,12 +2866,7 @@ def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
         + f"float $(name)_st(uint num) {{\n{store}}}\n"
         "float $(name)_mix(float a, float b, float c, float d, vec2 f) {\n"
         "\tuint fx = uint(f.x);\n"
-        "\tuint fy = uint(f.y);\n"
-        "\tuint num = (256u - fx) * (256u - fy) * $(name)_lv(a)"
-        " + fx * (256u - fy) * $(name)_lv(b)\n"
-        "\t\t+ (256u - fx) * fy * $(name)_lv(c) + fx * fy * $(name)_lv(d);\n"
-        f"\treturn $(name)_st(num) / {steps};\n"
-        "}\n"
+        "\tuint fy = uint(f.y);\n" + num + f"\treturn $(name)_st(num) / {steps};\n}}\n"
     ) + read
 
 

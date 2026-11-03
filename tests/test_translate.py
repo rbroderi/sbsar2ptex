@@ -386,3 +386,66 @@ def test_transformation_shrinking_reads_a_mip_level() -> None:
     assert "$m11" in code
     # one read of the input: a chain inlined in one shader stays its length
     assert code.count("$input(") == 1
+
+
+def _nv_warp_level(p: tuple[int, int, int, int], fx: int, fy: int) -> int:
+    """NVIDIA's bilinear read of 16-bit levels p00, p10, p01, p11, stored."""
+    w11 = (fx * fy + 128) >> 8
+    w = (256 - fx - fy + w11, fx - w11, fy - w11, w11)
+    return (sum(a * b for a, b in zip(w, p, strict=True)) + 128) >> 8
+
+
+def _glsl_warp_level(code: str, p: tuple[int, int, int, int], fx: int, fy: int):
+    """Run warp_glsl's integer _mix and _st (16 bits) in Python."""
+    mix = code.split("uint fy = uint(f.y);\n")[1].split("\treturn", 1)[0]
+    store = code.split("float $(name)_st(uint num) {\n\treturn float(")[1]
+    env = {"fx": fx, "fy": fy}
+    for corner, level in zip("abcd", p, strict=True):
+        mix = mix.replace(f"$(name)_lv({corner})", str(level))
+    for line in mix.split(";")[:-1]:
+        name, expr = line.replace("uint ", "").split("=", 1)
+        env[name.strip()] = eval(re.sub(r"(\d)u\b", r"\1", expr), {}, env)  # noqa: S307
+    expr = re.sub(r"(\d)u\b", r"\1", store.split(");\n")[0])
+    return eval(expr, {}, env)  # noqa: S307
+
+
+def test_nvidia_warp_rounds_only_the_corner_weight(monkeypatch) -> None:
+    monkeypatch.setattr(translate, "_DMB_AMD", False)
+    code = translate.warp_glsl("float", 1, "n")
+    cases = [
+        # (texels, fx, fy, level): the corner's 9/256 rounds to 0, not the
+        # exact blend's 9; its 128/256 = 1/2 rounds up, 256 not 128
+        ((0, 0, 0, 65535), 3, 3, 0),
+        ((0, 0, 0, 65535), 16, 8, 256),
+        ((0, 0, 0, 65535), 255, 255, 65023),
+        ((100, 200, 300, 401), 128, 128, 250),
+        # one axis: the exact blend, halves up
+        ((1, 2, 7, 9), 128, 0, 2),
+        ((1, 2, 7, 9), 0, 128, 4),
+        ((1000, 2000, 3000, 4000), 0, 0, 1000),
+        ((0, 65535, 0, 65535), 255, 0, 65279),
+    ]
+    for p, fx, fy, level in cases:
+        assert _nv_warp_level(p, fx, fy) == level
+        assert _glsl_warp_level(code, p, fx, fy) == level
+    p = (12345, 54321, 999, 65535)
+    for fx in (0, 1, 77, 128, 255):
+        for fy in (0, 1, 128, 200, 255):
+            w11 = (fx * fy + 128) >> 8
+            assert min(256 - fx - fy + w11, fx - w11, fy - w11) >= 0
+            assert _glsl_warp_level(code, p, fx, fy) == _nv_warp_level(p, fx, fy)
+            if 0 in (fx, fy):  # one axis: the exact blend, halves up
+                num = (
+                    (256 - fx) * (256 - fy) * p[0]
+                    + fx * (256 - fy) * p[1]
+                    + (256 - fx) * fy * p[2]
+                    + fx * fy * p[3]
+                )
+                assert _nv_warp_level(p, fx, fy) == (num + 32768) >> 16
+
+
+def test_amd_warp_blends_exactly(monkeypatch) -> None:
+    monkeypatch.setattr(translate, "_DMB_AMD", True)
+    code = translate.warp_glsl("float", 1, "n")
+    assert "w11" not in code
+    assert "uint num = (256u - fx) * (256u - fy) * $(name)_lv(a)" in code
