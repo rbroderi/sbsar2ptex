@@ -445,6 +445,11 @@ def warp_cases() -> list[tuple | dict]:
         ("dwarp_8", dw, GRAY, (("intensity", F1, "4"), ("warpangle", F1, "0.1"))),
         ("dwarp30_8", dw, GRAY, (("intensity", F1, "30"),)),
         ("warp_8", wp, GRAY, (("intensity", F1, "7.3"),)),
+        # Biomech's 8-bit warps: n4001 and n5544 (negative), n4832, n4895
+        ("warpm12_8", wp, GRAY, (("intensity", F1, "-1.2075"),)),
+        ("warp25_8", wp, GRAY, (("intensity", F1, "2.5"),)),
+        ("warp0486_8", wp, GRAY, (("intensity", F1, "0.486"),)),
+        ("warpm12_g", wp, GRAY, (("intensity", F1, "-1.2075"),), "", True),
         *deep,
     ]
 
