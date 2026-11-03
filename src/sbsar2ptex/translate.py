@@ -2858,6 +2858,15 @@ def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
     ) + read
 
 
+def _warp_round(x: str) -> str:
+    """Return GLSL rounding ``x`` to the nearest 1/256 texel as a warp's sample does.
+
+    Halves to even on AMD (_DMB_AMD), up on NVIDIA (an RTX 3090: d of 1, 3,
+    129 and 130 for offsets of 0.5, 2.5, 128.5 and 129.5 256ths).
+    """
+    return f"roundEven({x})" if _DMB_AMD else f"floor({x} + 0.5)"
+
+
 def warp_body(n: str, k: str, gradient: str = "$gradient") -> str:
     """Return a warp's GLSL body (warp_glsl's helpers): K = intensity N / 256.
 
@@ -2878,7 +2887,7 @@ def warp_body(n: str, k: str, gradient: str = "$gradient") -> str:
             f"float K = {k} * ({n} / 256.0);",
             "float ox = wnc_$(name)((h - hx) * K, z);",
             "vec2 o = vec2(ox, wnc_$(name)((h - hy) * K, z));",
-            f"return $(name)_read(roundEven((c + o) * ({n} * 256.0) - 128.0));",
+            f"return $(name)_read({_warp_round(f'(c + o) * ({n} * 256.0) - 128.0')});",
         ]
     )
 
@@ -2904,7 +2913,7 @@ def dwarp_body(n: str, k: str, turn: str, intensity: str = "$intensity") -> str:
             "vec2 kv = vec2(i8 * C, i8 * S);",
             f"float v = $(name)_val({intensity}(c));",
             "vec2 o = vec2(wnc_$(name)(v * kv.x, z), wnc_$(name)(v * kv.y, z));",
-            f"return $(name)_read(roundEven((c + o) * ({n} * 256.0) - 128.0));",
+            f"return $(name)_read({_warp_round(f'(c + o) * ({n} * 256.0) - 128.0')});",
         ]
     )
 
