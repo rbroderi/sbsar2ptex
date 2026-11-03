@@ -351,8 +351,14 @@ def cases() -> list[tuple]:
                         "</parameter>"
                     ),
                 ),
+                **extra,
             }
-            for sfx, f16 in (("_g", True), ("_8", False))
+            for sfx, f16, extra in (
+                ("_g", True, {}),
+                ("_8", False, {}),
+                # blur322_noise_g's chain: noise, at 1024
+                ("_noise_g", True, {"size": 10, "inputs": {"a": "noise"}}),
+            )
         ),
         # Biomech's n2373: a long warp, so its intensity's levels move samples
         ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
