@@ -409,26 +409,31 @@ def _glsl_warp_level(code: str, p: tuple[int, int, int, int], fx: int, fy: int):
     return eval(expr, {}, env)  # noqa: S307
 
 
-def test_a_blur_weighs_texels_by_how_much_of_them_it_covers() -> None:
-    # Substance's kernels, deconvolved from blurs of noise (1024 pixels):
-    # intensity 0.4 (radius 1.6) is 1, 1, 1 and 0.1 at each end; 0.1 (0.4)
-    # no blur at all; 3.22 (12.88) ends in 0.38
-    def weights(radius: float) -> dict[float, float]:
-        return {k: w * 2 * radius for k, w in translate.box_taps(radius)}
-
-    assert weights(1.6) == pytest.approx(
-        {-2.0: 0.1, -1.0: 1.0, 0.0: 1.0, 1.0: 1.0, 2.0: 0.1}
-    )
-    assert translate.box_taps(0.4) == [(0.0, 1.0)]
-    end = weights(12.88)
-    assert end[13.0] == pytest.approx(0.38)
-    assert end[12.0] == end[-12.0] == pytest.approx(1.0)
-    assert 14.0 not in end
-    assert weights(12.0)[12.0] == pytest.approx(0.5)
-    # the shader counts the same taps, its radius live
-    body = translate.box_glsl_live("f", "vec2(1.0, 0.0)", "$r", "1024.0")
-    assert "int m = int(r + 0.5);" in body
-    assert "float w = r + 0.5 - float(m);" in body
+@pytest.mark.parametrize("bits", [8, 16])
+def test_a_blur_is_two_directional_blurs(bits: int) -> None:
+    # Substance renders a blur as directional blurs at 0 and a quarter turn
+    # (harness dmb2_322_*): the first's image stored in the node's format,
+    # both on 32-bit buffers, the intensity one live knob.
+    translate._CTX = translate._Context(size=8)
+    word = struct.unpack("<I", struct.pack("<f", 3.22))[0]
+    node = Node(
+        index=0, start=0, end=4, flags={8: 0, 16: 1}[bits] << 4 | 1 << 12,
+        inline=[word],
+    )  # fmt: skip
+    made = _blur(node, "blur", color=False, size=8)
+    (group,) = made.nodes
+    inner = {n["name"]: n for n in group["nodes"]}
+    assert all(inner[b]["parameters"]["f32"] for b in ("buf_x", "buf_y"))
+    x = inner["pass_x"]["shader_model"]["instance"]
+    y = inner["pass_y"]["shader_model"]["instance"]
+    assert "float A = 0.0;" in x
+    assert "float A = 0.25;" in y
+    assert "$intensity" in x
+    assert "3.22" not in x
+    step = {8: "255.0", 16: "65535.0"}[bits]
+    assert "$(name)_raw(" in x
+    assert step in x.split("$(name)_raw(vec2 uv)")[-1]
+    assert ("_s8(" in x) == (bits == 8)
 
 
 def test_nvidia_warp_rounds_only_the_corner_weight(monkeypatch) -> None:

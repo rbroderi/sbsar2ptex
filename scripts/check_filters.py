@@ -334,6 +334,26 @@ def cases() -> list[tuple]:
             }
             for tag, k in BLUR_NOISE
         ),
+        # a blur as two axis-aligned directional motion blurs (0, then a
+        # quarter turn): is Substance's blur that?
+        *(
+            {
+                "tag": f"dmb2_322{sfx}",
+                "filter": "dirmotionblur",
+                "kind": GRAY,
+                "format16": f16,
+                "params": (("intensity", F1, "3.22"), ("mblurangle", F1, "0.25")),
+                "chain": (
+                    "dirmotionblur",
+                    (
+                        '<parameter><name v="intensity"/><relativeTo v="0"/>'
+                        '<paramValue><constantValueFloat1 v="3.22"/></paramValue>'
+                        "</parameter>"
+                    ),
+                ),
+            }
+            for sfx, f16 in (("_g", True), ("_8", False))
+        ),
         # Biomech's n2373: a long warp, so its intensity's levels move samples
         ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
         *warp_cases(),

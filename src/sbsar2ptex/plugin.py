@@ -56,7 +56,6 @@ from sbsar2ptex.translate import Sub
 from sbsar2ptex.translate import UnsupportedError
 from sbsar2ptex.translate import _dynamic_offset
 from sbsar2ptex.translate import blend_crop
-from sbsar2ptex.translate import box_glsl_live
 from sbsar2ptex.translate import buffer
 from sbsar2ptex.translate import crop_glsl
 from sbsar2ptex.translate import dmb_glsl
@@ -73,7 +72,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.3"
+VERSION = "1.4"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -594,23 +593,32 @@ def _emboss(*, color: bool) -> Atom:
     )  # fmt: skip
 
 
-def _dirmotionblur(*, color: bool) -> Atom:
-    t, g, sfx = _kinds(color=color)
+def _dmb_by_format(g: str, turn: str, port: str) -> tuple[str, str]:
+    """Return a directional motion blur's helpers and body, by $format.
+
+    ``turn`` is its angle (a GLSL value), ``port`` the input it reads.
+    """
     helpers, calls = [], []
     for fmt in (0, 1, 2):
-        setup = dmb_setup_glsl("$intensity", "$mblurangle", N, lpx=fmt == 1)
+        setup = dmb_setup_glsl("$intensity", turn, N, lpx=fmt == 1)
         h, body = dmb_glsl(g, fmt, N, MASK, setup)
         tag = f"$(name)_v{fmt}_"
         helpers.append(h.replace("$(name)_", tag))
         body = body.replace("$(name)_", tag)
         helpers.append(f"{g} {tag}body(vec2 uv) {{\n{body}\n}}\n")
         calls.append(f"{tag}body(uv)")
-    text = "".join(helpers).replace("$input(", "$input1(")
+    text = "".join(helpers).replace("$input(", f"${port}(")
     body = (
         f"if ($format == 0) return {calls[0]};\n"
         f"if ($format == 1) return {calls[1]};\n"
         f"return {calls[2]};"
     )
+    return text, body
+
+
+def _dirmotionblur(*, color: bool) -> Atom:
+    t, g, sfx = _kinds(color=color)
+    text, body = _dmb_by_format(g, "$mblurangle", "input1")
     return _shader_atom(
         f"sbs_dirmotionblur{sfx}", "Directional blur",
         "Substance's Directional blur (dirmotionblur): a box of intensity / 256"
@@ -717,17 +725,15 @@ def _graph_atom(
 
 
 def _blur(*, color: bool) -> Atom:
-    t, _, sfx = _kinds(color=color)
-    radius = f"$intensity * ({N} / 256.0)"
+    # translate._blur: directional motion blurs at 0 and a quarter turn, the
+    # first's image stored in the format too
+    t, g, sfx = _kinds(color=color)
     knob = [_float("intensity", "Intensity", 10.0, 0.0, 32.0)]
     port = [Port("input", t, "Input", "")]
-    x = _inner_shader(
-        "pass_x", port, t, box_glsl_live(t, "vec2(1.0, 0.0)", radius, N), knob
-    )
-    y = _inner_shader(
-        "pass_y", port, t, box_glsl_live(t, "vec2(0.0, 1.0)", radius, N), knob,
-        store=True,
-    )  # fmt: skip
+    hx, bx = _dmb_by_format(g, "0.0", "input")
+    hy, by = _dmb_by_format(g, "0.25", "input")
+    x = _inner_shader("pass_x", port, t, bx, knob, hx, store=True)
+    y = _inner_shader("pass_y", port, t, by, knob, hy, store=True)
     # 32-bit: a 16-bit image (or the first pass) as half floats is off by
     # dozens of levels
     inner = [_plugin_buffer("buf_x", f32=True), x, _plugin_buffer("buf_y", f32=True), y]
@@ -739,12 +745,13 @@ def _blur(*, color: bool) -> Atom:
     sized = [("buf_x", "size_offset"), ("buf_y", "size_offset")]
     return _graph_atom(
         f"sbs_blur{sfx}", "Blur",
-        "Substance's Blur: a separable box, half-width intensity / 256 of the"
-        " image, its taps counted in the shader.",
+        "Substance's Blur: directional blurs of the intensity along x, then"
+        " along y (as Substance renders it), each stored in the output format.",
         [Port("input1", t, "Input", "input")], t, inner, wires,
         [("buf_x", 0)], ("pass_y", 0),
         [(knob[0], [("pass_x", "intensity"), ("pass_y", "intensity")]),
-         (FORMAT, [("pass_y", "format")]), (OUTPUTSIZE, sized)],
+         (FORMAT, [("pass_x", "format"), ("pass_y", "format")]),
+         (OUTPUTSIZE, sized)],
     )  # fmt: skip
 
 

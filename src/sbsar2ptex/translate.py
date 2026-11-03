@@ -1052,54 +1052,6 @@ def buffered(
     return Sub(nodes, wires, ports, made["name"])
 
 
-def box_taps(radius: float) -> list[tuple[float, float]]:
-    """Return (offset, weight) taps of Substance's box blur of half-width ``radius``.
-
-    Each texel weighs how much of it [-radius, radius] covers (measured, by
-    deconvolving renders of noise): the texels out to m = floor(radius +
-    0.5) weigh 1 but the last, m, which weighs radius + 0.5 - m; under half
-    a texel, the center alone (no blur). Normalized (the weights sum to 2
-    radius).
-    """
-    radius = max(radius, 1e-6)
-    m = int(radius + 0.5)
-    if m == 0:
-        return [(0.0, 1.0)]
-    end = radius + 0.5 - m
-    taps = [(float(k), 1.0) for k in range(-m + 1, m)]
-    taps += [(float(-m), end), (float(m), end)]
-    total = sum(w for _, w in taps)
-    return [(k, w / total) for k, w in taps]
-
-
-def box_glsl_live(t: str, direction: str, radius: str, n: str) -> str:
-    """Return a GLSL body: the box of box_taps, its radius (texels) a GLSL value.
-
-    ``direction`` is a GLSL vec2 in texels, ``n`` the image width (a GLSL
-    float). The taps are counted in the shader, so the radius can be a
-    parameter or a function.
-    """
-    g = "vec4" if t == "rgba" else "float"
-    return "\n".join(
-        [
-            f"{g} acc = {g}(0.0);",
-            f"float r = max({radius}, 1e-6);",
-            "int m = int(r + 0.5);",
-            "if (m == 0) {",
-            "\treturn $input(uv);",
-            "}",
-            f"vec2 d = {direction} / {n};",
-            "for (int i = -m + 1; i < m; i++) {",
-            "\tacc += $input(fract(uv + float(i) * d));",
-            "}",
-            "float w = r + 0.5 - float(m);",
-            "vec2 o = float(m) * d;",
-            "acc += w * ($input(fract(uv - o)) + $input(fract(uv + o)));",
-            "return acc / (float(2 * m - 1) + 2.0 * w);",
-        ]
-    )
-
-
 Made = tuple[dict[str, Any], list[str]] | Sub
 """A translated node: its Material Maker node and its input names by port."""
 
@@ -1741,23 +1693,32 @@ def _dyngradient(node: Node, name: str, *, color: bool, size: int) -> Made:
 
 
 def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
-    """Blur: a separable box, half-width intensity / 256 of the image."""
+    """Blur: two axis-aligned directional motion blurs, along x then along y.
+
+    Substance's blur renders as a directional motion blur of the same
+    intensity at 0 turns followed by one at a quarter turn (16 bits: 99.8%
+    of pixels equal, the rest by one level; 8 bits: all but 0.002%), the
+    first's image stored in the node's format as a node's is. So it is
+    translated as those (dmb_glsl): their pixel-area box, end-tap merges
+    and, at 8 bits, Substance's 8-bit arithmetic.
+    """
     t = "rgba" if color else "f"
-    p = word_params(node, [("intensity", 4, 10.0)], {})
-    scale = num((1 << size) / 256)
-    width = num(float(1 << size))
-    k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
-    x = shader(
-        f"{name}_x", [("input", t)], t,
-        box_glsl_live(t, "vec2(1.0, 0.0)", f"{num(k)} * {scale}", width),
-    )  # fmt: skip
-    # Read again: a function's helper goes with the shader made next.
-    p = word_params(node, [("intensity", 4, 10.0)], {})
-    k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
-    y = shader(
-        name, [("input", t)], t,
-        box_glsl_live(t, "vec2(0.0, 1.0)", f"{num(k)} * {scale}", width),
-    )  # fmt: skip
+    g = "vec4" if color else "float"
+    fmt = node.flags >> 4 & 3
+    n = num(float(1 << size))
+    passes = []
+    for pass_name, turn in ((f"{name}_x", "0.0"), (name, "0.25")):
+        # Read for each: a function's helper goes with the shader made next.
+        p = word_params(node, [("intensity", 4, 10.0)], {})
+        k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
+        setup = dmb_setup_glsl(num(k), turn, n, lpx=fmt == 1)
+        helpers, body = dmb_glsl(g, fmt, n, str((1 << size) - 1), setup)
+        made = shader(pass_name, [("input", t)], t, body)
+        made["shader_model"]["instance"] = helpers + made["shader_model"]["instance"]
+        passes.append(made)
+    x, y = passes
+    # the first pass's image is a node's: stored in the node's format
+    store_shader(x, STORE_STEPS.get(fmt))
     # the graph's inputs the x pass reads are read by the blur, as the y
     # pass's (named after it) are: not by the x pass's name, which goes
     _forget({x["name"]: name}, None)
@@ -4280,7 +4241,18 @@ def stored(made: Sub, node: Node) -> bool:
             (w["from"] for w in out["connections"] if w["to"] == "gen_outputs"), None
         )
         out = next((n for n in out["nodes"] if n["name"] == last), None)
-    if steps is None or out is None or out.get("type") != "shader":
+    if out is None or out.get("type") != "shader":
+        return False
+    return store_shader(out, steps)
+
+
+def store_shader(out: dict[str, Any], steps: int | None) -> bool:
+    """Round shader ``out``'s value to ``steps`` (stored); return whether it is.
+
+    As stored does: its function computes the value as ``$(name)_raw``.
+    No steps (a float format), or a shader of its own code, is left as is.
+    """
+    if steps is None:
         return False
     m = out["shader_model"]
     kind = m["outputs"][0]["type"]
