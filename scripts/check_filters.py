@@ -386,14 +386,43 @@ def cases() -> list[tuple]:
     return out + dmb_cases() + function_cases()
 
 
-def warp_cases() -> list[tuple]:
+def tilted_ramp16() -> str:
+    """Return a pixel processor's parameters: x + 0.37 y, wrapped, in 16 bits.
+
+    Both compute it exactly, and its levels are not an 8-bit image's (257 k).
+    """
+    tilt = fn("const_float2", FLOAT2, data='<constantValueFloat2 v="1 0.37"/>')
+    return (
+        '<parameter><name v="perpixel"/><relativeTo v="0"/><paramValue><dynamicValue>'
+        + function_graph(fn("dot", a=get("$pos", FLOAT2), b=tilt))
+        + "</dynamicValue></paramValue></parameter>"
+        '<parameter><name v="format"/><relativeTo v="0"/><paramValue>'
+        '<constantValueInt32 v="1"/></paramValue></parameter>'
+    )
+
+
+def warp_cases() -> list[tuple | dict]:
     """Return more warps: long and oblique directions, other intensities, 8 bits.
 
     Biomech's chain is 0.64 at 0.3 turn. At 30 (240 px) an ulp of the
     direction moves samples: 0.9 turn is one the shader's sines get
     exactly, 0.61 one they miss by an ulp. The 8-bit graphs store the
-    sample in 8 bits.
+    sample in 8 bits. The ramp16 cases sample a 16-bit image whose levels
+    are not an 8-bit image's, as Biomech's n1536 (a warp at 0.16) and
+    n2371 (a directional warp at 30, half a turn) do.
     """
+    ramp16 = ("pixelprocessor", tilted_ramp16())
+    deep = [
+        {"tag": tag, "filter": filt, "kind": GRAY, "params": params,
+         "chain": ramp16, "format16": True}
+        for tag, filt, params in (
+            ("ramp16_g", "levels", ()),  # the ramp itself
+            ("warp016_ramp16_g", "warp", (("intensity", F1, "0.16"),)),
+            ("warp2_ramp16_g", "warp", (("intensity", F1, "2"),)),
+            ("dwarp30_ramp16_g", "directionalwarp",
+             (("intensity", F1, "30"), ("warpangle", F1, "0.5"))),
+        )
+    ]  # fmt: skip
     dw, wp = "directionalwarp", "warp"
     out = [
         (f"dwarp{tag}_g", dw, GRAY, (("intensity", F1, i), ("warpangle", F1, a)))
@@ -411,6 +440,7 @@ def warp_cases() -> list[tuple]:
         ("dwarp_8", dw, GRAY, (("intensity", F1, "4"), ("warpangle", F1, "0.1"))),
         ("dwarp30_8", dw, GRAY, (("intensity", F1, "30"),)),
         ("warp_8", wp, GRAY, (("intensity", F1, "7.3"),)),
+        *deep,
     ]
 
 
@@ -554,15 +584,7 @@ def size_cases() -> list[dict]:
         '<parameter><name v="filtering"/><relativeTo v="0"/><paramValue>'
         '<constantValueInt32 v="1"/></paramValue></parameter>'
     )
-    # a 16-bit image both compute exactly: x + 0.37 y, wrapped
-    tilt = fn("const_float2", FLOAT2, data='<constantValueFloat2 v="1 0.37"/>')
-    ramp16 = (
-        '<parameter><name v="perpixel"/><relativeTo v="0"/><paramValue><dynamicValue>'
-        + function_graph(fn("dot", a=get("$pos", FLOAT2), b=tilt))
-        + "</dynamicValue></paramValue></parameter>"
-        '<parameter><name v="format"/><relativeTo v="0"/><paramValue>'
-        '<constantValueInt32 v="1"/></paramValue></parameter>'
-    )
+    ramp16 = tilted_ramp16()
     full = (
         ("offset", "constantValueFloat2", "0 0"),
         ("outputsize", "constantValueInt2", "0 0", "1"),  # the parent's size
