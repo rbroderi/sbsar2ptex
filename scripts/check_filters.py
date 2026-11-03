@@ -360,6 +360,19 @@ def cases() -> list[tuple]:
                 ("_noise_g", True, {"size": 10, "inputs": {"a": "noise"}}),
             )
         ),
+        # one pass of it on noise: is NVIDIA's miss there (56%) a pass's?
+        *(
+            {
+                "tag": f"dmb_{a}_322_noise_g".replace(".", "p"),
+                "filter": "dirmotionblur",
+                "kind": GRAY,
+                "format16": True,
+                "params": (("intensity", F1, "3.22"), ("mblurangle", F1, a)),
+                "size": 10,
+                "inputs": {"a": "noise"},
+            }
+            for a in ("0", "0.25")
+        ),
         # Biomech's n2373: a long warp, so its intensity's levels move samples
         ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
         *warp_cases(),
