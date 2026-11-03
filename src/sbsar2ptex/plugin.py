@@ -72,7 +72,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.4"
+VERSION = "1.5"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -471,16 +471,27 @@ def _sharpen(*, color: bool) -> Atom:
     )  # fmt: skip
 
 
-def _by_format(g: str, body: Any) -> tuple[str, str]:
+EIGHT = {
+    "gradient": _bool("gradient8", "8-bit gradient", default=False),
+    "intensity": _bool("intensity8", "8-bit intensity", default=False),
+}
+"""A warp's settings saying its second input is 8 bits (warp_glsl's eight)."""
+INPUT8 = _bool("input8", "8-bit input", default=False)
+
+
+def _by_format(g: str, body: Any, second: str) -> tuple[str, str]:
     """Return a warp's helpers and body: warp_glsl's for each format, by $format.
 
     ``body`` is the body for helpers named ``$(name)_`` (a function of
-    nothing, read once per format).
+    nothing, read once per format); ``second`` its second input's key,
+    whose 8 bits are a setting (EIGHT), as the input's are (INPUT8).
     """
     helpers, calls = [WARP_GLSL], []
+    eight = ("$input8", f"${EIGHT[second]['name']}")
     for fmt in (0, 1, 2):
         tag = f"$(name)_v{fmt}_"
-        helpers.append(warp_glsl(g, fmt, N, "$input1").replace("$(name)_", tag))
+        glsl = warp_glsl(g, fmt, N, "$input1", eight=eight)
+        helpers.append(glsl.replace("$(name)_", tag))
         helpers.append(
             f"{g} {tag}body(vec2 uv) {{\n{body().replace('$(name)_', tag)}\n}}\n"
         )
@@ -495,7 +506,9 @@ def _by_format(g: str, body: Any) -> tuple[str, str]:
 
 def _warp(*, color: bool) -> Atom:
     t, g, sfx = _kinds(color=color)
-    helpers, body = _by_format(g, lambda: warp_body(N, "$intensity", "$inputgradient"))
+    helpers, body = _by_format(
+        g, lambda: warp_body(N, "$intensity", "$inputgradient"), "gradient"
+    )
     return _shader_atom(
         f"sbs_warp{sfx}", "Warp",
         "Substance's Warp: the input sampled at uv + intensity / 256 times the"
@@ -504,7 +517,8 @@ def _warp(*, color: bool) -> Atom:
         " 32 bits for the gradient, and the input of a 16 bits warp).",
         [Port("input1", t, "Input", "input"),
          Port("inputgradient", "f", "Gradient input", "gradient")],
-        t, body, [_float("intensity", "Intensity", 1.0, 0.0, 32.0)],
+        t, body,
+        [_float("intensity", "Intensity", 1.0, 0.0, 32.0), INPUT8, EIGHT["gradient"]],
         helpers=helpers,
     )  # fmt: skip
 
@@ -512,7 +526,9 @@ def _warp(*, color: bool) -> Atom:
 def _directionalwarp(*, color: bool) -> Atom:
     t, g, sfx = _kinds(color=color)
     helpers, body = _by_format(
-        g, lambda: dwarp_body(N, "$intensity", "$warpangle", "$inputintensity")
+        g,
+        lambda: dwarp_body(N, "$intensity", "$warpangle", "$inputintensity"),
+        "intensity",
     )
     return _shader_atom(
         f"sbs_directionalwarp{sfx}", "Directional warp",
@@ -524,7 +540,8 @@ def _directionalwarp(*, color: bool) -> Atom:
          Port("inputintensity", "f", "Intensity input", "intensity")],
         t, body,
         [_float("intensity", "Intensity", 10.0, 0.0, 64.0),
-         _float("warpangle", "Warp angle", 0.0, 0.0, 1.0)],
+         _float("warpangle", "Warp angle", 0.0, 0.0, 1.0), INPUT8,
+         EIGHT["intensity"]],
         helpers=WARP_SIN_GLSL + helpers,
     )  # fmt: skip
 
@@ -1303,6 +1320,11 @@ class Maker:
             return None
         fmt = node.flags >> 4 & 3
         knobs.values["format"] = fmt
+        bits = translate._CTX.input_bits  # noqa: SLF001
+        key = {INPUT8["name"]: "input"} | {e["name"]: k for k, e in EIGHT.items()}
+        for p in atom.params:  # a warp's inputs in 8 bits (warp_glsl's eight)
+            if p["name"] in key:
+                knobs.values[p["name"]] = bits.get(key[p["name"]]) == 8  # noqa: PLR2004
         if any(p["name"] == "outputsize" for p in atom.params):
             knobs.values["outputsize"] = float(size - self.size)
         made: dict[str, Any] = {
@@ -1317,8 +1339,10 @@ class Maker:
         # Its inputs buffered as the inline translation buffers them.
         precise = set(op.precise)
         sampled = set(op.sampled)
-        # 16 bits: the input's levels, read by texel
-        if op.base in ("dirmotionblur", "warp", "directionalwarp") and fmt == 1:
+        # the input's 16-bit levels, read by texel (a warp's in 8 bits too)
+        if op.base in ("warp", "directionalwarp") and fmt in (0, 1):
+            precise.add("input")
+        if op.base == "dirmotionblur" and fmt == 1:
             precise.add("input")
         if op.base == "transformation":
             fed = translate._CTX.transform_in  # noqa: SLF001

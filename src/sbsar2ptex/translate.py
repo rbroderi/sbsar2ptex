@@ -108,6 +108,8 @@ class _Context:
     pixel_seed: str = "0"
     """The pixel processor being translated's seed (GLSL): its own, the
     graph's unless set; its per-pixel generators start from it."""
+    input_bits: dict[str, int] = field(default_factory=dict)
+    """The node being translated's inputs' bits, by port (input_bits)."""
     count: int = 0
     data_dir: Path | None = None
     fx_variables: dict[int, tuple[str, str]] | None = None
@@ -2701,7 +2703,13 @@ opaque bit operation (so it is not fused into a sum), ``wf_$(name)(L)`` is
 the float32 nearest L / 65535, from integers."""
 
 
-def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
+def warp_glsl(
+    g: str,
+    fmt: int,
+    n: str,
+    inp: str = "$input",
+    eight: tuple[str, str] = ("false", "false"),
+) -> str:
     """Return GLSL for a warp's sample, as Substance's GPU engine takes it.
 
     ``$(name)_read(q)`` samples ``inp`` (a buffer, read by texel; ``n`` the
@@ -2709,10 +2717,14 @@ def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
     the first texel's center, wrapping; ``$(name)_val(v)`` is the float32
     nearest the level of a stored value v, which the coordinates are
     computed from. In 8 and 16 bits (``fmt``, the node's output format)
-    the blend is in integer levels (an 8-bit k as 257 k), stored as the
-    GPU stores a bilinear read. On AMD (_DMB_AMD) the blend is exact and
-    its float32 is stored (16 bits: a tie up or down by that float32's
-    rounding; 8 bits: through a half float's 11 bits). NVIDIA weighs the
+    the blend is in the inputs' 16-bit levels, whatever the output's (an
+    8-bit warp reads 16-bit inputs whole, Biomech's n4001: only its output
+    is 8 bits); ``eight`` (GLSL bools: the input, the gradient or
+    intensity) says an input is 8 bits, its level 257 k of its nearest k,
+    as an image's must be read (input_bits). Stored as the GPU stores a
+    bilinear read. On AMD (_DMB_AMD) the blend is exact and its float32 is
+    stored (16 bits: a tie up or down by that float32's rounding; 8 bits:
+    through a half float's 11 bits). NVIDIA weighs the
     four texels in 256ths, the corner's fx fy / 256 rounded half up and
     the others what is left of fx, fy and 256 (an RTX 3090: 100%), and
     stores the sum's 256th halves up (8 bits: _dmb_s8's, presumed). Floats
@@ -2747,11 +2759,6 @@ def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
             "\treturn mix(mix(a, b, w.x), mix(c, d, w.x), w.y);\n"
             "}\n"
         ) + read
-    level = (
-        "uint(floor(v * 65535.0 + 0.5))"
-        if fmt == 1
-        else "257u * uint(floor(v * 255.0 + 0.5))"
-    )
     if fmt == 1 and _DMB_AMD:
         # A tie goes up when float32((m + 1/2) / 65535) is above it: a bit
         # 8 below the top of (2m + 1) 65537.
@@ -2814,15 +2821,24 @@ def warp_glsl(g: str, fmt: int, n: str, inp: str = "$input") -> str:
         )
     )
     return (
-        "uint $(name)_lv(float v) {\n\tv = clamp(v, 0.0, 1.0);\n"
-        f"\treturn {level};\n}}\n"
-        "float $(name)_val(float v) {\n\treturn wf_$(name)($(name)_lv(v));\n}\n"
+        "uint $(name)_level(float v, bool eight) {\n\tv = clamp(v, 0.0, 1.0);\n"
+        "\treturn eight ? 257u * uint(floor(v * 255.0 + 0.5))"
+        " : uint(floor(v * 65535.0 + 0.5));\n}\n"
+        f"uint $(name)_lv(float v) {{\n\treturn $(name)_level(v, {eight[0]});\n}}\n"
+        "float $(name)_val(float v) {\n"
+        f"\treturn wf_$(name)($(name)_level(v, {eight[1]}));\n}}\n"
         + rv
         + f"float $(name)_st(uint num) {{\n{store}}}\n"
         "float $(name)_mix(float a, float b, float c, float d, vec2 f) {\n"
         "\tuint fx = uint(f.x);\n"
         "\tuint fy = uint(f.y);\n" + num + f"\treturn $(name)_st(num) / {steps};\n}}\n"
     ) + read
+
+
+def _eight(*ports: str) -> tuple[str, str]:
+    """Return GLSL bools: whether each port's input is read in 8 bits (input_bits)."""
+    a, b = (str(_CTX.input_bits.get(p) == 8).lower() for p in ports)  # noqa: PLR2004
+    return a, b
 
 
 def _warp_round(x: str) -> str:
@@ -2890,8 +2906,8 @@ def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
 
     The slope is a backward difference over one texel, of the gradient's
     levels; one bilinear read, rounded and stored as Substance's GPU engine
-    takes it (warp_glsl, warp_body). Both inputs are read by texel; a
-    16-bit one's levels exactly, so 32-bit buffers.
+    takes it (warp_glsl, warp_body). Both inputs are read by texel, their
+    16-bit levels exactly (an 8-bit warp's too), so 32-bit buffers.
     """
     t = "rgba" if color else "f"
     g = "vec4" if color else "float"
@@ -2901,8 +2917,11 @@ def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     n = num(float(1 << size))
     made = shader(name, [("input", t), ("gradient", "f")], t, warp_body(n, num(k)))
     model = made["shader_model"]
-    model["instance"] = WARP_GLSL + warp_glsl(g, fmt, n) + model["instance"]
-    precise = {"input", "gradient"} if fmt == 1 else {"gradient"}
+    eight = _eight("input", "gradient")
+    model["instance"] = (
+        WARP_GLSL + warp_glsl(g, fmt, n, eight=eight) + model["instance"]
+    )
+    precise = {"input", "gradient"} if fmt in (0, 1) else {"gradient"}
     return buffered(
         made, ["input", "gradient"], {"input", "gradient"}, size, precise=precise
     )
@@ -2915,7 +2934,8 @@ def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     is computed in the shader as Substance's CPU computes it (dwarp_body),
     so intensity and angle stay live. One bilinear read, rounded and
     stored as Substance's GPU engine takes it (warp_glsl), of the input
-    by texel: a 16-bit one's levels exactly, so a 32-bit buffer.
+    by texel: its 16-bit levels exactly (an 8-bit warp's too), so a 32-bit
+    buffer.
     """
     t = "rgba" if color else "f"
     g = "vec4" if color else "float"
@@ -2930,10 +2950,11 @@ def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     body = dwarp_body(n, num(k), num(turn))
     made = shader(name, [("input", t), ("intensity", "f")], t, body)
     model = made["shader_model"]
+    eight = _eight("input", "intensity")
     model["instance"] = (
-        WARP_SIN_GLSL + WARP_GLSL + warp_glsl(g, fmt, n) + model["instance"]
-    )
-    precise = {"input"} if fmt == 1 else set()
+        WARP_SIN_GLSL + WARP_GLSL + warp_glsl(g, fmt, n, eight=eight)
+    ) + model["instance"]
+    precise = {"input"} if fmt in (0, 1) else set()
     return buffered(made, ["input", "intensity"], {"input"}, size, precise=precise)
 
 
@@ -4230,9 +4251,11 @@ def stored(made: Sub, node: Node) -> bool:
     node's value is rounded to 1/255 before anything reads it, a 16-bit
     one's to 1/65535 (thresholds downstream turn the difference into whole
     pixels). Ties between 8-bit steps break down, as on NVIDIA GPUs (see
-    _levels). The output shader computes the unrounded value as
-    ``$(name)_raw`` and its function returns that rounded. Returns whether
-    it does (exact_buffers keeps such values exact in buffers).
+    _levels); 16-bit levels are the GPU's own (fxglsl.level16_glsl: NVIDIA
+    truncates to 2^-20 first, by _DMB_AMD). The output shader computes the
+    unrounded value as ``$(name)_raw`` and its function returns that
+    rounded. Returns whether it does (exact_buffers keeps such values exact
+    in buffers).
     """
     steps = STORE_STEPS.get(node.flags >> 4 & 3)
     out = next((n for n in made.nodes if n["name"] == made.output), None)
@@ -4261,13 +4284,13 @@ def store_shader(out: dict[str, Any], steps: int | None) -> bool:
     ret, g = ("vec4", "vec4") if kind == "rgba" else ("float", "float")
     k = num(float(steps))
     tie = (
-        f"ceil(v * {k} - 0.5) / {k}"
+        f"return ceil(v * {k} - 0.5) / {k};"
         if steps == 255  # noqa: PLR2004
-        else f"floor(v * {k} + 0.5) / {k}"
+        else fxglsl.level16_glsl(g, amd=_DMB_AMD) + "return k / 65535.0;"
     )
     m["instance"] = m["instance"].replace("$(name)_fct(", "$(name)_raw(") + (
         f"{ret} $(name)_fct(vec2 uv) {{\n"
-        f"{g} v = clamp($(name)_raw(uv), 0.0, 1.0);\nreturn {tie};\n}}\n"
+        f"{g} v = clamp($(name)_raw(uv), 0.0, 1.0);\n{tie}\n}}\n"
     )
     return True
 
@@ -4366,6 +4389,18 @@ def graph_inputs(asm: Any, xml: str) -> dict[int, GraphInput]:
             labels.get(str(uid), ""),
         )
     return out
+
+
+def input_bits(node: Node) -> int:
+    """Return the bits a node's image is read in: 8, 16, or 32 (a float format).
+
+    A graph input's image is 8 bits (check_filters' test images): Material
+    Maker hands it over in half floats, from which only its 8-bit codes come
+    back exactly.
+    """
+    if node.op in (32, 33):
+        return 8
+    return {0: 8, 1: 16}.get(node.flags >> 4 & 3, 32)
 
 
 def translate_graph(
@@ -4513,6 +4548,7 @@ def translate_graph(
         _CTX.size = own
         loop = loops.get(k)
         sources = loop.inputs if loop is not None else node.inputs
+        _CTX.input_bits = {p: input_bits(nodes[m]) for p, m in sources.items()}
         _CTX.transform_in = None
         if node.op in (4, 5) and "input" in sources:  # its input as fed below
             m = sources["input"]

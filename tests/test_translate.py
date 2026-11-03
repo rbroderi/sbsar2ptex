@@ -9,8 +9,11 @@ import re
 import struct
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from sbsar2ptex import fxdraw
+from sbsar2ptex import fxglsl
 from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
@@ -469,6 +472,59 @@ def test_nvidia_warp_rounds_only_the_corner_weight(monkeypatch) -> None:
                     + fx * fy * p[3]
                 )
                 assert _nv_warp_level(p, fx, fy) == (num + 32768) >> 16
+
+
+def _glsl_level16(code: str, v: np.ndarray) -> np.ndarray:
+    """Run fxglsl.level16_glsl's float lines in float32 numpy; return k."""
+    env = {
+        "v": v.astype(np.float32),
+        "floor": np.floor,
+        "step": lambda e, x: (x >= e).astype(np.float32),
+    }
+    for line in code.split(";")[:-1]:
+        name, expr = line.strip().removeprefix("float ").split("=", 1)
+        name = name.strip()
+        if name.endswith("+"):
+            name = name[:-1].strip()
+            expr = f"{name} + ({expr})"
+        env[name] = np.float32(1) * eval(expr, {}, env)  # noqa: S307
+        env[name] = env[name].astype(np.float32)
+    return env["k"].astype(np.int64)
+
+
+def test_16_bit_stores_are_the_gpus() -> None:
+    # Substance's 16-bit store (ramp16_g, every pixel): AMD's the nearest
+    # level exactly, where floor(65535 v + 0.5) in float32 sends values
+    # just under a half up; NVIDIA's of v truncated to 2^-20, a half down.
+    rng = np.random.default_rng(3)
+    v = rng.random(200000, dtype=np.float32)
+    k = np.arange(1, 65535)
+    v = np.concatenate([v, ((k - 0.5) / 65535).astype(np.float32)])
+    exact = np.floor(v.astype(np.float64) * 65535 + 0.5).astype(np.int64)
+    amd = _glsl_level16(fxglsl.level16_glsl("float", amd=True), v)
+    assert (amd == exact).all()
+    naive = np.floor(v * np.float32(65535) + np.float32(0.5)).astype(np.int64)
+    assert (naive != exact).any()
+    nvidia = _glsl_level16(fxglsl.level16_glsl("float", amd=False), v)
+    assert (nvidia == fxdraw.s16n(v)).all()
+    assert (nvidia < exact).any()
+
+
+def test_an_8_bit_warp_reads_its_inputs_bits() -> None:
+    # Biomech's n4001: an 8-bit warp of 16-bit images reads their levels
+    # whole (harness warpm12_grad16_8), an image in 8 bits (warp_8); both
+    # on 32-bit buffers
+    translate._CTX = translate._Context(size=8)
+    word = struct.unpack("<I", struct.pack("<f", -1.2075))[0]
+    node = Node(index=0, start=0, end=4, flags=1 << 12, inline=[word])
+    for bits, eight in ((16, "false"), (8, "true")):
+        translate._CTX.input_bits = {"input": 16, "gradient": bits}
+        made = translate._warp(node, "w", color=False, size=8)
+        warp = next(n for n in made.nodes if n["name"] == "w")
+        code = warp["shader_model"]["instance"]
+        assert "$(name)_level(v, false);" in code  # the input's
+        assert f"wf_$(name)($(name)_level(v, {eight}))" in code
+        assert all(n["parameters"]["f32"] for n in made.nodes if n["type"] == "buffer")
 
 
 def test_amd_warp_blends_exactly(monkeypatch) -> None:

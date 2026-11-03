@@ -208,7 +208,7 @@ def test_the_iterate_replaces_the_unrolled_nodes(fmt: int, steps: str) -> None:
     assert f"i_n{END}_Intensity" in sub["parameters"]
     # stored as the blends and warps are, in the graph's format
     for shader in (w0, w, mean):
-        assert f"v * {steps}" in shader["shader_model"]["instance"]
+        assert f"/ {steps};" in shader["shader_model"]["instance"]
     body = mean["shader_model"]["instance"]
     assert "int j = int($iteration);" in body
     assert "const float w[32] = float[32](0.0, 0.5, 0.33333334, 0.25" in body

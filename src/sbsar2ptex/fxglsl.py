@@ -116,6 +116,30 @@ def levels_glsl(bits: int | None) -> str:
     )
 
 
+def level16_glsl(g: str, *, amd: bool) -> str:
+    """Return GLSL setting ``k`` (type ``g``) to the 16-bit level the GPU stores v as.
+
+    v is in [0, 1]. AMD: the nearest level, exactly (v 65536 is exact, and
+    so is its fraction f: v 65535 = 65536 v - v against f -+ 1/2). NVIDIA:
+    v truncated to 2^-20 first, then the nearest, a half down (fxdraw.s16n;
+    an RTX 3090, check_filters ramp16_g: every pixel).
+    """
+    if amd:  # floor(65535 v + 0.5) = floor(65536 v) + floor(f - v + 0.5)
+        return (
+            f"\t{g} x = v * 65536.0;\n"
+            f"\t{g} k = floor(x);\n"
+            f"\t{g} f = x - k;\n"
+            "\tk += step(v, f - 0.5) + step(v, f + 0.5) - 1.0;\n"
+        )
+    # x = 16 q + r, v truncated to 2^-20: (65535 x + 2^19 - 1) / 2^20
+    return (
+        f"\t{g} x = floor(v * 1048576.0);\n"
+        f"\t{g} q = floor(x / 16.0);\n"
+        f"\t{g} k = q + floor(((x - 16.0 * q) * 65536.0 + 524287.0 - x)"
+        " / 1048576.0);\n"
+    )
+
+
 def store_glsl(layout: Layout) -> str:
     """Return ``fxstore_$(name)(vec4)``: the accumulator stored, as its value.
 
@@ -123,20 +147,7 @@ def store_glsl(layout: Layout) -> str:
     (fxdraw.store), returned as that level's value.
     """
     if layout.bits == 16:  # noqa: PLR2004
-        if layout.amd:  # floor(65535 v + 0.5) = floor(65536 v) + floor(f - v + 0.5)
-            body = (
-                "\tvec4 x = v * 65536.0;\n"
-                "\tvec4 k = floor(x);\n"
-                "\tvec4 f = x - k;\n"
-                "\tk += step(v, f - 0.5) + step(v, f + 0.5) - 1.0;\n"
-            )
-        else:  # x = 16 q + r, v truncated to 2^-20: (65535 x + 2^19 - 1) / 2^20
-            body = (
-                "\tvec4 x = floor(v * 1048576.0);\n"
-                "\tvec4 q = floor(x / 16.0);\n"
-                "\tvec4 k = q + floor(((x - 16.0 * q) * 65536.0 + 524287.0 - x)"
-                " / 1048576.0);\n"
-            )
+        body = level16_glsl("vec4", amd=layout.amd)
         out = "fxv_$(name)(k)"
     elif layout.bits == 8:  # noqa: PLR2004
         if layout.amd:  # through a half float's 11 bits, truncated

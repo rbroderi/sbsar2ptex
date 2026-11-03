@@ -409,7 +409,9 @@ def warp_cases() -> list[tuple | dict]:
     exactly, 0.61 one they miss by an ulp. The 8-bit graphs store the
     sample in 8 bits. The ramp16 cases sample a 16-bit image whose levels
     are not an 8-bit image's, as Biomech's n1536 (a warp at 0.16) and
-    n2371 (a directional warp at 30, half a turn) do.
+    n2371 (a directional warp at 30, half a turn) do; the _grad16_8 and
+    _ramp16_8 ones are 8-bit warps of it, as n4001 and n4832 are of 16-bit
+    images.
     """
     ramp16 = ("pixelprocessor", tilted_ramp16())
     deep = [
@@ -434,6 +436,18 @@ def warp_cases() -> list[tuple | dict]:
         for tag, i, a in (
             ("_bio", "0.64", "0.3"), ("30_90", "30", "0.9"),
             ("30_61", "30", "0.61"), ("12_83", "12", "0.83"),
+        )
+    ]  # fmt: skip
+    # 8-bit warps of 16-bit images, as Biomech's (n4001's gradient, a
+    # directional motion blur's, has 58k levels): the ramp is 16-bit in an
+    # 8-bit graph, its format its own
+    deep += [
+        {"tag": tag, "filter": wp, "kind": GRAY, "params": (("intensity", F1, k),),
+         "chain": ramp16, "chain_to": to}
+        for tag, k, to in (
+            ("warpm12_grad16_8", "-1.2075", 1),
+            ("warp25_grad16_8", "2.5", 1),
+            ("warpm12_ramp16_8", "-1.2075", 0),
         )
     ]  # fmt: skip
     out += [(f"warp{t}_g", wp, GRAY, (("intensity", F1, i),)) for t, i in (
