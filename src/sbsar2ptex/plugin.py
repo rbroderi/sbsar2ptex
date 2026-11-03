@@ -728,7 +728,9 @@ def _blur(*, color: bool) -> Atom:
         "pass_y", port, t, box_glsl_live(t, "vec2(0.0, 1.0)", radius, N), knob,
         store=True,
     )  # fmt: skip
-    inner = [_plugin_buffer("buf_x"), x, _plugin_buffer("buf_y"), y]
+    # 32-bit: a 16-bit image (or the first pass) as half floats is off by
+    # dozens of levels
+    inner = [_plugin_buffer("buf_x", f32=True), x, _plugin_buffer("buf_y", f32=True), y]
     wires = [
         {"from": "buf_x", "from_port": 0, "to": "pass_x", "to_port": 0},
         {"from": "pass_x", "from_port": 0, "to": "buf_y", "to_port": 0},

@@ -307,12 +307,12 @@ def test_a_chain_becomes_one_iterate() -> None:
     sub = next(n for n in mm if n["name"] == "n10_loop")
     inner = {n["name"]: n for n in sub["nodes"]}
     loop = inner["loop"]["parameters"]
-    # the blur's two 16-bit buffers one state, the 32-bit one another:
+    # the blur's two buffers and the period's own, all 32-bit: one state,
     # three phases a period
     assert loop == {
-        "states": 2, "size_mode": 0, "size": 8, "size_offset": 0,
+        "states": 1, "size_mode": 0, "size": 8, "size_offset": 0,
         "iterations": "3 * 4", "filter": True, "rounding": 0,
-        "format_0": 0, "format_1": 1, "rg_0": False, "rg_1": False,
+        "format_0": 1, "rg_0": False,
     }  # fmt: skip
     # the period's shaders, as translated, their knobs live: the blur's
     # passes inlined, its intensity one control
@@ -332,7 +332,7 @@ def test_a_chain_becomes_one_iterate() -> None:
         )
     ]
     assert sub["parameters"] == {"n10_intensity": 2.0}
-    body = inner["state1"]["shader_model"]["instance"]
+    body = inner["state0"]["shader_model"]["instance"]
     assert "int p = (int($iteration) - 1) % 3;" in body
     assert "if (p == 2) return $p2(uv);" in body
     assert "return $current(uv);" in body
@@ -340,15 +340,13 @@ def test_a_chain_becomes_one_iterate() -> None:
         (x["from"], x["from_port"], x["to"], x["to_port"]) for x in sub["connections"]
     }
     assert {
-        ("gen_inputs", 0, "init1", 0), ("init1", 0, "loop", 1),  # the image
-        ("init0", 0, "loop", 0),
-        ("loop", 3, "n9", 0),  # the directional blur reads it
+        ("gen_inputs", 0, "init0", 0), ("init0", 0, "loop", 0),  # the image
+        ("loop", 1, "n9", 0),  # the directional blur reads it
         ("n9", 0, "state0", 1),  # into the blur's first buffer (phase 0)
-        ("loop", 2, "n10_pass_x", 0), ("n10_pass_x", 0, "state0", 2),  # 1
-        ("loop", 2, "n10_pass_y", 0), ("n10_pass_y", 0, "state1", 1),  # 2
-        ("loop", 2, "state0", 0), ("state0", 0, "loop", 2),
-        ("loop", 3, "state1", 0), ("state1", 0, "loop", 3),
-        ("loop", 1, "gen_outputs", 0),
+        ("loop", 1, "n10_pass_x", 0), ("n10_pass_x", 0, "state0", 2),  # 1
+        ("loop", 1, "n10_pass_y", 0), ("n10_pass_y", 0, "state0", 3),  # 2
+        ("loop", 1, "state0", 0), ("state0", 0, "loop", 1),
+        ("loop", 0, "gen_outputs", 0),
     } == links  # fmt: skip
 
 

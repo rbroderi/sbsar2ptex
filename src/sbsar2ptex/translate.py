@@ -1055,20 +1055,19 @@ def buffered(
 def box_taps(radius: float) -> list[tuple[float, float]]:
     """Return (offset, weight) taps of Substance's box blur of half-width ``radius``.
 
-    The exact integral over [-radius, radius] of the linearly interpolated
-    signal, normalized: interior taps 1, the end taps by the trapezoid.
+    Each texel weighs how much of it [-radius, radius] covers (measured, by
+    deconvolving renders of noise): the texels out to m = floor(radius +
+    0.5) weigh 1 but the last, m, which weighs radius + 0.5 - m; under half
+    a texel, the center alone (no blur). Normalized (the weights sum to 2
+    radius).
     """
     radius = max(radius, 1e-6)
-    n = int(radius)
-    t = radius - n
-    taps = [(float(k), 1.0) for k in range(-n + 1, n)]
-    if n == 0:
-        taps = [(0.0, 2 * t - t * t)]
-    else:
-        end = 0.5 + t - t * t / 2
-        taps += [(float(-n), end), (float(n), end)]
-    if t > 0:
-        taps += [(float(-n - 1), t * t / 2), (float(n + 1), t * t / 2)]
+    m = int(radius + 0.5)
+    if m == 0:
+        return [(0.0, 1.0)]
+    end = radius + 0.5 - m
+    taps = [(float(k), 1.0) for k in range(-m + 1, m)]
+    taps += [(float(-m), end), (float(m), end)]
     total = sum(w for _, w in taps)
     return [(k, w / total) for k, w in taps]
 
@@ -1085,30 +1084,18 @@ def box_glsl_live(t: str, direction: str, radius: str, n: str) -> str:
         [
             f"{g} acc = {g}(0.0);",
             f"float r = max({radius}, 1e-6);",
-            "int n = int(r);",
-            "float t = r - float(n);",
+            "int m = int(r + 0.5);",
+            "if (m == 0) {",
+            "\treturn $input(uv);",
+            "}",
             f"vec2 d = {direction} / {n};",
-            "for (int i = -n + 1; i < n; i++) {",
+            "for (int i = -m + 1; i < m; i++) {",
             "\tacc += $input(fract(uv + float(i) * d));",
             "}",
-            "float total = float(max(2 * n - 1, 0));",
-            "if (n == 0) {",
-            "\tfloat w = 2.0 * t - t * t;",
-            "\tacc += w * $input(uv);",
-            "\ttotal += w;",
-            "} else {",
-            "\tfloat w = 0.5 + t - 0.5 * t * t;",
-            "\tvec2 o = float(n) * d;",
-            "\tacc += w * ($input(fract(uv - o)) + $input(fract(uv + o)));",
-            "\ttotal += 2.0 * w;",
-            "}",
-            "if (t > 0.0) {",
-            "\tfloat w = 0.5 * t * t;",
-            "\tvec2 o = float(n + 1) * d;",
-            "\tacc += w * ($input(fract(uv - o)) + $input(fract(uv + o)));",
-            "\ttotal += 2.0 * w;",
-            "}",
-            "return acc / total;",
+            "float w = r + 0.5 - float(m);",
+            "vec2 o = float(m) * d;",
+            "acc += w * ($input(fract(uv - o)) + $input(fract(uv + o)));",
+            "return acc / (float(2 * m - 1) + 2.0 * w);",
         ]
     )
 
@@ -1778,7 +1765,14 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     group = subgraph(
         name,
         "Blur",
-        [buffer("buf_x", size), x, buffer("buf_y", size), y],
+        # 32-bit: a 16-bit image (or the first pass) as half floats is off
+        # by dozens of levels
+        [
+            buffer("buf_x", size, precise=True),
+            x,
+            buffer("buf_y", size, precise=True),
+            y,
+        ],
         [wire("buf_x", "pass_x"), wire("pass_x", "buf_y"), wire("buf_y", "pass_y")],
         [(t, "buf_x", 0)],
         ("pass_y", 0, t),

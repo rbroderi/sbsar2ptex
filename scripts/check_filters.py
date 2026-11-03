@@ -55,6 +55,11 @@ EXPORT_BATCH = 40
 """Cases a Material Maker run exports."""
 F4 = "constantValueFloat4"
 F1 = "constantValueFloat1"
+BLUR_NOISE = (
+    ("3", "3"), ("322", "3.22"), ("01", "0.1"), ("025", "0.25"), ("04", "0.4"),
+    ("1", "1"), ("11", "1.1"), ("15", "1.5"), ("2", "2"), ("8", "8"),
+)  # fmt: skip
+"""Blurs of noise (tag, intensity): Substance's kernel, deconvolved."""
 
 
 def cases() -> list[tuple]:
@@ -316,6 +321,19 @@ def cases() -> list[tuple]:
         ("blur322_g", "blur", GRAY, (("intensity", F1, "3.22"),), "", True),
         ("blur322_8", "blur", GRAY, (("intensity", F1, "3.22"),)),
         ("blur05_g", "blur", GRAY, (("intensity", F1, "0.05"),), "", True),
+        # on noise, at n667's size: Substance's kernel can be read off them
+        *(
+            {
+                "tag": f"blur{tag}_noise_g",
+                "filter": "blur",
+                "kind": GRAY,
+                "format16": True,
+                "params": (("intensity", F1, k),),
+                "size": 10,
+                "inputs": {"a": "noise"},
+            }
+            for tag, k in BLUR_NOISE
+        ),
         # Biomech's n2373: a long warp, so its intensity's levels move samples
         ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
         *warp_cases(),

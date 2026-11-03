@@ -409,6 +409,28 @@ def _glsl_warp_level(code: str, p: tuple[int, int, int, int], fx: int, fy: int):
     return eval(expr, {}, env)  # noqa: S307
 
 
+def test_a_blur_weighs_texels_by_how_much_of_them_it_covers() -> None:
+    # Substance's kernels, deconvolved from blurs of noise (1024 pixels):
+    # intensity 0.4 (radius 1.6) is 1, 1, 1 and 0.1 at each end; 0.1 (0.4)
+    # no blur at all; 3.22 (12.88) ends in 0.38
+    def weights(radius: float) -> dict[float, float]:
+        return {k: w * 2 * radius for k, w in translate.box_taps(radius)}
+
+    assert weights(1.6) == pytest.approx(
+        {-2.0: 0.1, -1.0: 1.0, 0.0: 1.0, 1.0: 1.0, 2.0: 0.1}
+    )
+    assert translate.box_taps(0.4) == [(0.0, 1.0)]
+    end = weights(12.88)
+    assert end[13.0] == pytest.approx(0.38)
+    assert end[12.0] == end[-12.0] == pytest.approx(1.0)
+    assert 14.0 not in end
+    assert weights(12.0)[12.0] == pytest.approx(0.5)
+    # the shader counts the same taps, its radius live
+    body = translate.box_glsl_live("f", "vec2(1.0, 0.0)", "$r", "1024.0")
+    assert "int m = int(r + 0.5);" in body
+    assert "float w = r + 0.5 - float(m);" in body
+
+
 def test_nvidia_warp_rounds_only_the_corner_weight(monkeypatch) -> None:
     monkeypatch.setattr(translate, "_DMB_AMD", False)
     code = translate.warp_glsl("float", 1, "n")
