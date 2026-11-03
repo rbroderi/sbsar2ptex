@@ -42,8 +42,16 @@ def test_install_writes_the_plugin(tmp_path) -> None:
     cfg = (tmp_path / "sbs" / "plugin.cfg").read_text(encoding="utf-8")
     assert f'version="{plugin.VERSION}"' in cfg
     assert 'nodes="nodes"' in cfg
+    assert 'script="plugin.gd"' in cfg
+    gd = (tmp_path / "sbs" / "plugin.gd").read_text(encoding="utf-8")
+    assert 'add_node_type("sbs_fxmap", preload("gen_sbs_fxmap.gd"))' in gd
+    fxmap = (tmp_path / "sbs" / "gen_sbs_fxmap.gd").read_text(encoding="utf-8")
+    # a class_name in user:// would not register; the file format is the fork's
+    assert "\nclass_name " not in fxmap
+    assert 'return "sbs_fxmap"' in fxmap
+    assert (tmp_path / "sbs" / "README.md").exists()
     nodes = sorted((tmp_path / "sbs" / "nodes").glob("*.mmg"))
-    assert len(written) == len(nodes) + 1
+    assert len(written) == len(nodes) + 4
     for path in nodes:
         definition = json.loads(path.read_text(encoding="utf-8"))
         assert definition["name"] == path.stem

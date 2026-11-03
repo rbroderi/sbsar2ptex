@@ -73,7 +73,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.0"
+VERSION = "1.1"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -874,13 +874,17 @@ PLUGIN_CFG = f"""[plugin]
 name="Substance atomic nodes"
 description="{DESCRIPTION}"
 version="{VERSION}"
+script="plugin.gd"
 nodes="nodes"
 enabled_by_default=true
 """
+SCRIPTS = Path(__file__).with_name("mm_plugin")
+"""The plugin's files that are not generated: plugin.gd, the scripts of the
+node types it adds (the FX-Map, sbs_fxmap) and README.md."""
 
 
 def install(folder: Path) -> list[Path]:
-    """Write the plugin in ``folder`` (its plugin.cfg and nodes); return the files.
+    """Write the plugin in ``folder`` (plugin.cfg, scripts, nodes); return the files.
 
     ``folder`` is the plugin's own (for Material Maker: its user folder's
     plugins/sbs).
@@ -890,6 +894,11 @@ def install(folder: Path) -> list[Path]:
     cfg = folder / "plugin.cfg"
     cfg.write_text(PLUGIN_CFG, encoding="utf-8")
     written = [cfg]
+    for source in sorted(SCRIPTS.iterdir()):
+        if source.suffix in (".gd", ".md"):
+            path = folder / source.name
+            path.write_bytes(source.read_bytes())
+            written.append(path)
     for name, definition in sorted(definitions().items()):
         path = nodes / f"{name}.mmg"
         path.write_text(json.dumps(definition, indent="\t") + "\n", encoding="utf-8")
