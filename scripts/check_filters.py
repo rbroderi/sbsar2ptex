@@ -1386,7 +1386,18 @@ def main() -> None:
     """Run the cases the command line names, or all."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("tags", nargs="*")
-    parser.add_argument("--mm", type=Path, required=True, help="material_maker.exe")
+    parser.add_argument(
+        "--mm",
+        type=Path,
+        required=True,
+        help="material_maker.exe, or with --fork the Godot (console) executable",
+    )
+    parser.add_argument(
+        "--fork",
+        type=Path,
+        help="the Material Maker fork's project folder, run from source by --mm"
+        " (its CLI exports with --export-material)",
+    )
     parser.add_argument("-o", "--out", type=Path, default=Path("check_out"))
     parser.add_argument(
         "--amd",
@@ -1519,11 +1530,18 @@ def main() -> None:
         (mm_out / f"{tag}_albedo.png").unlink(missing_ok=True)
     # Some dozens a run: a long batch can end with its last few not
     # exported; those get one more run.
+    # the fork's CLI: Godot itself takes --export, so it is --export-material
+    export = (
+        ["--path", str(args.fork), "--export-material", "--target",
+         "Godot/Godot 4 Standard"]
+        if args.fork is not None
+        else ["--export"]
+    )  # fmt: skip
     for attempt in range(2):
         todo = [t for t in tags if not (mm_out / f"{t}_albedo.png").exists()]
         for k in range(0, len(todo), EXPORT_BATCH):
             subprocess.run(
-                [str(args.mm), "--export", "-o", mm_out.as_posix(),
+                [str(args.mm), *export, "-o", mm_out.as_posix(),
                  *(f"{(out / t).as_posix()}.ptex" for t in todo[k : k + EXPORT_BATCH])],
                 cwd=args.mm.parent,
                 check=False,
