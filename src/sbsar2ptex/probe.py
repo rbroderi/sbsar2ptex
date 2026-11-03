@@ -301,6 +301,7 @@ def sbs(
     kind: int,
     *,
     chain: bool | tuple[str, str] = False,
+    chain_to: int = 0,
     params: tuple[tuple[str, str, str], ...] | None = None,
     arrays: str = "",
     extra: str = "",
@@ -312,7 +313,8 @@ def sbs(
 
     With ``chain``, input A reaches the filter through a blur, so the filter's
     first input is not node 0 (which reads the same as a zero flag word); or
-    through the filter it names, (filter, its <parameters> content).
+    through the filter it names, (filter, its <parameters> content); it
+    feeds the filter's input ``chain_to`` (the others read graph inputs).
     ``params`` ((name, value kind, value[, relative to]) each) replaces
     PARAMETERS[filt];
     ``extra`` is more of the filter's XML (an FX-Map's <paramsGraphs>);
@@ -321,11 +323,14 @@ def sbs(
     inputs are 8-bit otherwise, which slope-based filters amplify).
     """
     inputs = FILTERS[filt][:connect]
-    first = 150 if chain else 100
+
+    def source(k: int) -> int:
+        return 150 if chain and k == chain_to else 100 + 10 * k
+
     connections = "".join(
         f'<connection><identifier v="{name}"/>'
-        f'<connRef v="{first if k == 0 else 100 + 10 * k}"/>'
-        f'<connRefOutput v="{first + 1 if k == 0 else 101 + 10 * k}"/></connection>'
+        f'<connRef v="{source(k)}"/>'
+        f'<connRefOutput v="{source(k) + 1}"/></connection>'
         for k, name in enumerate(inputs)
     )
     pre, pre_params = (

@@ -414,13 +414,18 @@ def warp_cases() -> list[tuple | dict]:
     ramp16 = ("pixelprocessor", tilted_ramp16())
     deep = [
         {"tag": tag, "filter": filt, "kind": GRAY, "params": params,
-         "chain": ramp16, "format16": True}
-        for tag, filt, params in (
-            ("ramp16_g", "levels", ()),  # the ramp itself
-            ("warp016_ramp16_g", "warp", (("intensity", F1, "0.16"),)),
-            ("warp2_ramp16_g", "warp", (("intensity", F1, "2"),)),
+         "chain": ramp16, "chain_to": to, "format16": True}
+        for tag, filt, params, to in (
+            ("ramp16_g", "levels", (), 0),  # the ramp itself
+            ("warp016_ramp16_g", "warp", (("intensity", F1, "0.16"),), 0),
+            ("warp2_ramp16_g", "warp", (("intensity", F1, "2"),), 0),
             ("dwarp30_ramp16_g", "directionalwarp",
-             (("intensity", F1, "30"), ("warpangle", F1, "0.5"))),
+             (("intensity", F1, "30"), ("warpangle", F1, "0.5")), 0),
+            # the ramp as the slope (as n1526, a 16-bit levels, is n1536's)
+            ("warp016_grad16_g", "warp", (("intensity", F1, "0.16"),), 1),
+            ("warp2_grad16_g", "warp", (("intensity", F1, "2"),), 1),
+            ("dwarp30_int16_g", "directionalwarp",
+             (("intensity", F1, "30"), ("warpangle", F1, "0.5")), 1),
         )
     ]  # fmt: skip
     dw, wp = "directionalwarp", "warp"
@@ -1491,6 +1496,7 @@ def main() -> None:
                 connect=c.get("connect"),
                 extra=c.get("extra", ""),
                 chain=c.get("chain", False),
+                chain_to=c.get("chain_to", 0),
             ),
             encoding="utf-8",
         )
