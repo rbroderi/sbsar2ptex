@@ -634,6 +634,7 @@ def to_glsl(
             expr = rand(v(ops[0]), k)
         elif ins.op in (0x33, 0x34) and samples is not None:
             kind = "lum" if ins.op == 0x33 else "col"  # noqa: PLR2004
+            # 0 nearest (the cooker leaves it out), 1 bilinear
             filtering = ops[2] if len(ops) > 2 else 0  # noqa: PLR2004
             expr = samples(kind, ops[1], v(ops[0]), filtering)
         elif ins.op == 0x16 and ins.type == INT:  # noqa: PLR2004 (GLSL's mod is float)

@@ -510,6 +510,18 @@ def test_16_bit_stores_are_the_gpus() -> None:
     assert (nvidia < exact).any()
 
 
+def test_a_samples_filtering_0_is_the_nearest_texel(monkeypatch) -> None:
+    # check_filters pp_filter0_noise / pp_filter1_noise (every pixel): a
+    # pixel processor's sample with filtering 0 (no operand) reads the
+    # nearest texel, 1 bilinear (the other way round before: 1.16% each)
+    monkeypatch.setattr(translate, "_CTX", translate._Context(size=11))
+    translate._CTX.sampled = ["input"]
+    assert translate._sample("col", 0, "p", 0) == (
+        "$input((floor(fract(p) * 2048.0) + 0.5) / 2048.0)"
+    )
+    assert translate._sample("col", 0, "p", 1) == "$input(fract(p))"
+
+
 def test_8_bit_node_stores_are_the_gpus(monkeypatch) -> None:
     # check_filters' 8-bit blends (exact inputs), every pixel: AMD's level
     # through a half float, NVIDIA's truncated to 2^-12 (nvfit8 on an RTX

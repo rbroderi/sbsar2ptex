@@ -352,16 +352,17 @@ def input_params(gi: GraphInput) -> tuple[list[dict[str, Any]], str]:
 def _sample(kind: str, index: int, pos: str, filtering: int) -> str:
     """Return GLSL sampling a pixel processor's input ``index`` at ``pos``.
 
-    Filtering 0 is bilinear (the inputs are buffered with filtering);
-    otherwise, and always in an FX-Map's functions, the nearest texel.
-    Positions wrap.
+    Filtering 1 is bilinear (the inputs are buffered with filtering);
+    0, and always in an FX-Map's functions, the nearest texel
+    (pp_filter0_noise / pp_filter1_noise: each 1.16% the other way round,
+    100% / 99.996% now). Positions wrap.
     """
     if _CTX.sampled is None or index >= len(_CTX.sampled):
         msg = f"sample of input {index} outside a pixel processor"
         raise UnsupportedError(msg)
     n = num(float(1 << _CTX.size))
     at = f"fract({pos})"
-    if filtering or _CTX.sample_nearest:
+    if not filtering or _CTX.sample_nearest:
         at = f"(floor(fract({pos}) * {n}) + 0.5) / {n}"
     _CTX.sampled_read.add(_CTX.sampled[index])
     value = f"${_CTX.sampled[index]}({at})"

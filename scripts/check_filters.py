@@ -1169,6 +1169,18 @@ def pixel_cases() -> list[dict]:
                 "floats": floats,
             }
         )
+    # on noise, which texels each pixel reads is unambiguous
+    out += [
+        {
+            "tag": f"pp_filter{f}_noise",
+            "filter": "pixelprocessor",
+            "kind": GRAY,
+            "params": per(lum(fn("mul", FLOAT2, a=pos, b=scale), 0, f)),
+            "floats": floats,
+            "inputs": {"a": "noise"},
+        }
+        for f in (0, 1)
+    ]
     out.append(
         {
             "tag": "pp_rand_seed",
