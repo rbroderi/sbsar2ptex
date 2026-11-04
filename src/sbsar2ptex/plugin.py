@@ -73,7 +73,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.9"
+VERSION = "1.10"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -174,7 +174,7 @@ def _store(t: str, *, fill: bool = False) -> str:
 
     def eight(*, amd: bool) -> str:
         if fill:
-            return f"\t{g} k = ceil(v * 255.0 - 0.5);\n"
+            return fxglsl.fill8_glsl(g)
         return fxglsl.level8_glsl(g, amd=amd)
 
     return (

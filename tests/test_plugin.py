@@ -97,7 +97,8 @@ def test_plugin_stores_are_the_gpus(monkeypatch) -> None:
                       fxglsl.level16_glsl("float", amd=amd)):  # fmt: skip
             assert all(line.strip() in blend for line in level.splitlines())
     uniform = plugin.definitions()["sbs_uniform_gray"]["shader_model"]["instance"]
-    assert "ceil(v * 255.0 - 0.5)" in uniform
+    fill = fxglsl.fill8_glsl("float")
+    assert all(line.strip() in uniform for line in fill.splitlines())
     assert "4096.0" not in uniform
     for amd in (False, True):
         monkeypatch.setattr(translate, "_DMB_AMD", amd)

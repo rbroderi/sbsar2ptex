@@ -537,10 +537,22 @@ def test_8_bit_node_stores_are_the_gpus(monkeypatch) -> None:
     for amd in (True, False):
         monkeypatch.setattr(translate, "_DMB_AMD", amd)
         assert fxglsl.level8_glsl("float", amd=amd) in stored_code(fill=False)
-        assert "ceil(v * 255.0 - 0.5)" in stored_code(fill=True)
+        assert fxglsl.fill8_glsl("float") in stored_code(fill=True)
     v = np.float32(0.43333334)  # the gray's float32, a hair over 110.5 / 255
     assert fxdraw.s8(np.array([v]))[0] == fxdraw.s8n(np.array([v]))[0] == 110
-    assert np.ceil(np.float64(v) * 255 - 0.5) == 111  # one fma on the GPU
+
+    def fill8(v: np.float32) -> np.float32:  # fill8_glsl, in float32
+        b = v * np.float32(256) - np.float32(0.5)
+        r = b - v
+        k = np.ceil(r)
+        return k + np.float32(r == k and b - k > v)
+
+    # fn_uniform_c's green, 0.3f: 255 v rounds to 76.5 in float32, so
+    # ceil(255 v - 0.5) was 76 (75% of pixels); unrounded it is 77
+    for x, want in ((v, 111), (np.float32(0.5) * np.float32(0.6), 77)):
+        assert np.ceil(np.float64(x) * 255 - 0.5) == want
+        assert fill8(x) == want
+    assert np.ceil(np.float32(0.3) * np.float32(255) - np.float32(0.5)) == 76
     # NVIDIA's ties go down: an add-sub at half opacity, (a + b) / 255 - 0.5
     ties = (np.arange(1, 255) + 0.5) / 255
     assert (fxdraw.s8n(ties.astype(np.float32)) == np.arange(1, 255)).all()

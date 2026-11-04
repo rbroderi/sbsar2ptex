@@ -156,6 +156,24 @@ def level8_glsl(g: str, *, amd: bool) -> str:
     return f"\t{g} k = floor((floor(v * 4096.0) * 255.0 + 2047.0) / 4096.0);\n"
 
 
+def fill8_glsl(g: str) -> str:
+    """Return GLSL setting ``k`` (type ``g``) to the 8-bit level a uniform fills v as.
+
+    The nearest, ties down, on either GPU, from 255 v - 0.5 unrounded
+    (fn_uniform_c: 0.3f, 255 v 76.500003, is 77, not 76): b = 256 v - 0.5
+    is exact, and where b - v rounds onto an integer k, b - k (exact) says
+    which side of it the value is (fma is not fused on every GPU).
+    """
+    if g == "float":
+        up = "float(r == k && b - k > v)"
+    else:
+        up = f"{g}(equal(r, k)) * {g}(greaterThan(b - k, v))"
+    return (
+        f"\t{g} b = v * 256.0 - 0.5;\n\t{g} r = b - v;\n"
+        f"\t{g} k = ceil(r);\n\tk += {up};\n"
+    )
+
+
 def store_glsl(layout: Layout) -> str:
     """Return ``fxstore_$(name)(vec4)``: the accumulator stored, as its value.
 

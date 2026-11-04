@@ -4327,8 +4327,8 @@ def store_shader(out: dict[str, Any], steps: int | None, *, fill: bool = False) 
         level = fxglsl.level16_glsl(g, amd=_DMB_AMD)
     elif not fill:
         level = fxglsl.level8_glsl(g, amd=_DMB_AMD)
-    else:  # the nearest, ties down
-        level = f"\t{g} k = ceil(v * 255.0 - 0.5);\n"
+    else:
+        level = fxglsl.fill8_glsl(g)
     m["instance"] = m["instance"].replace("$(name)_fct(", "$(name)_raw(") + (
         f"{ret} $(name)_fct(vec2 uv) {{\n"
         f"{g} v = clamp($(name)_raw(uv), 0.0, 1.0);\n"
