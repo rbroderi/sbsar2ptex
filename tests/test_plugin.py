@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
+from sbsar2ptex import fxglsl
 from sbsar2ptex import plugin
+from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.sbsasm import Asm
@@ -74,13 +76,34 @@ def test_shaders_keep_substance_names() -> None:
     names = [p["name"] for p in levels["shader_model"]["parameters"]]
     assert names == [
         "levelinlow", "levelinhigh", "levelinmid", "leveloutlow", "levelouthigh",
-        "format",
+        "format", "gpu",
     ]  # fmt: skip
     model = levels["shader_model"]
     assert [i["name"] for i in model["inputs"]] == ["input1"]
     # the image width is the rendered texture's, not a number
     warp = plugin.definitions()["sbs_warp"]["shader_model"]["instance"]
     assert "$pass_size.x" in warp
+
+
+def test_plugin_stores_are_the_gpus(monkeypatch) -> None:
+    # As the inline translation stores (translate.store_shader): its GPU's
+    # 8 and 16 bits levels by $gpu, set from translate._DMB_AMD; a uniform's
+    # fill at 8 bits the nearest, ties down (B's n526, n656: the plugin's
+    # blend stored as before, 93.79% / 96.52%; inline 99.98% / 100%)
+    blend = plugin.definitions()["sbs_blend_gray"]["shader_model"]["instance"]
+    for amd in (False, True):
+        assert f"if ($gpu == {int(amd)})" in blend
+        for level in (fxglsl.level8_glsl("float", amd=amd),
+                      fxglsl.level16_glsl("float", amd=amd)):  # fmt: skip
+            assert all(line.strip() in blend for line in level.splitlines())
+    uniform = plugin.definitions()["sbs_uniform_gray"]["shader_model"]["instance"]
+    assert "ceil(v * 255.0 - 0.5)" in uniform
+    assert "4096.0" not in uniform
+    for amd in (False, True):
+        monkeypatch.setattr(translate, "_DMB_AMD", amd)
+        nodes, _, outs = translated("levels_gray", plugin.Maker(11))
+        node = next(n for n in nodes if n["name"] == outs["output"][0])
+        assert node["parameters"]["gpu"] == int(amd)
 
 
 def test_levels_is_a_plugin_node() -> None:

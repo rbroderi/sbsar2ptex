@@ -33,6 +33,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from sbsar2ptex import fxglsl
 from sbsar2ptex import translate
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
 from sbsar2ptex.function import decode
@@ -72,7 +73,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.5"
+VERSION = "1.6"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -128,6 +129,8 @@ def _value(name: str, label: str, default: Any, *, color: bool) -> dict:
 
 
 FORMAT = _enum("format", "Output format", FORMATS, 0)
+GPU = _enum("gpu", "GPU levels", ("NVIDIA", "AMD"), 0)
+"""Whose 8 and 16 bits stores the format's are (translate._DMB_AMD)."""
 OUTPUTSIZE = {
     "name": "outputsize", "label": "Output size", "type": "float", "default": 0.0,
     "min": -6.0, "max": 4.0, "step": 1.0,
@@ -153,19 +156,37 @@ class Port:
     default: str = ""
 
 
-def _store(t: str) -> str:
-    """Return ``$(name)_out``: ``$(name)_fct`` stored in its format (as stored)."""
+def _store(t: str, *, fill: bool = False) -> str:
+    """Return ``$(name)_out``: ``$(name)_fct`` stored in its format (as stored).
+
+    In the GPU's levels, by ``$gpu`` (translate.store_shader's: ``fill`` a
+    uniform color's image, at 8 bits the nearest, ties down, on either).
+    """
     g = "vec4" if t == "rgba" else "float"
+
+    def by_gpu(steps: str, level: Any) -> str:
+        out = ""
+        for amd in (False, True):
+            code = "".join(f"\t\t{line}\n" for line in level(amd=amd).splitlines())
+            out += f"\t\tif ($gpu == {int(amd)}) {{\n{code}"
+            out += f"\t\t\treturn k / {steps};\n\t\t}}\n"
+        return out
+
+    def eight(*, amd: bool) -> str:
+        if fill:
+            return f"\t{g} k = ceil(v * 255.0 - 0.5);\n"
+        return fxglsl.level8_glsl(g, amd=amd)
+
     return (
         f"{g} $(name)_out(vec2 uv) {{\n"
         "\tif ($format == 0) {\n"
         f"\t\t{g} v = clamp($(name)_fct(uv), 0.0, 1.0);\n"
-        "\t\treturn ceil(v * 255.0 - 0.5) / 255.0;\n"
-        "\t}\n"
+        + by_gpu("255.0", eight)
+        + "\t}\n"
         "\tif ($format == 1) {\n"
         f"\t\t{g} v = clamp($(name)_fct(uv), 0.0, 1.0);\n"
-        "\t\treturn floor(v * 65535.0 + 0.5) / 65535.0;\n"
-        "\t}\n"
+        + by_gpu("65535.0", lambda *, amd: fxglsl.level16_glsl(g, amd=amd))
+        + "\t}\n"
         "\treturn $(name)_fct(uv);\n"
         "}\n"
     )
@@ -195,12 +216,13 @@ def _shader_model(
     shared: str = "",
     *,
     store: bool = True,
+    fill: bool = False,
 ) -> dict[str, Any]:
     """Return a shader_model: ``body`` the function's, its output stored."""
     ret = "vec4" if out == "rgba" else "float"
     instance = f"{helpers}{ret} $(name)_fct(vec2 uv) {{\n{body}\n}}\n"
     if store:
-        instance += _store(out)
+        instance += _store(out, fill=fill)
     return {
         "name": label,
         "shortdesc": label,
@@ -216,7 +238,7 @@ def _shader_model(
                 "shortdesc": "Output",
             }
         ],
-        "parameters": [*params, FORMAT] if store else params,
+        "parameters": [*params, FORMAT, GPU] if store else params,
     }
 
 
@@ -244,8 +266,10 @@ def _shader_atom(
     params: list[dict],
     helpers: str = "",
     shared: str = "",
+    *,
+    fill: bool = False,
 ) -> Atom:
-    model = _shader_model(label, ports, out, body, params, helpers, shared)
+    model = _shader_model(label, ports, out, body, params, helpers, shared, fill=fill)
     model["longdesc"] = description
     definition = {
         "name": type_,
@@ -269,7 +293,7 @@ def _uniform(*, color: bool) -> Atom:
         f"sbs_uniform{sfx}", "Uniform color",
         "A constant color (Substance's Uniform color).",
         [], t, "return $outputcolor;",
-        [_value("outputcolor", "Output color", black, color=color)],
+        [_value("outputcolor", "Output color", black, color=color)], fill=True,
     )  # fmt: skip
 
 
@@ -697,6 +721,10 @@ def _graph_atom(
     the inner one it outputs; ``knobs`` its parameters and the inner (node,
     widget) each sets.
     """
+    # the GPU whose stores the format's are, where the format goes
+    knobs = knobs + [
+        (GPU, [(n, "gpu") for n, _ in to]) for p, to in knobs if p is FORMAT
+    ]
     links = [
         {"from": "gen_inputs", "from_port": k, "to": n, "to_port": p}
         for k, (n, p) in enumerate(inputs)
@@ -1320,6 +1348,8 @@ class Maker:
             return None
         fmt = node.flags >> 4 & 3
         knobs.values["format"] = fmt
+        if any(p["name"] == GPU["name"] for p in atom.params):
+            knobs.values[GPU["name"]] = int(translate._DMB_AMD)  # noqa: SLF001
         bits = translate._CTX.input_bits  # noqa: SLF001
         key = {INPUT8["name"]: "input"} | {e["name"]: k for k, e in EIGHT.items()}
         for p in atom.params:  # a warp's inputs in 8 bits (warp_glsl's eight)
