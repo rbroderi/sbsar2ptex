@@ -6,7 +6,7 @@ Generated and installed by `sbsar2ptex --install-mm-plugin DIR` (for Material
 Maker: its user folder's `plugins/sbs`).
 
 - The plugin's id is `sbs` (the folder name), and graphs require it with
-  `"requires": {"plugins": {"sbs": ">=1.8"}}`.
+  `"requires": {"plugins": {"sbs": ">=1.9"}}`.
 - A node's *Output format* rounds to 8 or 16 bits as Substance's GPU engine
   stores them, which differs between GPUs: *GPU levels* picks NVIDIA's or
   AMD's (sbsar2ptex sets it).

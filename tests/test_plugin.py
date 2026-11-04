@@ -112,7 +112,10 @@ def test_a_nearest_transformation_reads_one_texel() -> None:
     near = translate.transform_read_lines("input", ["3.0"] * 4, "256", "0",
                                           color=False, nearest="true")  # fmt: skip
     assert "bool tnear = true;" in near
-    assert "for (int k = 0; k < (tby ? (tnear ? 1 : 4) : 1); k++) {" in near
+    assert "for (int k = 0; k < (tnear ? 1 : 4); k++) {" in near
+    # transform_g: bilinear at level 0 too texel by texel, fractions to
+    # 1/256, not the GPU's filter (98.05% before, 100% now)
+    assert "fract(q)" not in "".join(near)
     # transform_tile0_g: untiled, texels past the edges are empty
     assert "int tl = 3;" in near
     assert "\tif ((tout.x && !twrap.x) || (tout.y && !twrap.y)) continue;" in near

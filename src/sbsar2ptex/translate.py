@@ -1292,10 +1292,11 @@ def transform_read_lines(
 ) -> list[str]:
     """Return a transformation's last lines: its input ``$<inp>`` read at q.
 
-    At level 0 (tmlevel, from ``matrix`` a, b, c, d: GLSL), at q itself;
-    past it bilinear (fractions to 1/256), or where ``nearest`` (GLSL bool:
+    Bilinear, texel by texel with fractions to 1/256 (the GPU's own filter
+    at q: transform_g 98.05%, this 100%), or where ``nearest`` (GLSL bool:
     nearest filtering) the texel q is in (transform_nearx3_g: level 2,
-    every pixel), in that mip level of the input. Along an axis ``tiling``
+    every pixel), in the mip level of the input that tmlevel picks (from
+    ``matrix`` a, b, c, d: GLSL). Along an axis ``tiling``
     (GLSL int: bit 0 x, bit 1 y) tiles, texels wrap; along one it does not,
     texels past the edges are empty, so the image fades out over half a
     texel (transform_tile0_g: 0.16% of pixels, up to 128 levels, at its
@@ -1316,15 +1317,13 @@ def transform_read_lines(
         f"bool tnear = {nearest};",
         f"int tl = {tiling};",
         "bvec2 twrap = bvec2((tl & 1) != 0, (tl & 2) != 0);",
-        # texel by texel: past level 0, or to fade out at an edge
-        "bool tby = L > 0 || (!tnear && !all(twrap));",
         "vec2 tq = vec2(twrap.x ? fract(q.x) : q.x, twrap.y ? fract(q.y) : q.y);",
         "vec2 tt = tq * float(ml) - (tnear ? 0.0 : 0.5);",
         "vec2 tb = floor(tt);",
         "vec2 tf = tnear ? vec2(0.0) : floor((tt - tb) * 256.0 + 0.5) / 256.0;",
         "vec4 acc = vec4(0.0);",
         f"vec4 v[{4 * MIP_LIVE_MAX}];",
-        "for (int k = 0; k < (tby ? (tnear ? 1 : 4) : 1); k++) {",
+        "for (int k = 0; k < (tnear ? 1 : 4); k++) {",
         "\tivec2 corner = ivec2(k & 1, k >> 1);",
         "\tivec2 ri = ivec2(tb) + corner;",
         "\tbvec2 tout = bvec2(ri.x < 0 || ri.x >= ml, ri.y < 0 || ri.y >= ml);",
@@ -1338,7 +1337,7 @@ def transform_read_lines(
         "\t\t\tint c = (i >> (2 * l)) & 3;",
         "\t\t\to += ivec2(c & 1, c >> 1) << l;",
         "\t\t}",
-        "\t\tvec2 at = tby ? (vec2((tc << L) + o) + 0.5) / float(nin) : fract(q);",
+        "\t\tvec2 at = (vec2((tc << L) + o) + 0.5) / float(nin);",
         f"\t\tvec4 x = vec4(${inp}(at));",
         "\t\tif (L == 0) {",
         "\t\t\tm = x;",
@@ -1356,7 +1355,7 @@ def transform_read_lines(
         "\t\t}",
         "\t}",
         f"\tvec4 tv = L > 0 ? tmlvval_$(name)(m, {fmt}) : m;",
-        "\tacc += tby ? w.x * w.y * tv : tv;",
+        "\tacc += w.x * w.y * tv;",
         "}",
         "return acc;" if color else "return acc.x;",
     ]
