@@ -277,12 +277,15 @@ def build(
     *,
     alpha: bool = False,
     rounds: bool = False,
+    levels16: bool = False,
 ) -> Path:
     """Write ``src`` alone (with what feeds it) as the albedo, to ``path``.
 
     ``magnify`` (center, gain) exports ``magnified`` of it instead; ``alpha``
     its alpha, as gray (the albedo's own alpha is exported opaque).
     ``rounds``: the exporter rounds to 8 bits (the fork), not truncates.
+    ``levels16`` (grayscale): its 16-bit level instead, the albedo's red its
+    high byte and green its low (read16), as check_filters --levels.
     """
     g = copy.deepcopy(graph)
     keep = cone(into, src) | {"Material"}
@@ -330,7 +333,19 @@ def build(
             },
         })  # fmt: skip
         g["connections"].append({"from": src, "from_port": 0, "to": out, "to_port": 0})
-    if not rounds:
+    if levels16:
+        g["nodes"].append(shader(
+            f"{out}_levels", [("input", "f")], "rgba",
+            "float k = floor(clamp($input(uv), 0.0, 1.0) * 65535.0 + 0.5);\n"
+            "float h = floor(k / 256.0);\n"
+            # a quarter step up: whole steps whether the export rounds or truncates
+            "return vec4(h, k - 256.0 * h, 0.0, 255.0) / 255.0 + 0.25 / 255.0;",
+        ))  # fmt: skip
+        g["connections"].append(
+            {"from": out, "from_port": 0, "to": f"{out}_levels", "to_port": 0}
+        )
+        out = f"{out}_levels"
+    elif not rounds:
         # Material Maker's 8-bit export truncates (an exact k/255 comes out
         # k - 1): half a step more makes it round, as Substance's does.
         kind = output_type(next(n for n in g["nodes"] if n["name"] == out))
@@ -346,6 +361,12 @@ def build(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(g), encoding="utf-8")
     return path
+
+
+def read16(png: Path) -> np.ndarray:
+    """Return the 16-bit levels a ``levels16`` export encodes."""
+    enc = np.asarray(Image.open(png)).astype(np.int64)
+    return enc[..., 0] * 256 + enc[..., 1]
 
 
 def mm_export(

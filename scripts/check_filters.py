@@ -377,6 +377,20 @@ def cases() -> list[tuple]:
             }
             for a in ("0", "0.25")
         ),
+        # Biomech's n18 and n19: 16-bit blurs 48 and 16 long of noise (the
+        # reaction diffusion's seed), whose levels its thresholds tip
+        *(
+            {
+                "tag": f"dmb_0_{i}_noise_g",
+                "filter": "dirmotionblur",
+                "kind": GRAY,
+                "format16": True,
+                "params": (("intensity", F1, i),),
+                "size": 11,
+                "inputs": {"a": "noise"},
+            }
+            for i in ("48", "16")
+        ),
         # Biomech's n2373: a long warp, so its intensity's levels move samples
         ("dwarp30_g", "directionalwarp", GRAY, (("intensity", F1, "30"),), "", True),
         *warp_cases(),
