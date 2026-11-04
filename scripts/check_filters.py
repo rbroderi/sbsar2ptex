@@ -11,6 +11,7 @@ sbsrender) and Material Maker 1.x.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1308,6 +1309,37 @@ def strip(n: int) -> np.ndarray:
     return out
 
 
+def install_plugin(fork: Path) -> Path:
+    """Install the sbs plugin in the fork's user folder; return its folder.
+
+    The folder is the one the fork's override.cfg names (its
+    custom_user_dir_name): Material Maker loads user://plugins before its
+    own, and the fork tracks files in material_maker/plugins/sbs, so the
+    plugin is not written there; nor in the default user folder, the
+    user's own plugins.
+    """
+    cfg = fork / "override.cfg"
+    found = cfg.exists() and re.search(
+        r'^config/custom_user_dir_name="([^"]+)"',
+        cfg.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if not found:
+        sys.exit(
+            f'{cfg}: needs [application] config/custom_user_dir_name="NAME",'
+            " a user folder of its own for the sbs plugin"
+        )
+    if sys.platform == "win32":
+        base = Path(os.environ["APPDATA"])
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+    folder = base / found.group(1) / "plugins" / "sbs"
+    plugin.install(folder)
+    return folder
+
+
 def test_images(out: Path, size: int = SIZE) -> dict[str, Path]:  # noqa: PT028
     """Write gray a, b, c (and noise, strip, smooth), color A, B (alpha varying)."""
     n = 1 << size
@@ -1580,8 +1612,8 @@ def main() -> None:
         "--plugins",
         action="store_true",
         help="translate with the sbs plugin's nodes, as --experimental does"
-        " (with --fork, which loads the plugin from its"
-        " material_maker/plugins/sbs, written there first)",
+        " (with --fork, whose override.cfg names a user folder of its own:"
+        " the plugin is written in its plugins/sbs first)",
     )
     args = parser.parse_args()
     if args.plugins and args.fork is None:
@@ -1589,7 +1621,7 @@ def main() -> None:
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     if args.plugins:
-        plugin.install(args.fork / "material_maker" / "plugins" / "sbs")
+        install_plugin(args.fork)
     by_size = {SIZE: test_images(out)}
 
     todo = [case(c) for c in cases()]

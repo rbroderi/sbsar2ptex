@@ -7,8 +7,9 @@ For each scripts/check_filters.py case: cook its one-node graph with
 sbscooker, translate it as today ("inline") and with plugin nodes
 (sbsar2ptex.plugin, as --experimental does, "plugin"), and export both
 through the material-maker-mod fork (Godot, headless), which loads the
-plugin from its material_maker/plugins/sbs (written there first: the
-user's own plugins folder is left alone). Two exports a case and mode, on
+plugin from the user folder its override.cfg names (custom_user_dir_name;
+written there first: the fork's own material_maker/plugins/sbs and the
+user's plugins folder are left alone). Two exports a case and mode, on
 the same test images: the output's 8-bit albedo (and alpha), the pixels;
 and its float32 bits, a channel at a time, as the albedo's four bytes.
 The plugin node must be identical to the inline translation in both.
@@ -206,7 +207,7 @@ def main() -> None:
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    plugin.install(args.fork / "material_maker" / "plugins" / "sbs")
+    check_filters.install_plugin(args.fork)
     images = check_filters.test_images(out)
     todo = [check_filters.case(c) for c in check_filters.cases()]
     todo = [c for c in todo if not args.tags or c["tag"] in args.tags]
