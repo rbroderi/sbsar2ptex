@@ -510,6 +510,26 @@ def test_16_bit_stores_are_the_gpus() -> None:
     assert (nvidia < exact).any()
 
 
+def test_amd_8_bit_node_stores_go_through_a_half_float(monkeypatch) -> None:
+    # check_filters' 8-bit blends (exact inputs) on AMD: every pixel the
+    # half float's level; a uniform fills its image: 1.3 / 3 is 111, not 110
+    translate._CTX = translate._Context(size=8)
+
+    def stored_code(*, fill: bool) -> str:
+        out = translate.shader("s", [], "f", "return 0.5;")
+        assert translate.store_shader(out, 255, fill=fill)
+        return out["shader_model"]["instance"]
+
+    monkeypatch.setattr(translate, "_DMB_AMD", True)
+    assert fxglsl.level8_amd_glsl("float") in stored_code(fill=False)
+    assert "ceil(v * 255.0 - 0.5)" in stored_code(fill=True)
+    monkeypatch.setattr(translate, "_DMB_AMD", False)
+    assert "ceil(v * 255.0 - 0.5)" in stored_code(fill=False)
+    v = np.float32(0.43333334)  # the gray's float32, a hair over 110.5 / 255
+    assert fxdraw.s8(np.array([v]))[0] == 110
+    assert np.ceil(np.float64(v) * 255 - 0.5) == 111  # one fma on the GPU
+
+
 def test_an_8_bit_warp_reads_its_inputs_bits() -> None:
     # Biomech's n4001: an 8-bit warp of 16-bit images reads their levels
     # whole (harness warpm12_grad16_8), an image in 8 bits (warp_8); both

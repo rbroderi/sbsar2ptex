@@ -1379,10 +1379,12 @@ def image_codes(mm_nodes: list[dict], wires: list[dict]) -> tuple[list, list]:
     """Return the graph with its test images read back as their 8-bit codes.
 
     Material Maker hands an 8-bit image to a shader truncated to a half
-    float (up to 16 levels in 65535 low), where a 16-bit graph in Substance
-    reads code j as exactly 257 j levels: a shader after each image rounds
-    back to j / 255 (the truncation is under half a 255th), and the
-    buffers it feeds are 32-bit, which keep it.
+    float (up to 16 levels in 65535 low), where Substance reads code j as
+    exactly j / 255, 257 j levels: a shader after each image rounds back to
+    j / 255 (the truncation is under half a 255th), and the buffers it
+    feeds are 32-bit, which keep it. In 8-bit graphs too: an 8-bit store's
+    ties go by the value's last bits (an AMD blend's half float: every
+    pixel from exact codes, 95-98% from truncated ones).
     """
     images = {n["name"] for n in mm_nodes if n["type"] == "image"}
     by_name = {n["name"]: n for n in mm_nodes}
@@ -1499,8 +1501,6 @@ def main() -> None:
         " error, in the graph's levels (8-bit graphs: 1/255)",
     )
     args = parser.parse_args()
-    translate._DMB_AMD = args.amd  # noqa: SLF001
-    translate._FX_AMD = args.amd  # noqa: SLF001
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     by_size = {SIZE: test_images(out)}
@@ -1565,6 +1565,9 @@ def main() -> None:
         for gi in given.values():  # precomputed FX-Maps take values when made
             if gi.identifier in c["set"]:
                 gi.default = [c["set"][gi.identifier]]
+        # sbsrender's CPU engine stores as NVIDIA GPUs do, not as AMD's
+        gpu_amd = args.amd and "engine" not in c
+        translate._DMB_AMD = translate._FX_AMD = gpu_amd  # noqa: SLF001
         try:
             mm_nodes, wires, outs = translate_graph(
                 asm.nodes(),
@@ -1577,8 +1580,7 @@ def main() -> None:
         except UnsupportedError as e:
             print(f"{tag:14} unsupported: {e}")
             continue
-        if c["format16"]:
-            mm_nodes, wires = image_codes(mm_nodes, wires)
+        mm_nodes, wires = image_codes(mm_nodes, wires)
         for k, v in c["set"].items():  # the same input values in Material Maker
             k = param_name(k)  # noqa: PLW2901
             for n in mm_nodes:

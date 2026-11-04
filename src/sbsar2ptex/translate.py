@@ -4250,9 +4250,10 @@ def stored(made: Sub, node: Node) -> bool:
     Substance keeps every node's image in the node's format, so an 8-bit
     node's value is rounded to 1/255 before anything reads it, a 16-bit
     one's to 1/65535 (thresholds downstream turn the difference into whole
-    pixels). Ties between 8-bit steps break down, as on NVIDIA GPUs (see
-    _levels); 16-bit levels are the GPU's own (fxglsl.level16_glsl: NVIDIA
-    truncates to 2^-20 first, by _DMB_AMD). The output shader computes the
+    pixels). Ties between 8-bit steps break down on NVIDIA GPUs (see
+    _levels); AMD's go through a half float (fxglsl.level8_amd_glsl);
+    16-bit levels are the GPU's own (fxglsl.level16_glsl: NVIDIA truncates
+    to 2^-20 first). By _DMB_AMD. The output shader computes the
     unrounded value as ``$(name)_raw`` and its function returns that
     rounded. Returns whether it does (exact_buffers keeps such values exact
     in buffers).
@@ -4266,14 +4267,16 @@ def stored(made: Sub, node: Node) -> bool:
         out = next((n for n in out["nodes"] if n["name"] == last), None)
     if out is None or out.get("type") != "shader":
         return False
-    return store_shader(out, steps)
+    return store_shader(out, steps, fill=node.op in (12, 13))
 
 
-def store_shader(out: dict[str, Any], steps: int | None) -> bool:
+def store_shader(out: dict[str, Any], steps: int | None, *, fill: bool = False) -> bool:
     """Round shader ``out``'s value to ``steps`` (stored); return whether it is.
 
     As stored does: its function computes the value as ``$(name)_raw``.
     No steps (a float format), or a shader of its own code, is left as is.
+    ``fill``: a uniform color's image, filled with its value, not drawn: at
+    8 bits the nearest, ties down, on AMD too (a gray of 1.3 / 3 is 111).
     """
     if steps is None:
         return False
@@ -4282,15 +4285,16 @@ def store_shader(out: dict[str, Any], steps: int | None) -> bool:
     if m.get("code") or m["outputs"][0].get(kind) != "$(name)_fct($uv)":
         return False
     ret, g = ("vec4", "vec4") if kind == "rgba" else ("float", "float")
-    k = num(float(steps))
-    tie = (
-        f"return ceil(v * {k} - 0.5) / {k};"
-        if steps == 255  # noqa: PLR2004
-        else fxglsl.level16_glsl(g, amd=_DMB_AMD) + "return k / 65535.0;"
-    )
+    if steps != 255:  # noqa: PLR2004
+        level = fxglsl.level16_glsl(g, amd=_DMB_AMD)
+    elif _DMB_AMD and not fill:
+        level = fxglsl.level8_amd_glsl(g)
+    else:  # the nearest, ties down
+        level = f"\t{g} k = ceil(v * 255.0 - 0.5);\n"
     m["instance"] = m["instance"].replace("$(name)_fct(", "$(name)_raw(") + (
         f"{ret} $(name)_fct(vec2 uv) {{\n"
-        f"{g} v = clamp($(name)_raw(uv), 0.0, 1.0);\n{tie}\n}}\n"
+        f"{g} v = clamp($(name)_raw(uv), 0.0, 1.0);\n"
+        f"{level}return k / {num(float(steps))};\n}}\n"
     )
     return True
 
