@@ -46,6 +46,8 @@ from sbsar2ptex.translate import CROP_SIDES
 from sbsar2ptex.translate import HSL_GLSL
 from sbsar2ptex.translate import IN_FLOAT
 from sbsar2ptex.translate import IN_FLOAT4
+from sbsar2ptex.translate import JFA_OWN
+from sbsar2ptex.translate import JFA_SEED
 from sbsar2ptex.translate import LEVELS
 from sbsar2ptex.translate import PLUGIN_LINKS
 from sbsar2ptex.translate import PLUGIN_PREFIX
@@ -65,6 +67,7 @@ from sbsar2ptex.translate import dwarp_body
 from sbsar2ptex.translate import f32
 from sbsar2ptex.translate import graph_input
 from sbsar2ptex.translate import input_params
+from sbsar2ptex.translate import jfa_step_lines
 from sbsar2ptex.translate import levels_glsl
 from sbsar2ptex.translate import transform_minifies
 from sbsar2ptex.translate import transform_mip_glsl
@@ -73,7 +76,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.13"
+VERSION = "1.14"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -813,8 +816,7 @@ def _distance(*, color: bool) -> Atom:
     t, _, sfx = _kinds(color=color)
     reach = _float("distance", "Maximum distance", 10.0, 0.0, 256.0)
     seed = _inner_shader(
-        "seed", [Port("mask", "f", "Mask", "")], "rgba",
-        "return $mask(uv) > 0.5 ? vec4(uv, 1.0, 1.0) : vec4(0.0);", [],
+        "seed", [Port("mask", "f", "Mask", "")], "rgba", JFA_SEED, [],
     )  # fmt: skip
     step = [
         "int i = int($iteration);",
@@ -824,17 +826,7 @@ def _distance(*, color: bool) -> Atom:
         "for (int k = 0; k < 16 && s < min(rp, N / 2.0); k++) s *= 2.0;",
         f"float st = i <= {JFA_STEPS} ? float(1 << ({JFA_STEPS} - i)) : 1.0;",
         "if (st > s) return $input(uv);",
-        "vec4 best = $input(uv);",
-        "float bd = best.z > 0.5 ? tdist_$(name)(uv, best.xy) : 1e9;",
-        "for (int y = -1; y <= 1; y++) {",
-        "\tfor (int x = -1; x <= 1; x++) {",
-        "\t\tvec2 o = vec2(float(x), float(y));",
-        "\t\tvec4 c = $input(fract(uv + o * (st / N)));",
-        "\t\tfloat d = tdist_$(name)(uv, c.xy);",
-        "\t\tif (c.z > 0.5 && d < bd) { best = c; bd = d; }",
-        "\t}",
-        "}",
-        "return best;",
+        *jfa_step_lines("(st / N)"),
     ]
     jfa = _inner_shader("jfa", [Port("input", "rgba", "Positions", "")], "rgba",
                         "\n".join(step), [reach], TORUS_GLSL)  # fmt: skip
@@ -842,6 +834,7 @@ def _distance(*, color: bool) -> Atom:
         "vec4 c = $input(uv);",
         f"float r = max($distance * ({N} / 256.0), 1e-6);",
         f"float d = tdist_$(name)(uv, c.xy) * {N};",
+        JFA_OWN.format(half=f"0.5 / {N}"),
         # The translation's distance is a number, which the GPU's compiler
         # divides by as a product by its reciprocal, rounded: so here too.
         "float f = c.z > 0.5 ? clamp(1.0 - d * $(name)_rcp(r), 0.0, 1.0) : 0.0;",

@@ -72,6 +72,7 @@ import py7zr
 from PIL import Image
 
 from sbsar2ptex import procedural
+from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.convert import describe
@@ -356,13 +357,14 @@ def mm_export(
     start-up, not the graphs, takes most of an export. Its output goes to
     ``folder``/mm.log. ``fork``: ``mm`` is Godot, running material-maker-mod
     from that folder (its material_maker project), imported first if it never
-    was: without Godot's script class cache its export hangs.
+    was: without Godot's script class cache its export hangs. It renders
+    with --low-memory: without it, Biomech's larger graphs come out flat.
     """
     if fork is None:
         command = [str(mm), "--export"]
     else:
         command = [str(mm), "--path", str(fork), "--export-material",
-                   "--target", "Godot/Godot 4 Standard"]  # fmt: skip
+                   "--target", "Godot/Godot 4 Standard", "--low-memory"]  # fmt: skip
     with (folder / "mm.log").open("w", encoding="utf-8", errors="replace") as log:
         if fork is not None and not (fork / FORK_CLASS_CACHE).exists():
             subprocess.run(
@@ -439,7 +441,9 @@ class Search:
         if not self.slots[False] or not self.slots[True]:
             sys.exit(f"need a grayscale and a color graph output: {self.outputs}")
         built = self.work / "graph"
-        kind = "_sbs" if args.plugins else ""  # each kind built apart
+        # each kind built apart
+        kind = ("_sbs" if args.plugins else "") + ("_amd" if args.amd else "")
+        translate._DMB_AMD = translate._FX_AMD = args.amd  # noqa: SLF001
         ptex = built / f"{args.sbsar.stem}{kind}.ptex"
         known = built / f"aliases{kind}.json"
         if not ptex.exists() or not known.exists() or args.rebuild:
@@ -761,6 +765,10 @@ def main() -> None:
     parser.add_argument(
         "--bisect", type=int, nargs="?", const=3, default=0, metavar="PROBES",
         help="bisect paths, PROBES nodes a round (3; implies --strict)",
+    )  # fmt: skip
+    parser.add_argument(
+        "--amd", action="store_true",
+        help="store and blur as AMD GPUs do, for sbsrender renders made on one",
     )  # fmt: skip
     parser.add_argument(
         "--pin", default="", metavar="NODES",

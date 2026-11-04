@@ -1137,6 +1137,10 @@ def distance_cases() -> list[dict]:
         # Biomech's n2327: a short reach, the mask alone
         {"tag": "distance_mask5_g", "filter": "distance", "kind": GRAY,
          "params": (("distance", F1, "5.12"),), "connect": 1},
+        # Biomech's n232: a reach of 10.24 px, the mask horizontal traces
+        {"tag": "distance_strip1_g", "filter": "distance", "kind": GRAY,
+         "params": (("distance", F1, "1.28"),), "connect": 1,
+         "inputs": {"a": "strip"}},
         {"tag": "distance_c", "filter": "distance", "kind": COLOR, "params": reach},
     ]  # fmt: skip
 

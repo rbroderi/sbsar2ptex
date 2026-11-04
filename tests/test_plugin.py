@@ -138,6 +138,14 @@ def test_a_nearest_transformation_reads_one_texel() -> None:
     assert t["parameters"]["filtering"] == 0
 
 
+def test_plugin_distance_seeds_as_the_translation() -> None:
+    # as translate._distance: 16-bit unorm seeds, Substance's neighbours
+    graph = json.dumps(plugin.definitions()["sbs_distance_gray"])
+    assert json.dumps(translate.JFA_SEED)[1:-1] in graph
+    assert "ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1)" in graph
+    assert "lessThan(abs(c.xy - uv)" in graph
+
+
 def test_levels_is_a_plugin_node() -> None:
     maker = plugin.Maker(11)
     nodes, wires, outs = translated("levels_gray", maker)

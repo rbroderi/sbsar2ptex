@@ -130,6 +130,20 @@ def test_distance_jump_floods() -> None:
     assert outs["output"][0] in {n["name"] for n in nodes}
 
 
+def test_distance_seeds_are_substances() -> None:
+    # Biomech's n232, distance_strip1_g: seeds to 1/65535 (16-bit unorm),
+    # a mask pixel at distance 0 from its own, neighbours in Substance's
+    # order: 91.11% exact before, 99.99% now
+    node = Node(index=0, start=0, end=4, op=43, fields=[6, 1, 0],
+                inline=[struct.unpack("<I", struct.pack("<f", 1.28))[0]])  # fmt: skip
+    made = _distance(node, "distance", color=False, size=11)
+    code = {n["name"]: n["shader_model"]["instance"]
+            for n in made.nodes if n["type"] == "shader"}  # fmt: skip
+    assert "floor(uv * 65535.0 + 0.5) / 65535.0" in code["distance_seed"]
+    assert "ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1)" in code["distance_pass0"]
+    assert "lessThan(abs(c.xy - uv)" in code["distance"]
+
+
 def test_color_distance_preserves_source_rgb_outside_range() -> None:
     node = Node(
         index=0,

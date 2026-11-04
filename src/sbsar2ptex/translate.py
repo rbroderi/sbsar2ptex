@@ -3113,6 +3113,39 @@ TORUS_GLSL = """float tdist_$(name)(vec2 a, vec2 b) {
 }
 """
 
+JFA_SEED = (
+    "return $mask(uv) > 0.5"
+    " ? vec4(floor(uv * 65535.0 + 0.5) / 65535.0, 1.0, 1.0) : vec4(0.0);"
+)
+"""A distance's seed: the mask pixel's position, to 1/65535 as Substance's
+16-bit unorm positions keep it (seeds off-center by up to 1/32 px: an
+8-bit level at some distances, depending on where they are)."""
+
+JFA_OWN = "if (all(lessThan(abs(c.xy - uv), vec2({half})))) d = 0.0;"
+"""A mask pixel, its own seed (within half a texel): at distance 0."""
+
+
+def jfa_step_lines(step: str) -> list[str]:
+    """Return a jump flooding pass's GLSL, its neighbours ``step`` (uv) away.
+
+    In Substance's order: itself, +x, -x, +y, -y, then the diagonals
+    (+, +), (-, -), (+, -), (-, +); the first of equally near ones wins.
+    """
+    return [
+        "vec4 best = $input(uv);",
+        "float bd = best.z > 0.5 ? tdist_$(name)(uv, best.xy) : 1e9;",
+        (
+            "const ivec2 jo[8] = ivec2[8](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1),"
+            " ivec2(0, -1), ivec2(1, 1), ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1));"
+        ),
+        "for (int j = 0; j < 8; j++) {",
+        f"\tvec4 c = $input(fract(uv + vec2(jo[j]) * {step}));",
+        "\tfloat d = tdist_$(name)(uv, c.xy);",
+        "\tif (c.z > 0.5 && d < bd) { best = c; bd = d; }",
+        "}",
+        "return best;",
+    ]
+
 
 def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Translate distance: a falloff from the nearest mask pixel.
@@ -3122,8 +3155,9 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
     with a source, that times the source at the nearest mask pixel (for
     color, the source's alpha only: RGB is the source's). The
     nearest mask pixel is found by jump flooding: buffers of seed
-    positions (nearest sampling), steps halving from the largest power of
-    two that covers D down to one texel, then one more one-texel pass.
+    positions (nearest sampling; JFA_SEED, to 1/65535), steps halving
+    from the largest power of two that covers D down to one texel, then
+    one more one-texel pass (jfa_step_lines).
     """
     t = "rgba" if color else "f"
     flags = node.fields[0]
@@ -3143,31 +3177,12 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
     steps.append(1)
     nodes: list[dict[str, Any]] = []
     wires: list[dict[str, Any]] = []
-    init = shader(
-        f"{name}_seed",
-        [("mask", "f")],
-        "rgba",
-        "return $mask(uv) > 0.5 ? vec4(uv, 1.0, 1.0) : vec4(0.0);",
-    )
+    init = shader(f"{name}_seed", [("mask", "f")], "rgba", JFA_SEED)
     nodes.append(init)
     last = init["name"]
     for k, step in enumerate(steps):
         buf = buffer(f"{name}_jfa{k}", size, filtering=False)
-        body = "\n".join(
-            [
-                "vec4 best = $input(uv);",
-                "float bd = best.z > 0.5 ? tdist_$(name)(uv, best.xy) : 1e9;",
-                "for (int y = -1; y <= 1; y++) {",
-                "\tfor (int x = -1; x <= 1; x++) {",
-                "\t\tvec2 o = vec2(float(x), float(y));",
-                f"\t\tvec4 c = $input(fract(uv + o * {num(step / n)}));",
-                "\t\tfloat d = tdist_$(name)(uv, c.xy);",
-                "\t\tif (c.z > 0.5 && d < bd) { best = c; bd = d; }",
-                "\t}",
-                "}",
-                "return best;",
-            ]
-        )
+        body = "\n".join(jfa_step_lines(num(step / n)))
         jfa = shader(f"{name}_pass{k}", [("input", "rgba")], "rgba", body)
         jfa["shader_model"]["instance"] = TORUS_GLSL + jfa["shader_model"]["instance"]
         nodes += [buf, jfa]
@@ -3178,6 +3193,7 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
         "vec4 c = $input(uv);",
         f"float r = max({num(reach)} * {num(n / 256)}, 1e-6);",
         f"float d = tdist_$(name)(uv, c.xy) * {num(float(n))};",
+        JFA_OWN.format(half=num(0.5 / n)),
         "float f = c.z > 0.5 ? clamp(1.0 - d / r, 0.0, 1.0) : 0.0;",
     ]
     inputs = [("input", "rgba")]
