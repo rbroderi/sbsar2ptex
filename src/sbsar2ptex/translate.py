@@ -52,6 +52,7 @@ from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.valuerng import VALUE_RNG_GLSL
+from sbsar2ptex.valuerng import ValueRng
 
 
 class UnsupportedError(Exception):
@@ -4198,6 +4199,24 @@ def _bspline(name: str, size: int, t: str) -> dict[str, Any]:
     return shader(name, [("input", t)], t, "\n".join(lines))
 
 
+def _static_seed(
+    node: Node, defaults: dict[int, list[float]], builtins: dict[int, list[float]]
+) -> int:
+    """Return ``node``'s value seed at the graph inputs' defaults.
+
+    As translate resolves it (node word bits 6-7): 1 its first inline word,
+    2 its seed function's value, otherwise 0.
+    """
+    state = node.flags >> 6 & 3
+    if state == 1 and node.inline:
+        return node.inline[0]
+    if state == 2:  # noqa: PLR2004
+        off = _seed_block(node)
+        block = decode(node.at(off, (node.end - off) // 4))
+        return int(evaluate(block, defaults, builtins)[0])
+    return 0
+
+
 def _output_size(node: Node, size: int) -> int:
     """Return ``node``'s output size (log2), ``size`` unless the node says.
 
@@ -4231,8 +4250,11 @@ def _output_size(node: Node, size: int) -> int:
     for off in offsets:
         try:
             block = decode(node.at(off, (node.end - off) // 4))
-            v = evaluate(block, defaults, builtins, lambda a: a / 2, {})
-        except (FunctionError, KeyError, IndexError):
+            rand = None  # its rand values the node's value generator's
+            if any(i.op == RAND for i in block.instrs):
+                rand = ValueRng(_static_seed(node, defaults, builtins)).rand
+            v = evaluate(block, defaults, builtins, rand, {})
+        except (FunctionError, KeyError, IndexError, UnsupportedError):
             return size
         if len(v) == 2 and v[0] == v[1] and float(v[0]).is_integer():  # noqa: PLR2004
             return max(int(v[0]), 0)  # one pixel at least

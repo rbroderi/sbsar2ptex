@@ -7,6 +7,7 @@ import numpy as np
 from sbsar2ptex.function import BOOL
 from sbsar2ptex.function import FLOAT
 from sbsar2ptex.function import INT
+from sbsar2ptex.function import NO_VALUE
 from sbsar2ptex.function import Block
 from sbsar2ptex.function import Instr
 from sbsar2ptex.function import decode
@@ -56,6 +57,24 @@ def const(value: float) -> Instr:
     """Return a float constant instruction."""
     (word,) = struct.unpack("<I", struct.pack("<f", value))
     return Instr(op=0x00, type=FLOAT, width=1, operands=[word & 0xFFFF, word >> 16])
+
+
+def test_a_dropped_sequence_result_is_its_first_parts_rounded() -> None:
+    # pp_param_var's size: $outputsize + sequence(set v = (rand, rand),
+    # (0, 0) dropped by the cooker). Substance renders it at 4096 x 4096 at
+    # seed 0, v (0.625, 0.911), and 4096 x 2048 at seed 3, v (0.539, 0.376):
+    # the size plus v to the nearest
+    for v, size in (((0.625, 0.911), [12, 12]), ((0.539, 0.376), [12, 11])):
+        instrs = [
+            Instr(op=0x02, type=INT, width=2, operands=[7, 0]),
+            const(v[0]),
+            const(v[1]),
+            Instr(op=0x0D, type=FLOAT, width=2, operands=[1, 2]),
+            Instr(op=0x07, type=FLOAT, width=2, operands=[3, 0]),
+            Instr(op=0x0C, type=INT, width=2, operands=[4, NO_VALUE]),
+            Instr(op=0x12, type=INT, width=2, operands=[0, 5]),
+        ]
+        assert evaluate(Block(instrs), {7: [11, 11]}) == size
 
 
 def test_mod_is_float32_each_step_rounded() -> None:

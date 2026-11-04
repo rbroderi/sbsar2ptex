@@ -235,6 +235,22 @@ def _as(kind: int, values: list) -> list:
     return [bool(x) for x in values]
 
 
+def _dropped(ins: Instr, first: list) -> list:
+    """Return a sequence's value when the cooker dropped its result.
+
+    Its first part's, as the sequence's type: a float to the nearest int.
+    A pixel processor's output size relative to its input's, adding
+    sequence(set v = (rand, rand), (0, 0)), comes out as the size plus v
+    rounded (check_filters' pp_param_var: 4096 at seed 0, 4096 x 2048 at
+    3). Zero where the widths differ.
+    """
+    if len(first) != ins.width:
+        return [0.0] * ins.width
+    if ins.type == INT:
+        return [round(x) if math.isfinite(x) else 0 for x in first]
+    return first
+
+
 def evaluate(
     block: Block,
     inputs: dict[int, list],
@@ -267,7 +283,7 @@ def evaluate(
         elif op == 0x09:  # noqa: PLR2004
             v = vals[ops[1]] if vals[ops[0]][0] else vals[ops[2]]
         elif op == 0x0C:  # noqa: PLR2004
-            v = [0.0] * ins.width if ops[1] == NO_VALUE else vals[ops[1]]
+            v = vals[ops[1]] if ops[1] != NO_VALUE else _dropped(ins, vals[ops[0]])
         elif op in (0x0D, 0x0E, 0x0F):
             v = [x for o in ops for x in vals[o]]
         elif op == 0x10:  # noqa: PLR2004
@@ -387,7 +403,17 @@ def bounds(
             a, b = _spread(arg(1), arg(2))
             v = [(min(p[0], q[0]), max(p[1], q[1])) for p, q in zip(a, b, strict=True)]
         elif ins.op == 0x0C:  # noqa: PLR2004
-            v = [(0.0, 0.0)] * ins.width if ops[1] == NO_VALUE else arg(1)
+            if ops[1] != NO_VALUE:
+                v = arg(1)
+            elif len(arg(0)) != ins.width:  # as _dropped
+                v = [(0.0, 0.0)] * ins.width
+            elif ins.type == INT:  # rounded: a bound a bound still
+                v = [
+                    tuple(round(x) if math.isfinite(x) else x for x in iv)
+                    for iv in arg(0)
+                ]
+            else:
+                v = arg(0)
         elif ins.op in (0x0D, 0x0E, 0x0F):
             v = [x for o in ops for x in vals[o]]
         elif ins.op == 0x10:  # noqa: PLR2004
@@ -580,7 +606,14 @@ def to_glsl(
         elif ins.op == 0x09:  # noqa: PLR2004
             expr = f"({v(ops[0])} ? {v(ops[1])} : {v(ops[2])})"
         elif ins.op == 0x0C:  # noqa: PLR2004
-            expr = f"{t}(0)" if ops[1] == NO_VALUE else v(ops[1])
+            if ops[1] != NO_VALUE:
+                expr = v(ops[1])
+            elif kinds[ops[0]][1] != ins.width:  # as _dropped
+                expr = f"{t}(0)"
+            elif ins.type == INT and kinds[ops[0]][0] == FLOAT:
+                expr = f"{t}(round({v(ops[0])}))"
+            else:
+                expr = f"{t}({v(ops[0])})"
         elif ins.op in (0x0D, 0x0E, 0x0F):
             expr = f"{t}({', '.join(v(o) for o in ops)})"
         elif ins.op == 0x10:  # noqa: PLR2004
