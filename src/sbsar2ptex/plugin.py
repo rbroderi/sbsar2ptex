@@ -73,7 +73,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.11"
+VERSION = "1.12"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -459,9 +459,9 @@ def _hsl() -> Atom:
 def _dyngradient(*, color: bool) -> Atom:
     t, _, sfx = _kinds(color=color)
     x = f"$input1(uv) * (({N} - 1.0) / {N}) + (0.5 / {N})"
-    lo, hi = f"(0.5 / {N})", f"(1.0 - 0.5 / {N})"
-    p = f"($uvselector == 1 ? vec2($coordinate, {x}) : vec2({x}, $coordinate))"
-    body = f"return $input2(clamp({p}, vec2({lo}), vec2({hi})));"
+    c = f"$coordinate * (({N} - 1.0) / {N}) + (0.5 / {N})"
+    p = f"($uvselector == 1 ? vec2({c}, {x}) : vec2({x}, {c}))"
+    body = translate.bilinear256_glsl("$input2", p, N, t)
     return _shader_atom(
         f"sbs_dyngradient{sfx}", "Gradient (Dynamic)",
         "Substance's Gradient (Dynamic): the gradient input sampled at (input,"

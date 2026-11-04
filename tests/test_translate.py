@@ -510,6 +510,17 @@ def test_16_bit_stores_are_the_gpus() -> None:
     assert (nvidia < exact).any()
 
 
+def test_a_dynamic_gradient_reads_texel_by_texel() -> None:
+    # check_filters dyngrad_g (coordinate 0.3): the coordinate maps to texel
+    # centers as the input does, and the gradient is read four texels with
+    # fractions to 1/256, clamped (95.81% before, 100% now)
+    body = translate.bilinear256_glsl("$gradient", "p", "2048.0", "f")
+    assert "vec2 tf = floor((tt - tb) * 256.0 + 0.5) / 256.0;" in body
+    assert body.count("$gradient(") == 4
+    assert "float a = mix(" in body
+    assert "vec4 a = mix(" in translate.bilinear256_glsl("$g", "p", "8.0", "rgba")
+
+
 def test_hsl_is_substances() -> None:
     # check_filters hsl_c (hue 0.62, saturation 0.4, lightness 0.45): hue
     # from the smallest channel with offsets of 3 and 1 2^-12, saturation's

@@ -1690,10 +1690,31 @@ def _curve(node: Node, name: str, *, color: bool, size: int) -> Made:
     return made, ["input"]
 
 
+def bilinear256_glsl(read: str, p: str, n: str, t: str) -> str:
+    """Return GLSL returning ``read`` (a GLSL function of uv) at ``p``, bilinear.
+
+    As Substance's GPU filters a texture of side ``n`` (GLSL), clamped:
+    four texels, fractions to 1/256 (the GPU's filter of our float buffers:
+    dyngrad_g 98.78%, this 100%). ``t`` is the type read, f or rgba.
+    """
+    g = "vec4" if t == "rgba" else "float"
+    return "\n".join([
+        f"vec2 tt = clamp({p}, vec2(0.0), vec2(1.0)) * {n} - 0.5;",
+        "vec2 tb = floor(tt);",
+        "vec2 tf = floor((tt - tb) * 256.0 + 0.5) / 256.0;",
+        f"vec2 t0 = (clamp(tb, 0.0, {n} - 1.0) + 0.5) / {n};",
+        f"vec2 t1 = (clamp(tb + 1.0, 0.0, {n} - 1.0) + 0.5) / {n};",
+        f"{g} a = mix({read}(t0), {read}(vec2(t1.x, t0.y)), tf.x);",
+        f"{g} b = mix({read}(vec2(t0.x, t1.y)), {read}(t1), tf.x);",
+        "return mix(a, b, tf.y);",
+    ])  # fmt: skip
+
+
 def _dyngradient(node: Node, name: str, *, color: bool, size: int) -> Made:
     """Dynamic gradient: sample the gradient at (input, coordinate).
 
-    The input value maps to texel centers, x (N - 1) / N + 0.5 / N, sampled
+    The input value and the coordinate map to texel centers, x (N - 1) / N
+    + 0.5 / N (the coordinate raw: dyngrad_g 95.39%, mapped 100%), sampled
     with clamping; the U/V selector (node-word flag 0x08) swaps the axes.
     """
     t = "rgba" if color else "f"
@@ -1701,9 +1722,9 @@ def _dyngradient(node: Node, name: str, *, color: bool, size: int) -> Made:
     swap = bool(node.flags >> 8 & 0x08)
     n = float(1 << size)
     x = f"$input(uv) * {num((n - 1) / n)} + {num(0.5 / n)}"
-    p = f"vec2({num(coordinate)}, {x})" if swap else f"vec2({x}, {num(coordinate)})"
-    lo, hi = num(0.5 / n), num(1 - 0.5 / n)
-    body = f"return $gradient(clamp({p}, vec2({lo}), vec2({hi})));"
+    c = f"{num(coordinate)} * {num((n - 1) / n)} + {num(0.5 / n)}"
+    p = f"vec2({c}, {x})" if swap else f"vec2({x}, {c})"
+    body = bilinear256_glsl("$gradient", p, num(n), t)
     inputs = [("input", "f"), ("gradient", t)]
     return shader(name, inputs, t, body), ["input", "gradient"]
 
