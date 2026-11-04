@@ -73,7 +73,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.12"
+VERSION = "1.13"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -634,26 +634,30 @@ def _emboss(*, color: bool) -> Atom:
 
 
 def _dmb_by_format(g: str, turn: str, port: str) -> tuple[str, str]:
-    """Return a directional motion blur's helpers and body, by $format.
+    """Return a directional motion blur's helpers and body, by $format and $gpu.
 
-    ``turn`` is its angle (a GLSL value), ``port`` the input it reads.
+    ``turn`` is its angle (a GLSL value), ``port`` the input it reads. Its
+    stores are the GPU's (translate._DMB_AMD), as a node's are.
     """
-    helpers, calls = [], []
-    for fmt in (0, 1, 2):
-        setup = dmb_setup_glsl("$intensity", turn, N, lpx=fmt == 1)
-        h, body = dmb_glsl(g, fmt, N, MASK, setup)
-        tag = f"$(name)_v{fmt}_"
-        helpers.append(h.replace("$(name)_", tag))
-        body = body.replace("$(name)_", tag)
-        helpers.append(f"{g} {tag}body(vec2 uv) {{\n{body}\n}}\n")
-        calls.append(f"{tag}body(uv)")
+    helpers, lines = [], []
+    saved = translate._DMB_AMD  # noqa: SLF001
+    try:
+        for amd in (False, True):
+            translate._DMB_AMD = amd  # noqa: SLF001
+            for fmt in (0, 1, 2):
+                setup = dmb_setup_glsl("$intensity", turn, N, lpx=fmt == 1)
+                h, body = dmb_glsl(g, fmt, N, MASK, setup)
+                tag = f"$(name)_v{fmt}{'a' if amd else 'n'}_"
+                helpers.append(h.replace("$(name)_", tag))
+                body = body.replace("$(name)_", tag)
+                helpers.append(f"{g} {tag}body(vec2 uv) {{\n{body}\n}}\n")
+                cond = f"$gpu == {int(amd)} && $format == {fmt}"
+                lines.append(f"if ({cond}) return {tag}body(uv);")
+    finally:
+        translate._DMB_AMD = saved  # noqa: SLF001
     text = "".join(helpers).replace("$input(", f"${port}(")
-    body = (
-        f"if ($format == 0) return {calls[0]};\n"
-        f"if ($format == 1) return {calls[1]};\n"
-        f"return {calls[2]};"
-    )
-    return text, body
+    lines[-1] = f"return {lines[-1].split(' return ')[1]}"
+    return text, "\n".join(lines)
 
 
 def _dirmotionblur(*, color: bool) -> Atom:

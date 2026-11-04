@@ -107,6 +107,19 @@ def test_plugin_stores_are_the_gpus(monkeypatch) -> None:
         assert node["parameters"]["gpu"] == int(amd)
 
 
+def test_plugin_blurs_store_as_the_gpu() -> None:
+    # a directional blur's passes store as $gpu's (blur2_8 on AMD: 89.74%
+    # with NVIDIA's stores, 99.997% with AMD's)
+    dmb = plugin.definitions()["sbs_dirmotionblur_gray"]["shader_model"]["instance"]
+    for gpu, tag in ((0, "n"), (1, "a")):
+        assert (
+            f"if ($gpu == {gpu} && $format == 0) return $(name)_v0{tag}_body(uv);"
+            in dmb
+        )
+    assert "uintBitsToFloat" in dmb
+    assert "4096.0 + c" in dmb
+
+
 def test_a_nearest_transformation_reads_one_texel() -> None:
     # transform_nearx3_g/_c: a 3x zoom out reads mip level 2's texel q is in,
     # not a bilinear mix of four (66.6% / 87.3% before, 100% now)

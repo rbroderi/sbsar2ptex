@@ -1870,12 +1870,20 @@ hair high)."""
 
 
 def _dmb_s8(g: str) -> str:
-    """Return GLSL for Substance's 8-bit store, as on NVIDIA GPUs.
+    """Return GLSL for Substance's 8-bit store, as the GPU stores (_DMB_AMD).
 
-    Clamped, truncated to 1/4096 (after the offset ``c``: _DMB_SUM or
-    _DMB_READ by where the value comes from), then the nearest 255th, ties
-    down. Exact in float32: X 255 + 2047 stays below 2^20.
+    NVIDIA: clamped, truncated to 1/4096 (after the offset ``c``: _DMB_SUM
+    or _DMB_READ by where the value comes from), then the nearest 255th,
+    ties down. Exact in float32: X 255 + 2047 stays below 2^20. AMD: through
+    a half float (fxglsl.level8_glsl; c unused).
     """
+    if _DMB_AMD:
+        return (
+            f"{g} $(name)_s8({g} v, float c) {{\n"
+            f"\tv = clamp(v, 0.0, 1.0);\n{fxglsl.level8_glsl(g, amd=True)}"
+            "\treturn k / 255.0;\n"
+            "}\n" + _DMB_BITS
+        )
     return (
         f"{g} $(name)_s8({g} v, float c) {{\n"
         f"\t{g} x = floor(clamp(v, 0.0, 1.0) * 4096.0 + c);\n"

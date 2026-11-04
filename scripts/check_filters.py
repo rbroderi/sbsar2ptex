@@ -320,6 +320,8 @@ def cases() -> list[tuple]:
         # radius (25.76 texels), so the box's end taps weigh less than one
         ("blur322_g", "blur", GRAY, (("intensity", F1, "3.22"),), "", True),
         ("blur322_8", "blur", GRAY, (("intensity", F1, "3.22"),)),
+        # fn_blur's intensity, set as a constant
+        ("blur2_8", "blur", GRAY, (("intensity", F1, "2"),)),
         ("blur05_g", "blur", GRAY, (("intensity", F1, "0.05"),), "", True),
         # on noise, at n667's size: Substance's kernel can be read off them
         *(

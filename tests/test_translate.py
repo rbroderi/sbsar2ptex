@@ -510,6 +510,17 @@ def test_16_bit_stores_are_the_gpus() -> None:
     assert (nvidia < exact).any()
 
 
+def test_a_blurs_8_bit_stores_are_the_gpus(monkeypatch) -> None:
+    # check_filters blur2_8 / blur322_8 on AMD: each pass's 8-bit store
+    # through a half float as AMD's (89.74% / 87.88% with NVIDIA's, 99.997%)
+    monkeypatch.setattr(translate, "_DMB_AMD", True)
+    amd = translate._dmb_s8("float")
+    level = fxglsl.level8_glsl("float", amd=True)
+    assert all(line in amd for line in level.splitlines())
+    monkeypatch.setattr(translate, "_DMB_AMD", False)
+    assert "4096.0 + c" in translate._dmb_s8("float")
+
+
 def test_a_dynamic_gradient_reads_texel_by_texel() -> None:
     # check_filters dyngrad_g (coordinate 0.3): the coordinate maps to texel
     # centers as the input does, and the gradient is read four texels with
