@@ -73,7 +73,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.7"
+VERSION = "1.8"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -367,7 +367,6 @@ def _blend(*, color: bool) -> Atom:
 
 def _transformation(*, color: bool) -> Atom:
     t, _, sfx = _kinds(color=color)
-    empty = "vec4(0.0)" if color else "0.0"
     lines = [
         "vec2 p = uv - vec2(0.5);",
         (
@@ -375,11 +374,10 @@ def _transformation(*, color: bool) -> Atom:
             " $matrix22_y * p.x + $matrix22_w * p.y);"
         ),
         "q += vec2(0.5) + vec2($offset_x, $offset_y);",
-        f"if (($tiling & 1) == 0 && (q.x < 0.0 || q.x >= 1.0)) return {empty};",
-        f"if (($tiling & 2) == 0 && (q.y < 0.0 || q.y >= 1.0)) return {empty};",
         *transform_read_lines(
             "input1", [f"$matrix22_{k}" for k in "xyzw"], f"int({N})", "$format",
             color=color, scale="exp2($inscale)", nearest="($filtering == 1)",
+            tiling="$tiling",
         ),
     ]  # fmt: skip
     params = [

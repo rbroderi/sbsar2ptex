@@ -112,7 +112,10 @@ def test_a_nearest_transformation_reads_one_texel() -> None:
     near = translate.transform_read_lines("input", ["3.0"] * 4, "256", "0",
                                           color=False, nearest="true")  # fmt: skip
     assert "bool tnear = true;" in near
-    assert "for (int k = 0; k < (L > 0 ? (tnear ? 1 : 4) : 1); k++) {" in near
+    assert "for (int k = 0; k < (tby ? (tnear ? 1 : 4) : 1); k++) {" in near
+    # transform_tile0_g: untiled, texels past the edges are empty
+    assert "int tl = 3;" in near
+    assert "\tif ((tout.x && !twrap.x) || (tout.y && !twrap.y)) continue;" in near
     t = plugin.definitions()["sbs_transformation_gray"]
     assert "bool tnear = ($filtering == 1);" in t["shader_model"]["instance"]
     assert t["parameters"]["filtering"] == 0

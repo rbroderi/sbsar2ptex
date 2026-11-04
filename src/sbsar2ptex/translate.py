@@ -1288,14 +1288,19 @@ def transform_read_lines(
     color: bool,
     scale: str = "1.0",
     nearest: str = "false",
+    tiling: str = "3",
 ) -> list[str]:
     """Return a transformation's last lines: its input ``$<inp>`` read at q.
 
     At level 0 (tmlevel, from ``matrix`` a, b, c, d: GLSL), at q itself;
     past it bilinear (fractions to 1/256), or where ``nearest`` (GLSL bool:
     nearest filtering) the texel q is in (transform_nearx3_g: level 2,
-    every pixel), wrapped, in that mip level of
-    the input, of side ``n`` (the node's) times ``scale`` (GLSL: the input
+    every pixel), in that mip level of the input. Along an axis ``tiling``
+    (GLSL int: bit 0 x, bit 1 y) tiles, texels wrap; along one it does not,
+    texels past the edges are empty, so the image fades out over half a
+    texel (transform_tile0_g: 0.16% of pixels, up to 128 levels, at its
+    edges), at level 0 too. The mip level is of the input, of side ``n``
+    (the node's) times ``scale`` (GLSL: the input
     as fed, translate_graph's transform_in), stored in ``fmt`` (GLSL ints):
     each texel the level of its 4^L texels below, in Morton order, each
     four completed replaced by their mean (fxglsl.mip_readers). One read
@@ -1309,15 +1314,22 @@ def transform_read_lines(
         f"int L = tmlevel_$(name)(vec2({a}, {b}) * sc, vec2({c}, {d}) * sc, nin);",
         "int ml = nin >> L;",
         f"bool tnear = {nearest};",
-        "vec2 tt = fract(q) * float(ml) - (tnear ? 0.0 : 0.5);",
+        f"int tl = {tiling};",
+        "bvec2 twrap = bvec2((tl & 1) != 0, (tl & 2) != 0);",
+        # texel by texel: past level 0, or to fade out at an edge
+        "bool tby = L > 0 || (!tnear && !all(twrap));",
+        "vec2 tq = vec2(twrap.x ? fract(q.x) : q.x, twrap.y ? fract(q.y) : q.y);",
+        "vec2 tt = tq * float(ml) - (tnear ? 0.0 : 0.5);",
         "vec2 tb = floor(tt);",
         "vec2 tf = tnear ? vec2(0.0) : floor((tt - tb) * 256.0 + 0.5) / 256.0;",
-        "ivec2 i0 = (ivec2(tb) + ml) % ml;",
         "vec4 acc = vec4(0.0);",
         f"vec4 v[{4 * MIP_LIVE_MAX}];",
-        "for (int k = 0; k < (L > 0 ? (tnear ? 1 : 4) : 1); k++) {",
+        "for (int k = 0; k < (tby ? (tnear ? 1 : 4) : 1); k++) {",
         "\tivec2 corner = ivec2(k & 1, k >> 1);",
-        "\tivec2 tc = (i0 + corner) % ml;",
+        "\tivec2 ri = ivec2(tb) + corner;",
+        "\tbvec2 tout = bvec2(ri.x < 0 || ri.x >= ml, ri.y < 0 || ri.y >= ml);",
+        "\tif ((tout.x && !twrap.x) || (tout.y && !twrap.y)) continue;",
+        "\tivec2 tc = (ri % ml + ml) % ml;",
         "\tvec2 w = mix(1.0 - tf, tf, vec2(corner));",
         "\tvec4 m = vec4(0.0);",
         "\tfor (int i = 0; i < 1 << (2 * L); i++) {",
@@ -1326,7 +1338,7 @@ def transform_read_lines(
         "\t\t\tint c = (i >> (2 * l)) & 3;",
         "\t\t\to += ivec2(c & 1, c >> 1) << l;",
         "\t\t}",
-        "\t\tvec2 at = L > 0 ? (vec2((tc << L) + o) + 0.5) / float(nin) : fract(q);",
+        "\t\tvec2 at = tby ? (vec2((tc << L) + o) + 0.5) / float(nin) : fract(q);",
         f"\t\tvec4 x = vec4(${inp}(at));",
         "\t\tif (L == 0) {",
         "\t\t\tm = x;",
@@ -1343,7 +1355,8 @@ def transform_read_lines(
         ),
         "\t\t}",
         "\t}",
-        f"\tacc += L > 0 ? w.x * w.y * tmlvval_$(name)(m, {fmt}) : m;",
+        f"\tvec4 tv = L > 0 ? tmlvval_$(name)(m, {fmt}) : m;",
+        "\tacc += tby ? w.x * w.y * tv : tv;",
         "}",
         "return acc;" if color else "return acc.x;",
     ]
@@ -1417,7 +1430,7 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
         ("m11", "m12", "m21", "m22"), matrix, strict=True))  # fmt: skip
     offset = knob("offset", "Offset", offset, -1.0, 1.0)
     # Tiling, node word bits 24-25: 1 across, 2 down, 3 both; where it
-    # does not tile, the image is empty beyond its edges.
+    # does not tile, the image is empty beyond its edges (transform_read_lines).
     tiling = node.flags >> 8 & 3
     lines = [
         "vec2 p = uv - vec2(0.5);",
@@ -1427,10 +1440,6 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
         ),
         f"q += vec2(0.5) + {vec(offset, 2)};",
     ]
-    for axis, bit in (("x", 1), ("y", 2)):
-        if not tiling & bit:
-            empty = "vec4(0.0)" if color else "0.0"
-            lines.append(f"if (q.{axis} < 0.0 || q.{axis} >= 1.0) return {empty};")
     fmt = node.flags >> 4 & 3
     _CTX.helpers.append(transform_mip_glsl([fmt]))
     # The input as fed (translate_graph): its texels' size against the node's
@@ -1442,7 +1451,7 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
         "input", [num(x) for x in (a, b, c, d)], str(1 << size), str(fmt),
         color=color, scale=num(1.0 if minifies else scale),
         # filtering, flag word bit 5: 1 bilinear, 0 nearest
-        nearest=str(not node.fields[0] >> 5 & 1).lower(),
+        nearest=str(not node.fields[0] >> 5 & 1).lower(), tiling=str(tiling),
     )  # fmt: skip
     made = shader(name, [("input", t)], t, "\n".join(lines))
     if minifies:
