@@ -456,6 +456,43 @@ def pack(
     return Packed(flat.view(np.uint8).reshape(rows, WIDTH, 4), grid, start, index_at)
 
 
+RASTER_FLOATS = 16
+"""Floats per splat for the sbs plugin's Splats node (raster)."""
+
+_TAU = np.float32(6.2831855)
+
+
+def raster(spl: list[Splat], tile: tuple[bool, bool]) -> list[float]:
+    """Return gray splats as the sbs plugin's Splats node draws them.
+
+    Substance's GPU engine draws a pattern as one triangle over its
+    bounding box, which it sets up in float32 from the pattern's size and
+    its rotation, in turns, from radians and back: RASTER_FLOATS a tile
+    copy (fxdraw.copies, the default regions), in order: the color
+    (straight rgba: the gray value, opaque), the box's size and center,
+    the pattern's size, the rotation and the supplement, then the pattern
+    and max blending (1 or 0), and two zeros. Patterns of no area draw
+    nothing and are left out.
+    """
+    f = np.float32
+    out: list[float] = []
+    for s in spl:
+        if s.hx == 0 or s.hy == 0:
+            continue
+        w, h = f(2 * s.hx), f(2 * s.hy)
+        turns = f(f(s.angle) / _TAU)
+        angle = f(turns * _TAU)
+        c, n = f(abs(np.cos(angle))), f(abs(np.sin(angle)))
+        bx = f(f(abs(w) * c) + f(abs(h) * n))
+        by = f(f(abs(w) * n) + f(abs(h) * c))
+        v = f(s.value[0])
+        for ox, oy in fxdraw.copies(s, UNIT_REGION, tile):
+            x, y = f(f(s.x) + f(ox)), f(f(s.y) + f(oy))
+            out += [v, v, v, 1.0, bx, by, x, y, w, h, turns, f(s.suppl)]
+            out += [float(s.pattern), 1.0 if s.blend_max else 0.0, 0.0, 0.0]
+    return [float(x) for x in out]
+
+
 def write_png(path: Path, packed: Packed) -> None:
     """Write the data texture as an 8-bit RGBA PNG."""
     Image.fromarray(packed.image, "RGBA").save(path)

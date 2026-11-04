@@ -20,6 +20,7 @@ import numpy as np
 import png16
 from PIL import Image
 
+from sbsar2ptex import plugin
 from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
@@ -1575,9 +1576,20 @@ def main() -> None:
         " channel) and count pixels exact, within one level and the largest"
         " error, in the graph's levels (8-bit graphs: 1/255)",
     )
+    parser.add_argument(
+        "--plugins",
+        action="store_true",
+        help="translate with the sbs plugin's nodes, as --experimental does"
+        " (with --fork, which loads the plugin from its"
+        " material_maker/plugins/sbs, written there first)",
+    )
     args = parser.parse_args()
+    if args.plugins and args.fork is None:
+        parser.error("--plugins needs --fork")
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
+    if args.plugins:
+        plugin.install(args.fork / "material_maker" / "plugins" / "sbs")
     by_size = {SIZE: test_images(out)}
 
     todo = [case(c) for c in cases()]
@@ -1651,6 +1663,7 @@ def main() -> None:
                 size=size,
                 inputs=given,
                 data_dir=out / "data" / tag,
+                plugins=plugin.Maker(size) if args.plugins else None,
             )
         except UnsupportedError as e:
             print(f"{tag:14} unsupported: {e}")

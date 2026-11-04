@@ -4,13 +4,16 @@ Their pixels are checked against the inline translation by
 scripts/check_plugin.py (through the material-maker-mod fork).
 """
 
+import base64
 import json
 import re
+import struct
 from pathlib import Path
 
 import pytest
 
 from sbsar2ptex import fxglsl
+from sbsar2ptex import fxsplat
 from sbsar2ptex import plugin
 from sbsar2ptex import translate
 from sbsar2ptex.archive import member
@@ -19,6 +22,7 @@ from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.translate import PLUGIN_LINKS
 from sbsar2ptex.translate import TRANSLATORS
 from sbsar2ptex.translate import GraphInput
+from sbsar2ptex.translate import graph_inputs
 from sbsar2ptex.translate import output_type
 from sbsar2ptex.translate import remote
 from sbsar2ptex.translate import translate_graph
@@ -35,6 +39,7 @@ def translated(name: str, maker: plugin.Maker | None):
         asm.nodes(),
         {"output": asm.output_nodes[0][1]},
         {u: f"{u}.png" for u in uids},
+        inputs=graph_inputs(asm, xml),
         plugins=maker,
     )
 
@@ -51,9 +56,13 @@ def test_install_writes_the_plugin(tmp_path) -> None:
     # a class_name in user:// would not register; the file format is the fork's
     assert "\nclass_name " not in fxmap
     assert 'return "sbs_fxmap"' in fxmap
+    assert 'add_node_type("sbs_splats", preload("gen_sbs_splats.gd"))' in gd
+    splats = (tmp_path / "sbs" / "gen_sbs_splats.gd").read_text(encoding="utf-8")
+    assert "\nclass_name " not in splats
+    assert 'return "sbs_splats"' in splats
     assert (tmp_path / "sbs" / "README.md").exists()
     nodes = sorted((tmp_path / "sbs" / "nodes").glob("*.mmg"))
-    assert len(written) == len(nodes) + 4
+    assert len(written) == len(nodes) + 5
     for path in nodes:
         definition = json.loads(path.read_text(encoding="utf-8"))
         assert definition["name"] == path.stem
@@ -144,6 +153,34 @@ def test_plugin_distance_seeds_as_the_translation() -> None:
     assert json.dumps(translate.JFA_SEED)[1:-1] in graph
     assert "ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1)" in graph
     assert "lessThan(abs(c.xy - uv)" in graph
+
+
+def test_plugin_fxmaps_draw_triangles() -> None:
+    # a gradation turned a quarter (Biomech's n2): Substance's GPU draws its
+    # patterns as triangles, so the Splats node does (the inline translation
+    # draws them per pixel)
+    nodes, wires, _ = translated("fxmap_gradation", plugin.Maker(11))
+    drawn = [n for n in nodes if n["type"] == "sbs_splats"]
+    assert len(drawn) == 1
+    p = drawn[0]["parameters"]
+    assert p["size"] == 11
+    assert "bool fxpat_fx(int id, vec2 q, float s, out float v)" in p["pattern_code"]
+    raw = base64.b64decode(p["splats"])
+    floats = struct.unpack(f"<{len(raw) // 4}f", raw)
+    assert len(floats) % fxsplat.RASTER_FLOATS == 0
+    first = floats[: fxsplat.RASTER_FLOATS]
+    assert first[:4] == (1.0, 1.0, 1.0, 1.0)  # its color, opaque
+    assert first[8:11] == (1.0, 1.0, pytest.approx(0.25))  # size, turns
+    assert first[12:14] == (8.0, 0.0)  # the gradation, adding
+    assert (0.5, 0.5) in [
+        floats[k + 6 : k + 8] for k in range(0, len(floats), fxsplat.RASTER_FLOATS)
+    ]
+    shader = next(n for n in nodes if "$raster(" in json.dumps(n))
+    assert any(
+        w["from"] == drawn[0]["name"] and w["to"] == shader["name"] for w in wires
+    )
+    inline, _, _ = translated("fxmap_gradation", None)
+    assert not any(n["type"] == "sbs_splats" for n in inline)
 
 
 def test_levels_is_a_plugin_node() -> None:

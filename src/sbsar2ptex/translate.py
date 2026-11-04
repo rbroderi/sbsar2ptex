@@ -20,6 +20,7 @@ Parameters driven by function bytecode ("dynamic") are translated to helper
 functions, including Substance's context-specific random generators.
 """
 
+import base64
 import itertools
 import json
 import math
@@ -112,6 +113,9 @@ class _Context:
     input_bits: dict[str, int] = field(default_factory=dict)
     """The node being translated's inputs' bits, by port (input_bits)."""
     count: int = 0
+    raster: bool = False
+    """Whether FX-Maps may draw their patterns with the sbs plugin's Splats
+    node (_fx_raster): plugin translations."""
     data_dir: Path | None = None
     fx_variables: dict[int, tuple[str, str]] | None = None
     """The FX-Map being translated's shared variables: GLSL global, type."""
@@ -3481,6 +3485,47 @@ BAKE_WORK = 2048
 """Patterns a pixel past which a precomputed FX-Map is baked, if it can be."""
 
 
+def _fx_raster(
+    node: Node,
+    tree: fxmap.Tree | None,
+    st: fxmap.Settings,
+    layout: fxglsl.Layout,
+) -> list[float] | None:
+    """Return the FX-Map's patterns for the sbs plugin's Splats node, or None.
+
+    Substance draws a pattern as a triangle, its position in the pattern
+    interpolated by the GPU: a float32 step off the shader's per-pixel one
+    here and there, which thresholds downstream can grow into patches
+    (Biomech's reaction diffusion, from its gradation n2). The Splats node
+    draws them so, on Material Maker's GPU (fxsplat.raster).
+
+    Plugin translations only (_CTX.raster), of a gray map of built-in
+    patterns, with the default regions and no background image, that can
+    be evaluated here (fxsplat.splats, the graph inputs at their defaults:
+    the map no longer follows its parameters live).
+    """
+    unit = tuple(fxsplat.UNIT_REGION)
+    if (
+        not _CTX.raster
+        or layout.color
+        or (tuple(layout.render), tuple(layout.tiling)) != (unit, unit)
+        or isinstance(st.background, int)
+    ):
+        return None
+    defaults = {
+        uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
+    }
+    try:
+        spl = fxsplat.splats(node, tree, st, defaults, color=False, size=layout.size)
+    except Exception as e:
+        if fxsplat.evaluable(e):
+            return None
+        raise
+    if any(s.pattern < 0 for s in spl):
+        return None
+    return fxsplat.raster(spl, (st.tile_x, st.tile_y))
+
+
 def _fx_baked_lines() -> list[str]:
     """Return GLSL adding the baked map (fxsplat.bake), filtered bilinearly.
 
@@ -3806,8 +3851,9 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     # them, on per-pixel globals: no node may be skipped (it could set one).
     stateful = fxsplat.stateful(node, tree, st)
     reaches = {} if stateful else _fx_reach(node, tree, size)
-    splats = _fx_splats(node, tree, st, layout)
-    recording = stateful and splats is None
+    raster = _fx_raster(node, tree, st, layout)
+    splats = _fx_splats(node, tree, st, layout) if raster is None else None
+    recording = stateful and splats is None and raster is None
     walks = len(groups.keys) if not recording else 1
     masked = 1 < walks <= 32  # noqa: PLR2004
 
@@ -4026,7 +4072,7 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     root = None
     start: list[str] = []
     _CTX.sampled_read = set()
-    if splats is None:
+    if splats is None and raster is None:
         _CTX.sampled = images  # functions may sample the pattern inputs
         _CTX.sample_nearest = True
         if stateful:
@@ -4095,7 +4141,12 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
             f" + 0.5) / {n};\n}}\n"
         )
     lines = [*fxglsl.pixel_lines(layout), "vec4 acc = vec4(0.0);"]
-    if isinstance(st.background, int):
+    if raster is not None:  # drawn on the background
+        inputs.append(("raster", "rgba"))
+        lines.append(
+            f"acc.x = $raster((fxpx_$(name) + 0.5) / {num(float(1 << size))}).x;"
+        )
+    elif isinstance(st.background, int):
         inputs.append(("background", t))
         # (as stored: an image's levels, through Material Maker's half floats)
         bg = "fxlvval_$(name)(fxlvin_$(name)(vec4($background(uv))))"
@@ -4185,6 +4236,28 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
         )
         sub.wires.append(wire(data, name, port))
         sub.ports = [pt for pt in sub.ports if pt[0] != "splats"]
+    if raster is not None:
+        drawn = f"{name}_raster"
+        background = 0.0 if st.background is None else float(st.background[0])
+        sub.nodes.append(
+            {
+                "name": drawn,
+                "type": "sbs_splats",
+                "node_position": {"x": 0, "y": 0},
+                "parameters": {
+                    "size": size,
+                    "background": background,
+                    # little-endian float32s (arrays read as gradients)
+                    "splats": base64.b64encode(
+                        struct.pack(f"<{len(raster)}f", *raster)
+                    ).decode(),
+                    "pattern_code": fxmap.PATTERN_GLSL.replace("$(name)", "fx"),
+                },
+            }
+        )
+        port = [nm for nm, _ in inputs].index("raster")
+        sub.wires.append(wire(drawn, name, port))
+        sub.ports = [pt for pt in sub.ports if pt[0] != "raster"]
     sub.rounded = layout.bits is not None  # (fxstore stores it)
     return sub
 
@@ -4524,7 +4597,12 @@ def translate_graph(
     global _CTX  # noqa: PLW0603 (one graph at a time)
     if fold is not None and origins is None:
         origins = {}  # the fold finds a node's nodes by them
-    _CTX = _Context(size=size, inputs=dict(inputs or {}), data_dir=data_dir)
+    _CTX = _Context(
+        size=size,
+        inputs=dict(inputs or {}),
+        data_dir=data_dir,
+        raster=plugins is not None,
+    )
     # Functions reading $outputsize see the size the graph renders at, not
     # the archive's default for it.
     for uid, gi in _CTX.inputs.items():

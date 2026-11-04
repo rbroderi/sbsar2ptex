@@ -6,13 +6,32 @@ Generated and installed by `sbsar2ptex --install-mm-plugin DIR` (for Material
 Maker: its user folder's `plugins/sbs`).
 
 - The plugin's id is `sbs` (the folder name), and graphs require it with
-  `"requires": {"plugins": {"sbs": ">=1.14"}}`.
+  `"requires": {"plugins": {"sbs": ">=1.15"}}`.
 - A node's *Output format* rounds to 8 or 16 bits as Substance's GPU engine
   stores them, which differs between GPUs: *GPU levels* picks NVIDIA's or
   AMD's (sbsar2ptex sets it).
 - Node types are `sbs_<atom>` (for example `sbs_levels`), `.mmg` files in
   `nodes/`, with Substance's parameter names and ranges. `plugin.gd` adds the
-  node types implemented by scripts: the FX-Map (Substance), `sbs_fxmap`.
+  node types implemented by scripts: the FX-Map (Substance), `sbs_fxmap`, and
+  the Splats (Substance), `sbs_splats`.
+
+## Splats (Substance) node
+
+The **Splats (Substance)** node (type `sbs_splats`, `gen_sbs_splats.gd`) draws
+an FX-Map's patterns the way Substance Designer's GPU engine does: each
+pattern is one triangle over its bounding box, and the GPU interpolates the
+position in the pattern across it. A per-pixel computation is a float32 step
+off that here and there, and thresholds downstream can grow those steps into
+whole patches. sbsar2ptex `--experimental` uses it for grayscale FX-Maps of
+built-in patterns that it can evaluate (with the graph's inputs at their
+defaults, so the map no longer follows its parameters live): the map's shader
+reads the drawn patterns from it and stores them.
+
+Parameters: the output *size* and the *background*. sbsar2ptex also writes
+the splats (`splats`, float32s in base64, 16 a pattern: color, bounding box
+size and center, pattern size, rotation in turns, supplement, pattern id and
+max blending) and the patterns' GLSL (`pattern_code`). The output is rgba,
+32-bit floats.
 
 ## FX-Map (Substance) node
 
