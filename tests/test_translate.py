@@ -510,6 +510,33 @@ def test_16_bit_stores_are_the_gpus() -> None:
     assert (nvidia < exact).any()
 
 
+def test_hsl_is_substances() -> None:
+    # check_filters hsl_c (hue 0.62, saturation 0.4, lightness 0.45): hue
+    # from the smallest channel with offsets of 3 and 1 2^-12, saturation's
+    # 1 + 2^-12, the hue shift in sixths (95.61% before, 99.9995% now).
+    # This is HSL_GLSL in float32, on the colours plain HSL got wrong.
+    f = np.float32
+    want = {(0, 11, 128): (69, 8, 48), (0, 58, 129): (69, 8, 70)}
+    for rgb, out in want.items():
+        r, g, b = (f(x / 255) for x in rgb)
+        mx = max(r, g, b)
+        x, y, mn, base = (g, b, r, 3) if r <= min(g, b) else (
+            (b, r, g, 5) if g <= min(r, b) else (r, g, b, 1))  # fmt: skip
+        t, d = mn + mx, mx - mn
+        h = f(base) - (f(0.000732421875) + x - y) / (f(0.000244140625) + d)
+        h += f(12 * (0.62 - 0.5))
+        s = min(max(d / (f(1.000244140625) - abs(f(1) - t)) + f(-0.2), 0), 1)
+        lum = min(max(f(0.5) * t + f(-0.1), 0), 1)
+        u = h * f(1 / 6)
+        q = lum + s * (f(0.5) - abs(f(0.5) - lum))
+        ramp = np.abs(f(u - np.floor(u)) - np.array([0.5, 1 / 3, 2 / 3], f))
+        w = np.clip(ramp * np.array([6, -6, -6], f) + np.array([-1, 2, 2], f), 0, 1)
+        v = (f(2) * lum - q) + (q - (f(2) * lum - q)) * w
+        assert tuple(int(k) for k in fxdraw.s8(v.astype(f))) == out
+    assert "0.000732421875" in translate.HSL_GLSL
+    assert "1.000244140625" in translate.HSL_GLSL
+
+
 def test_a_samples_filtering_0_is_the_nearest_texel(monkeypatch) -> None:
     # check_filters pp_filter0_noise / pp_filter1_noise (every pixel): a
     # pixel processor's sample with filtering 0 (no operand) reads the

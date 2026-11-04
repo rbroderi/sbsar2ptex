@@ -73,7 +73,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.10"
+VERSION = "1.11"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -440,11 +440,11 @@ def _shuffle() -> Atom:
 def _hsl() -> Atom:
     lines = [
         "vec4 c = $input1(uv);",
-        "vec3 h = hsl_$(name)(c.rgb);",
-        "h.x += (2.0 * ($hue - 0.5));",
-        "h.y = clamp(h.y + (2.0 * ($saturation - 0.5)), 0.0, 1.0);",
-        "h.z = clamp(h.z + (2.0 * ($luminosity - 0.5)), 0.0, 1.0);",
-        "return vec4(rgb_$(name)(h), c.a);",
+        (
+            "vec3 o = vec3(12.0 * ($hue - 0.5), 2.0 * ($saturation - 0.5),"
+            " 2.0 * ($luminosity - 0.5));"
+        ),
+        "return vec4(hsl_$(name)(c.rgb, o), c.a);",
     ]
     return _shader_atom(
         "sbs_hsl", "HSL", "Substance's HSL: hue, saturation and lightness shifted.",

@@ -1556,27 +1556,25 @@ def _shuffle(node: Node, name: str, *, color: bool, size: int) -> Made:
     return shader(name, inputs, "rgba", "\n".join(lines)), ["input1", "input2"]
 
 
-HSL_GLSL = """vec3 hsl_$(name)(vec3 c) {
-\tfloat mx = max(c.r, max(c.g, c.b)); float mn = min(c.r, min(c.g, c.b));
-\tfloat l = (mx + mn) * 0.5; float d = mx - mn;
-\tif (d < 1e-9) return vec3(0.0, 0.0, l);
-\tfloat s = l <= 0.5 ? d / (mx + mn) : d / (2.0 - mx - mn);
-\tfloat h = mx == c.r ? mod((c.g - c.b) / d, 6.0)
-\t\t: (mx == c.g ? (c.b - c.r) / d + 2.0 : (c.r - c.g) / d + 4.0);
-\treturn vec3(fract(h / 6.0), s, l);
-}
-float hue_$(name)(float p, float q, float t) {
-\tt = fract(t);
-\tif (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
-\tif (t < 0.5) return q;
-\tif (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-\treturn p;
-}
-vec3 rgb_$(name)(vec3 hsl) {
-\tfloat q = hsl.z < 0.5 ? hsl.z * (1.0 + hsl.y) : hsl.z + hsl.y - hsl.z * hsl.y;
-\tfloat p = 2.0 * hsl.z - q;
-\treturn vec3(hue_$(name)(p, q, hsl.x + 1.0 / 3.0), hue_$(name)(p, q, hsl.x),
-\t\thue_$(name)(p, q, hsl.x - 1.0 / 3.0));
+# Substance's HSL: c shifted by o (hue in sixths of a turn, saturation,
+# lightness), hue from the smallest channel with its small offsets, as
+# the engine's own shader (hsl_c: 95.61% exact before, 99.9995% now).
+HSL_GLSL = """vec3 hsl_$(name)(vec3 c, vec3 o) {
+	float sc = max(1.0, max(c.r, max(c.g, c.b)));
+	c /= sc;
+	float mx = max(c.r, max(c.g, c.b));
+	vec4 m = c.r <= min(c.g, c.b) ? vec4(c.g, c.b, c.r, 3.0)
+		: (c.g <= min(c.r, c.b) ? vec4(c.b, c.r, c.g, 5.0) : vec4(c.r, c.g, c.b, 1.0));
+	float t = m.z + mx;
+	float d = mx - m.z;
+	vec3 h = vec3(m.w - ((0.000732421875 + m.x) - m.y) / (0.000244140625 + d),
+		d / (1.000244140625 - abs(1.0 - t)), 0.5 * t) + o;
+	h.yz = clamp(h.yz, 0.0, 1.0);
+	float x = h.x * (1.0 / 6.0);
+	float q = h.z + h.y * (0.5 - abs(0.5 - h.z));
+	vec3 w = clamp(abs(vec3(x - floor(x)) - vec3(0.5, 1.0 / 3.0, 2.0 / 3.0))
+		* vec3(6.0, -6.0, -6.0) + vec3(-1.0, 2.0, 2.0), 0.0, 1.0);
+	return mix(vec3(2.0 * h.z - q), vec3(q), w) * sc;
 }
 """
 
@@ -1588,11 +1586,11 @@ def _hsl(node: Node, name: str, *, color: bool, size: int) -> Made:
     p = {k: knob(k, k.capitalize(), v) for k, v in p.items()}
     lines = [
         "vec4 c = $input(uv);",
-        "vec3 h = hsl_$(name)(c.rgb);",
-        f"h.x += {num(2 * (p['hue'] - 0.5))};",
-        f"h.y = clamp(h.y + {num(2 * (p['saturation'] - 0.5))}, 0.0, 1.0);",
-        f"h.z = clamp(h.z + {num(2 * (p['luminosity'] - 0.5))}, 0.0, 1.0);",
-        "return vec4(rgb_$(name)(h), c.a);",
+        (
+            f"vec3 o = vec3({num(12 * (p['hue'] - 0.5))},"
+            f" {num(2 * (p['saturation'] - 0.5))}, {num(2 * (p['luminosity'] - 0.5))});"
+        ),
+        "return vec4(hsl_$(name)(c.rgb, o), c.a);",
     ]
     made = shader(name, [("input", "rgba")], "rgba", "\n".join(lines))
     made["shader_model"]["instance"] = HSL_GLSL + made["shader_model"]["instance"]
