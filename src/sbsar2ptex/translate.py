@@ -4250,8 +4250,8 @@ def stored(made: Sub, node: Node) -> bool:
     Substance keeps every node's image in the node's format, so an 8-bit
     node's value is rounded to 1/255 before anything reads it, a 16-bit
     one's to 1/65535 (thresholds downstream turn the difference into whole
-    pixels). Ties between 8-bit steps break down on NVIDIA GPUs (see
-    _levels); AMD's go through a half float (fxglsl.level8_amd_glsl);
+    pixels). 8-bit levels are the GPU's own (fxglsl.level8_glsl: AMD's
+    through a half float, NVIDIA's truncated to 2^-12, then ties down);
     16-bit levels are the GPU's own (fxglsl.level16_glsl: NVIDIA truncates
     to 2^-20 first). By _DMB_AMD. The output shader computes the
     unrounded value as ``$(name)_raw`` and its function returns that
@@ -4276,7 +4276,8 @@ def store_shader(out: dict[str, Any], steps: int | None, *, fill: bool = False) 
     As stored does: its function computes the value as ``$(name)_raw``.
     No steps (a float format), or a shader of its own code, is left as is.
     ``fill``: a uniform color's image, filled with its value, not drawn: at
-    8 bits the nearest, ties down, on AMD too (a gray of 1.3 / 3 is 111).
+    8 bits the nearest, ties down, on either GPU (a gray of 1.3 / 3 is 111,
+    the drawn stores' 110).
     """
     if steps is None:
         return False
@@ -4287,8 +4288,8 @@ def store_shader(out: dict[str, Any], steps: int | None, *, fill: bool = False) 
     ret, g = ("vec4", "vec4") if kind == "rgba" else ("float", "float")
     if steps != 255:  # noqa: PLR2004
         level = fxglsl.level16_glsl(g, amd=_DMB_AMD)
-    elif _DMB_AMD and not fill:
-        level = fxglsl.level8_amd_glsl(g)
+    elif not fill:
+        level = fxglsl.level8_glsl(g, amd=_DMB_AMD)
     else:  # the nearest, ties down
         level = f"\t{g} k = ceil(v * 255.0 - 0.5);\n"
     m["instance"] = m["instance"].replace("$(name)_fct(", "$(name)_raw(") + (

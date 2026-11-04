@@ -140,17 +140,20 @@ def level16_glsl(g: str, *, amd: bool) -> str:
     )
 
 
-def level8_amd_glsl(g: str) -> str:
-    """Return GLSL setting ``k`` (type ``g``) to the 8-bit level AMD stores v as.
+def level8_glsl(g: str, *, amd: bool) -> str:
+    """Return GLSL setting ``k`` (type ``g``) to the 8-bit level the GPU stores v as.
 
-    v is in [0, 1]: through a half float's 11 bits, truncated, then the
-    nearest (fxdraw.s8). Node stores too: check_filters' 8-bit blends, every
-    pixel from exact inputs.
+    v is in [0, 1]. AMD: through a half float's 11 bits, truncated, then the
+    nearest (fxdraw.s8). NVIDIA: truncated to 2^-12, then the nearest, ties
+    down (fxdraw.s8n). Node stores too: check_filters' 8-bit blends, every
+    pixel from exact inputs, on either.
     """
-    return (
-        f"\t{g} h = uintBitsToFloat(floatBitsToUint(v) & 4294959104u);\n"
-        f"\t{g} k = floor(h * 255.0 + 0.5);\n"
-    )
+    if amd:
+        return (
+            f"\t{g} h = uintBitsToFloat(floatBitsToUint(v) & 4294959104u);\n"
+            f"\t{g} k = floor(h * 255.0 + 0.5);\n"
+        )
+    return f"\t{g} k = floor((floor(v * 4096.0) * 255.0 + 2047.0) / 4096.0);\n"
 
 
 def store_glsl(layout: Layout) -> str:
@@ -163,10 +166,7 @@ def store_glsl(layout: Layout) -> str:
         body = level16_glsl("vec4", amd=layout.amd)
         out = "fxv_$(name)(k)"
     elif layout.bits == 8:  # noqa: PLR2004
-        if layout.amd:
-            body = level8_amd_glsl("vec4")
-        else:
-            body = "\tvec4 k = floor((floor(v * 4096.0) * 255.0 + 2047.0) / 4096.0);\n"
+        body = level8_glsl("vec4", amd=layout.amd)
         out = "fxv_$(name)(k * 257.0)"
     else:
         body, out = "", "v"
