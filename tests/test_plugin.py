@@ -106,6 +106,18 @@ def test_plugin_stores_are_the_gpus(monkeypatch) -> None:
         assert node["parameters"]["gpu"] == int(amd)
 
 
+def test_a_nearest_transformation_reads_one_texel() -> None:
+    # transform_nearx3_g/_c: a 3x zoom out reads mip level 2's texel q is in,
+    # not a bilinear mix of four (66.6% / 87.3% before, 100% now)
+    near = translate.transform_read_lines("input", ["3.0"] * 4, "256", "0",
+                                          color=False, nearest="true")  # fmt: skip
+    assert "bool tnear = true;" in near
+    assert "for (int k = 0; k < (L > 0 ? (tnear ? 1 : 4) : 1); k++) {" in near
+    t = plugin.definitions()["sbs_transformation_gray"]
+    assert "bool tnear = ($filtering == 1);" in t["shader_model"]["instance"]
+    assert t["parameters"]["filtering"] == 0
+
+
 def test_levels_is_a_plugin_node() -> None:
     maker = plugin.Maker(11)
     nodes, wires, outs = translated("levels_gray", maker)

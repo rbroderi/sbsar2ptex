@@ -73,7 +73,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.6"
+VERSION = "1.7"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -379,7 +379,7 @@ def _transformation(*, color: bool) -> Atom:
         f"if (($tiling & 2) == 0 && (q.y < 0.0 || q.y >= 1.0)) return {empty};",
         *transform_read_lines(
             "input1", [f"$matrix22_{k}" for k in "xyzw"], f"int({N})", "$format",
-            color=color, scale="exp2($inscale)",
+            color=color, scale="exp2($inscale)", nearest="($filtering == 1)",
         ),
     ]  # fmt: skip
     params = [
@@ -388,6 +388,7 @@ def _transformation(*, color: bool) -> Atom:
     ]
     params += [_float(f"offset_{k}", f"Offset {k}", 0.0, -1.0, 1.0) for k in "xy"]
     params.append(_enum("tiling", "Tiling mode", TILINGS, 3))
+    params.append(_enum("filtering", "Filtering", ("Bilinear", "Nearest"), 0))
     # the input's texels against the node's, log2 (translate_graph feeds it)
     params.append(_float("inscale", "Input scale (log2)", 0.0, -12.0, 12.0))
     return _shader_atom(
@@ -1153,6 +1154,7 @@ def _read_transformation(node: Node, k: _Knobs, *, color: bool) -> None:
     k.floats("matrix22", matrix, 4)
     k.floats("offset", offset, 2)
     k.plain("tiling", node.flags >> 8 & 3)
+    k.plain("filtering", int(not flags >> 5 & 1))  # flag word bit 5: 1 bilinear
 
 
 def _read_grayscale(node: Node, k: _Knobs, *, color: bool) -> None:

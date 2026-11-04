@@ -1453,6 +1453,10 @@ def levels_line(
         if got.shape[0] > want.shape[0]:  # exported larger: the shader's pixels
             k = got.shape[0] // want.shape[0]
             got = got[k // 2 :: k, k // 2 :: k]
+        if want.shape[0] > got.shape[0]:  # rendered larger (a node's own size,
+            # pp_param_var's 4096; the material exports at its own): its pixels
+            k = want.shape[0] // got.shape[0]
+            want = want[k // 2 :: k, k // 2 :: k]
         if ch == 3 and ref.shape[-1] < 4:
             want = np.full_like(got, 65535)
         if want.shape != got.shape:

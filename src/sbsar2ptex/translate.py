@@ -1287,11 +1287,14 @@ def transform_read_lines(
     *,
     color: bool,
     scale: str = "1.0",
+    nearest: str = "false",
 ) -> list[str]:
     """Return a transformation's last lines: its input ``$<inp>`` read at q.
 
     At level 0 (tmlevel, from ``matrix`` a, b, c, d: GLSL), at q itself;
-    past it bilinear (fractions to 1/256), wrapped, in that mip level of
+    past it bilinear (fractions to 1/256), or where ``nearest`` (GLSL bool:
+    nearest filtering) the texel q is in (transform_nearx3_g: level 2,
+    every pixel), wrapped, in that mip level of
     the input, of side ``n`` (the node's) times ``scale`` (GLSL: the input
     as fed, translate_graph's transform_in), stored in ``fmt`` (GLSL ints):
     each texel the level of its 4^L texels below, in Morton order, each
@@ -1305,13 +1308,14 @@ def transform_read_lines(
         f"int nin = int(float({n}) * sc + 0.5);",
         f"int L = tmlevel_$(name)(vec2({a}, {b}) * sc, vec2({c}, {d}) * sc, nin);",
         "int ml = nin >> L;",
-        "vec2 tt = fract(q) * float(ml) - 0.5;",
+        f"bool tnear = {nearest};",
+        "vec2 tt = fract(q) * float(ml) - (tnear ? 0.0 : 0.5);",
         "vec2 tb = floor(tt);",
-        "vec2 tf = floor((tt - tb) * 256.0 + 0.5) / 256.0;",
+        "vec2 tf = tnear ? vec2(0.0) : floor((tt - tb) * 256.0 + 0.5) / 256.0;",
         "ivec2 i0 = (ivec2(tb) + ml) % ml;",
         "vec4 acc = vec4(0.0);",
         f"vec4 v[{4 * MIP_LIVE_MAX}];",
-        "for (int k = 0; k < (L > 0 ? 4 : 1); k++) {",
+        "for (int k = 0; k < (L > 0 ? (tnear ? 1 : 4) : 1); k++) {",
         "\tivec2 corner = ivec2(k & 1, k >> 1);",
         "\tivec2 tc = (i0 + corner) % ml;",
         "\tvec2 w = mix(1.0 - tf, tf, vec2(corner));",
@@ -1437,6 +1441,8 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
     lines += transform_read_lines(
         "input", [num(x) for x in (a, b, c, d)], str(1 << size), str(fmt),
         color=color, scale=num(1.0 if minifies else scale),
+        # filtering, flag word bit 5: 1 bilinear, 0 nearest
+        nearest=str(not node.fields[0] >> 5 & 1).lower(),
     )  # fmt: skip
     made = shader(name, [("input", t)], t, "\n".join(lines))
     if minifies:
