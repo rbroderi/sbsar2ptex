@@ -25,10 +25,12 @@ from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.probe import COLOR
 from sbsar2ptex.probe import COOKER
+from sbsar2ptex.probe import FLOAT1
 from sbsar2ptex.probe import FLOAT2
 from sbsar2ptex.probe import FLOAT3
 from sbsar2ptex.probe import FLOAT4
 from sbsar2ptex.probe import GRAY
+from sbsar2ptex.probe import INT1
 from sbsar2ptex.probe import const
 from sbsar2ptex.probe import cook
 from sbsar2ptex.probe import curve_array
@@ -898,6 +900,30 @@ def fxmap_cases() -> list[dict]:
         for tag, inputs in (("fx_nearest_rows_g", {"a": "noise"}),
                             ("fx_nearest_s8_g", {"a": "strip", "b": "smooth"}))
     ]  # fmt: skip
+    # Biomech's n1500: the image index reads a variable the opacity
+    # function sets from a sample, so it is evaluated after it, in GLSL
+    # (each copy input A or B).
+    pick = '<constantValueString v="k"/>'
+    noisy = fn("samplelum", pos=vec2(lin(0.0833, 0.04), const(0.5)),
+               data='<constantValueInt2 v="0 0"/>')  # fmt: skip
+    chooses = fn("sequence", FLOAT1,
+                 seqin=fn("set", FLOAT1, data=pick,
+                          value=fn("mul", a=noisy, b=const(1.999))),
+                 seqout=const(1.0))  # fmt: skip
+    picked = pat(
+        1,
+        ("imagefiltering", i1, "2"),
+        ("blendingmode", i1, "1"),
+        ("patternsize", f2, "0.2 0.2"),
+        dyn("frameoffset", vec2(lin(0.0833, -0.4583), lin(0.0791, -0.4166))),
+        dyn("opacity", chooses),
+        dyn("imageindex", fn("toint1", INT1, value=get("k"))),
+    )
+    out.append(
+        {"tag": "fx_image_var_g", "filter": "fxmaps", "kind": GRAY, "params": flat,
+         "extra": fxmap_graph(fx("iterate", (("numberadded", i1, "12"),), {1: picked})),
+         "connect": 2, "format16": True, "inputs": {"a": "noise", "b": "strip"}}
+    )  # fmt: skip
     # Patterns larger than the map, many: baked (fxsplat.bake).
     blob = pat(
         6,  # gaussian
