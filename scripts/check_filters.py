@@ -1094,6 +1094,19 @@ def fxdraw_cases() -> list[dict]:
             params.append(("tilingroi", F4, tiling))
         out.append({**small, "tag": f"x_region{k}", "kind": GRAY,
                     "params": tuple(params), "extra": four})  # fmt: skip
+    # Turned gradations at 2048 px: the GPU interpolates q over the splat's
+    # triangle, a float32 step off near q = 0 (Biomech's n2, a quarter turn)
+    grad = {"filter": "fxmaps", "kind": GRAY, "params": (("hurst", "constantValueFloat1", "1"),),
+            "connect": 0, "format16": True}  # fmt: skip
+    for tag, size, off, rot in (
+        ("x_grad_q", (), (), 0.25),
+        ("x_grad_0", (), (), 0.0),
+        ("x_grad_r1", (0.8,), (), 0.1),
+        ("x_grad_r37", (0.6, 0.9), (0.1, -0.05), 0.37),
+        ("x_grad_r6", (0.35, 0.5), (0.13, 0.21), 0.6),
+    ):
+        out.append({**grad, "tag": tag,
+                    "extra": fxmap_graph(_fx_pat(10, size, off, rot))})  # fmt: skip
     return out
 
 
