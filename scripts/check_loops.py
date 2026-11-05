@@ -38,6 +38,7 @@ from PIL import Image
 from sbsar2ptex import library
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
+from sbsar2ptex.fxglsl import encode16_glsl
 from sbsar2ptex.loops import slope_blurs
 from sbsar2ptex.probe import BRIDGE_PARAMETERS
 from sbsar2ptex.probe import COOKER
@@ -197,13 +198,7 @@ def test_images(out: Path, size: int) -> dict[str, Path]:
 
 def encoded(mm_nodes: list, wires: list, source: tuple[str, int], size: int) -> dict:
     """Return a graph: ``source``'s 16-bit level as the albedo's red (high), green."""
-    enc = shader(
-        "enc", [("input", "f")], "rgba",
-        "float k = floor(clamp($input(uv), 0.0, 1.0) * 65535.0 + 0.5);\n"
-        "float h = floor(k / 256.0);\n"
-        # a quarter step up: whole steps whether the export rounds or truncates
-        "return vec4(h, k - 256.0 * h, 0.0, 255.0) / 255.0 + 0.25 / 255.0;",
-    )  # fmt: skip
+    enc = shader("enc", [("input", "f")], "rgba", encode16_glsl("$input(uv)"))
     material = {
         "name": "Material", "type": "material", "node_position": {"x": 3000, "y": 0},
         "export_paths": {}, "seed_int": 0,

@@ -40,6 +40,8 @@ from sbsar2ptex.function import decode
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.translate import BLEND_MIX_GRAY
+from sbsar2ptex.translate import BLEND_MIX_RGB
 from sbsar2ptex.translate import BLEND_MODES
 from sbsar2ptex.translate import BLEND_NAMES
 from sbsar2ptex.translate import CROP_SIDES
@@ -76,7 +78,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.18"
+VERSION = "1.19"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -343,13 +345,12 @@ def _blend(*, color: bool) -> Atom:
             "if ($blendingmode == 7) return mix(d, s, o);",
             "vec4 f = sbs_blend_mode($blendingmode, s, d);",
             "float k = o * s.a;",
-            "vec3 rgb = clamp(d.rgb + (f.rgb - d.rgb) * k, 0.0, 1.0);",
-            "return vec4(rgb, k + d.a * (1.0 - k));",
+            *BLEND_MIX_RGB,
         ]
     else:
         lines += [
             "vec4 f = sbs_blend_mode($blendingmode, s, d);",
-            "return clamp(d.x + (f.x - d.x) * o, 0.0, 1.0);",
+            *BLEND_MIX_GRAY,
         ]
     names = {1: "Add (linear dodge)", 5: "Max (lighten)", 6: "Min (darken)"}
     modes = [names.get(m, BLEND_NAMES[m]) for m in range(12)]

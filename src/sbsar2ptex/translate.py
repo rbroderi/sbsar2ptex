@@ -1178,6 +1178,31 @@ def crop_glsl(crop: Sequence[str], n: str, *, color: bool) -> str:
     )
 
 
+BLEND_MIX_GRAY = [
+    "precise float bk = d.x * (1.0 - o);",
+    "precise float bf = f.x * o;",
+    "precise float bv = bk + bf;",
+    "return clamp(bv, 0.0, 1.0);",
+]
+"""A grayscale blend's last lines: d (1 - o) + f o, in Substance's float32 order.
+
+Unfused (precise), as its shaders compute it: a 16-bit blend's half-level
+ties round by those last bits. d + (f - d) o, or a fused multiply-add,
+round some the other way: Biomech's n2370, a quarter of an FX-Map over a
+gray, is 99.88% of Substance's levels this way, 94.07% as d + (f - d) o.
+"""
+BLEND_MIX_RGB = [
+    "precise vec3 bk = d.rgb * (1.0 - k);",
+    "precise vec3 bf = f.rgb * k;",
+    "precise vec3 bv = bk + bf;",
+    "precise float ba = k * (1.0 - d.a);",
+    "precise float bt = d.a + ba;",
+    "return vec4(clamp(bv, 0.0, 1.0), bt);",
+]
+"""A color blend's last lines: BLEND_MIX_GRAY's order, k the opacity times
+the source's alpha; alpha d.a + k (1 - d.a)."""
+
+
 def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
     t = "rgba" if color else "f"
     flags = node.fields[0]
@@ -1234,8 +1259,7 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
             lines += [
                 f"vec4 f = {expr};",
                 "float k = o * s.a;",
-                "vec3 rgb = clamp(d.rgb + (f.rgb - d.rgb) * k, 0.0, 1.0);",
-                "return vec4(rgb, k + d.a * (1.0 - k));",
+                *BLEND_MIX_RGB,
             ]
     else:
         lines = [
@@ -1243,7 +1267,7 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
             outside,
             f"float o = {o};",
             f"vec4 f = {expr};",
-            "return clamp(d.x + (f.x - d.x) * o, 0.0, 1.0);",
+            *BLEND_MIX_GRAY,
         ]
     return shader(name, inputs, t, "\n".join(lines)), [i for i, _ in inputs]
 

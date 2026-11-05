@@ -25,6 +25,7 @@ from sbsar2ptex import plugin
 from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
+from sbsar2ptex.fxglsl import encode16_glsl
 from sbsar2ptex.probe import COLOR
 from sbsar2ptex.probe import COOKER
 from sbsar2ptex.probe import FLOAT1
@@ -508,6 +509,17 @@ def warp_cases() -> list[tuple | dict]:
              (("intensity", F1, "30"), ("warpangle", F1, "0.5")), 1),
         )
     ]  # fmt: skip
+    # A quarter of the ramp over a gray (Biomech's n2370, a warp's
+    # intensity): a quarter of the levels are half-level ties, which
+    # Substance's order d (1 - o) + s o rounds. (The gray over the ramp
+    # would weigh Material Maker's 8-bit read of the gray, a float32 step
+    # up from 128 / 255, three times as much.)
+    deep.append(
+        {"tag": "blendq_ramp16_g", "filter": "blend", "kind": GRAY, "chain": ramp16,
+         "chain_to": 0, "format16": True, "connect": 2,
+         "inputs": {"a": "gray128", "b": "gray128"},
+         "params": (("opacitymult", F1, "0.25"),)}
+    )  # fmt: skip
     dw, wp = "directionalwarp", "warp"
     out = [
         (f"dwarp{tag}_g", dw, GRAY, (("intensity", F1, i), ("warpangle", F1, a)))
@@ -1401,6 +1413,9 @@ def test_images(out: Path, size: int = SIZE) -> dict[str, Path]:  # noqa: PT028
         "noise": np.random.default_rng(7).integers(0, 256, (n, n)) / 255,
         "strip": strip(n),
         "smooth": 0.5 + 0.35 * np.sin(2 * np.pi * (1.3 * y + 0.1)) + 0.1 * x,
+        # an 8-bit gray, as Biomech's n2368 (127, n2370's background); 128,
+        # as Material Maker reads 127 as 127 (1/255), a float32 step up
+        "gray128": np.full((n, n), 128 / 255),
     }
     color = {
         "A": np.stack(
@@ -1477,13 +1492,7 @@ def material_graph(
         material["parameters"]["flags_transparent"] = False
         kind = "rgba" if color else "f"
         pick = f"$input(uv)[{channel}]" if color else "$input(uv)"
-        enc = shader(
-            "export", [("input", kind)], "rgba",
-            f"float k = floor(clamp({pick}, 0.0, 1.0) * 65535.0 + 0.5);\n"
-            "float h = floor(k / 256.0);\n"
-            # a quarter step up: whole steps whether the export rounds or truncates
-            "return vec4(h, k - 256.0 * h, 0.0, 255.0) / 255.0 + 0.25 / 255.0;",
-        )  # fmt: skip
+        enc = shader("export", [("input", kind)], "rgba", encode16_glsl(pick))
         wires = [
             *wires,
             {"from": source[0], "from_port": source[1], "to": "export", "to_port": 0},

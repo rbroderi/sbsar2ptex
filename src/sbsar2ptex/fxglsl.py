@@ -140,6 +140,23 @@ def level16_glsl(g: str, *, amd: bool) -> str:
     )
 
 
+def encode16_glsl(value: str) -> str:
+    """Return a shader body exporting ``value``'s 16-bit level in two 8-bit channels.
+
+    The level is the nearest, exactly (level16_glsl's AMD lines), as
+    Substance stores a 16-bit image: v 65535 + 1/2 in float32 rounds a
+    value a hair under a half-level tie up (a 16-bit blend's ties, a quarter
+    of its pixels). The high byte goes in red, the low in green, a quarter
+    step up: whole steps whether the export rounds or truncates.
+    """
+    return (
+        f"float v = clamp({value}, 0.0, 1.0);\n"
+        + level16_glsl("float", amd=True)
+        + "float h = floor(k / 256.0);\n"
+        "return vec4(h, k - 256.0 * h, 0.0, 255.0) / 255.0 + 0.25 / 255.0;"
+    )
+
+
 def level8_glsl(g: str, *, amd: bool) -> str:
     """Return GLSL setting ``k`` (type ``g``) to the 8-bit level the GPU stores v as.
 

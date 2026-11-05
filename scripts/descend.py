@@ -76,6 +76,7 @@ from sbsar2ptex import translate
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.convert import describe
+from sbsar2ptex.fxglsl import encode16_glsl
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import OPS
 from sbsar2ptex.sbsasm import Asm
@@ -334,13 +335,11 @@ def build(
         })  # fmt: skip
         g["connections"].append({"from": src, "from_port": 0, "to": out, "to_port": 0})
     if levels16:
-        g["nodes"].append(shader(
-            f"{out}_levels", [("input", "f")], "rgba",
-            "float k = floor(clamp($input(uv), 0.0, 1.0) * 65535.0 + 0.5);\n"
-            "float h = floor(k / 256.0);\n"
-            # a quarter step up: whole steps whether the export rounds or truncates
-            "return vec4(h, k - 256.0 * h, 0.0, 255.0) / 255.0 + 0.25 / 255.0;",
-        ))  # fmt: skip
+        g["nodes"].append(
+            shader(
+                f"{out}_levels", [("input", "f")], "rgba", encode16_glsl("$input(uv)")
+            )
+        )
         g["connections"].append(
             {"from": out, "from_port": 0, "to": f"{out}_levels", "to_port": 0}
         )
