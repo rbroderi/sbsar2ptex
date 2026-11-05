@@ -39,7 +39,10 @@ from sbsar2ptex import fxdraw
 from sbsar2ptex import fxglsl
 from sbsar2ptex import fxmap
 from sbsar2ptex import fxsplat
+from sbsar2ptex.function import ENGINE_TRIG_GLSL
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
+from sbsar2ptex.function import TRIG_OPS
+from sbsar2ptex.function import Block
 from sbsar2ptex.function import FunctionError
 from sbsar2ptex.function import bounds
 from sbsar2ptex.function import decode
@@ -353,6 +356,18 @@ def input_params(gi: GraphInput) -> tuple[list[dict[str, Any]], str]:
     return params, glsl
 
 
+def _engine_trig(block: Block) -> bool:
+    """Return whether ``block`` has trig to compute as the cooker's CPU does.
+
+    If so, adds the GLSL computing it to the node's global code.
+    """
+    if not any(i.op in TRIG_OPS for i in block.instrs):
+        return False
+    if ENGINE_TRIG_GLSL not in _CTX.globals:
+        _CTX.globals.append(ENGINE_TRIG_GLSL)
+    return True
+
+
 def _sample(kind: str, index: int, pos: str, filtering: int) -> str:
     """Return GLSL sampling a pixel processor's input ``index`` at ``pos``.
 
@@ -445,6 +460,7 @@ def dynamic(node: Node, offset: int, before: Sequence[int] = ()) -> GLExpr:
             pre_lines, _ = to_glsl(
                 pre, f"f{_CTX.count}", param, builtins, None,
                 lambda a, _k: f"sbs_value_rng_next(rng, float({a}))", shared,
+                engine_trig=_engine_trig(pre),
             )  # fmt: skip
             if any(i.op == RAND for i in pre.instrs):
                 pre_lines.insert(0, f"uint rng = uint({_CTX.value_seed});")
@@ -453,8 +469,9 @@ def dynamic(node: Node, offset: int, before: Sequence[int] = ()) -> GLExpr:
             first += ["{", *pre_lines, "}"]
         first[:0] = [f"{t} {v} = {t}(0);" for v, t in shared.values()]
         lines, result = to_glsl(
-            block, prefix, param, builtins, _sample, _rand, shared or None
-        )
+            block, prefix, param, builtins, _sample, _rand, shared or None,
+            engine_trig=_CTX.sampled is None and _engine_trig(block),
+        )  # fmt: skip
         values = {
             uid: [float(x) for x in gi.default] or [0.0]
             for uid, gi in _CTX.inputs.items()
@@ -3322,6 +3339,7 @@ def _fx_function(node: Node, offset: int, parameter: str = "frameoffset") -> str
             _sample,
             rand,
             _CTX.fx_variables,
+            engine_trig=_engine_trig(block),
         )
     except FunctionError as e:
         raise UnsupportedError(str(e)) from e

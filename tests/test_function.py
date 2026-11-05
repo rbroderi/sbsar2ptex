@@ -1,17 +1,23 @@
 """Function bytecode: decoding, evaluating, and choosing a node's blocks."""
 
+import math
 import struct
 
 import numpy as np
 
 from sbsar2ptex.function import BOOL
+from sbsar2ptex.function import ENGINE_TRIG_GLSL
 from sbsar2ptex.function import FLOAT
 from sbsar2ptex.function import INT
 from sbsar2ptex.function import NO_VALUE
 from sbsar2ptex.function import Block
 from sbsar2ptex.function import Instr
 from sbsar2ptex.function import decode
+from sbsar2ptex.function import engine_cos
+from sbsar2ptex.function import engine_sin
 from sbsar2ptex.function import evaluate
+from sbsar2ptex.function import f32
+from sbsar2ptex.function import to_glsl
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import _seed_block
 
@@ -86,3 +92,36 @@ def test_mod_is_float32_each_step_rounded() -> None:
     mod = Instr(op=0x16, type=FLOAT, width=1, operands=[0, 1])
     got = evaluate(Block([const(float(a)), const(float(b)), mod]), {})
     assert got == [float(a - b * np.floor(a / b))] == [449536.0]
+
+
+def test_trig_is_the_cookers_polynomial() -> None:
+    # Its sin(2 pi t) = t (c1 - t^2 (c3 - t^2 (c5 - t^2 c7))) is 1 at a
+    # quarter turn to float32's precision and over sin by up to 1.42e-5, at
+    # t ~ 0.22 (and 0.28, folded about the quarter); Biomech's n2369 puts
+    # its gaussians with it (92.4% of pixels exact at 16 bits with math's sin
+    # and cos, 98.5% with these).
+    assert abs(engine_sin(math.pi / 2) - 1) < 1.2e-7
+    assert abs(engine_cos(0.0) - 1) < 1.2e-7
+    ts = np.linspace(-0.5, 0.5, 2001)
+    over = [engine_sin(2 * math.pi * t) - math.sin(2 * math.pi * t) for t in ts]
+    assert min(over[1000:]) > -1e-6
+    assert 1.35e-5 < max(over) < 1.5e-5
+    peak = abs(float(ts[int(np.argmax(over))]))
+    assert abs(min(peak, 0.5 - peak) - 0.22) < 0.01
+    # cartesian(rho, theta), the FX-Map branch offsets' op, uses them
+    theta = 1.3
+    cart = Instr(op=0x2E, type=FLOAT, width=2, operands=[0, 1])
+    got = evaluate(Block([const(1.5), const(theta), cart]), {})
+    assert got == [f32(1.5 * engine_cos(f32(theta))), f32(1.5 * engine_sin(f32(theta)))]
+    assert got[0] != f32(1.5 * f32(math.cos(f32(theta))))
+
+
+def test_cpu_functions_compute_trig_as_the_cooker_in_glsl() -> None:
+    theta = Instr(op=0x00, type=FLOAT, width=1, operands=[0, 0x3FA6])
+    blk = Block([theta, Instr(op=0x26, type=FLOAT, width=1, operands=[0]),
+                 Instr(op=0x2E, type=FLOAT, width=2, operands=[0, 1])])  # fmt: skip
+    plain, _ = to_glsl(blk, "f", lambda *_: "", lambda *_: "")
+    cooked, _ = to_glsl(blk, "f", lambda *_: "", lambda *_: "", engine_trig=True)
+    assert "sbs_" not in "".join(plain)
+    assert "sbs_cos(f_0)" in cooked[1] and "sbs_sin(f_1)" in cooked[2]  # noqa: PT018
+    assert "float sbs_sin(float x)" in ENGINE_TRIG_GLSL

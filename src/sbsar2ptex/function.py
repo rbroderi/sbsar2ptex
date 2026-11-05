@@ -177,6 +177,40 @@ def _mod(a: float, b: float, kind: int) -> float:
     return f32(a - f32(b * math.floor(f32(a / b))))
 
 
+_TURN = f32(1 / (2 * math.pi))
+_QUARTER = f32(math.pi / 2)
+_SIN = (f32(2 * math.pi), f32(41.3417015), f32(81.6052475), f32(74.1371841))
+"""sin(2 pi t) ~ t (c1 - t^2 (c3 - t^2 (c5 - t^2 c7))) on [-1/4, 1/4]: the
+cooker's function evaluator's polynomial (its c7 makes sin(pi / 2) 1 to
+float32's precision; Taylor's 76.7 would leave it 1.6e-4 low). Its error
+peaks at 1.4e-5 by t = 0.22; an FX-Map's splats are where its cartesian puts
+them (Biomech's n2369: 92.4% of pixels
+exact at 16 bits with math.sin, 98.5% with this)."""
+
+
+def engine_sin(x: float) -> float:
+    """Return sin(x) as the cooker's function evaluator does, in float32."""
+    if not math.isfinite(x):
+        return math.nan
+    t = f32(x * _TURN)
+    t = f32(t - round(t))  # [-1/2, 1/2], halves to even as rint
+    if t > 0.25:  # noqa: PLR2004 - sin(pi - a) = sin(a)
+        t = f32(0.5 - t)
+    elif t < -0.25:  # noqa: PLR2004
+        t = f32(-0.5 - t)
+    c1, c3, c5, c7 = _SIN
+    t2 = f32(t * t)
+    p = f32(c5 - f32(c7 * t2))
+    p = f32(f32(p * t2) - c3)
+    p = f32(f32(p * t2) + c1)
+    return f32(p * t)
+
+
+def engine_cos(x: float) -> float:
+    """Return cos(x) as the cooker's function evaluator does: sin(x + pi / 2)."""
+    return engine_sin(f32(f32(x) + _QUARTER))
+
+
 def _guard(fn: Callable[[float], float]) -> Callable[[float], float]:
     def safe(a: float) -> float:
         try:
@@ -209,8 +243,8 @@ _UNARY: dict[int, Callable[[float], Any]] = {
     0x23: abs,
     0x24: _guard(math.floor),
     0x25: _guard(math.ceil),
-    0x26: _guard(math.cos),
-    0x27: _guard(math.sin),
+    0x26: engine_cos,
+    0x27: engine_sin,
     0x28: lambda a: math.sqrt(a) if a >= 0 else math.nan,
     0x29: lambda a: math.log(a) if a > 0 else -math.inf,
     0x2A: _guard(math.exp),
@@ -301,7 +335,7 @@ def evaluate(
             v = [math.atan2(y, x)]
         elif op == 0x2E:  # noqa: PLR2004
             rho, theta = vals[ops[0]][0], vals[ops[1]][0]
-            v = [f32(rho * f32(math.cos(theta))), f32(rho * f32(math.sin(theta)))]
+            v = [f32(rho * engine_cos(theta)), f32(rho * engine_sin(theta))]
         elif op == 0x2F:  # noqa: PLR2004
             a, b = _spread(vals[ops[0]], vals[ops[1]])
             t = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
@@ -539,6 +573,29 @@ _GLSL_UNARY = {
 }  # fmt: skip
 
 
+TRIG_OPS = (0x26, 0x27, 0x2E)
+"""cos, sin, cartesian: what engine_sin and engine_cos compute."""
+
+ENGINE_TRIG_GLSL = """
+float sbs_sin(float x) {
+	precise float t = x * 0.159154937;
+	t = t - roundEven(t);
+	t = t > 0.25 ? 0.5 - t : (t < -0.25 ? -0.5 - t : t);
+	precise float t2 = t * t;
+	precise float p = 81.6052475 - 74.1371841 * t2;
+	p = p * t2 - 41.3417015;
+	p = p * t2 + 6.28318548;
+	return p * t;
+}
+float sbs_cos(float x) {
+	precise float a = x + 1.57079637;
+	return sbs_sin(a);
+}
+"""
+"""engine_sin and engine_cos in GLSL, for functions the cooker evaluates on
+the CPU (an FX-Map's, a parameter's); ``precise`` keeps each step rounded."""
+
+
 def to_glsl(
     block: Block,
     prefix: str,
@@ -547,6 +604,8 @@ def to_glsl(
     samples: Callable[[str, int, str, int], str] | None = None,
     rand: Callable[[str, int], str] | None = None,
     variables: Mapping[int, tuple[str, str]] | None = None,
+    *,
+    engine_trig: bool = False,
 ) -> tuple[list[str], str]:
     """Return GLSL statements computing ``block`` and the name of its value.
 
@@ -558,7 +617,10 @@ def to_glsl(
     k)`` a random value in [0, a) for instruction k. ``variables`` maps
     variables shared beyond the block (an FX-Map's) to a GLSL global and
     its type, which the block reads and writes instead of locals.
+    ``engine_trig`` computes cos, sin and cartesian with ENGINE_TRIG_GLSL's
+    functions (the caller adds them), as the cooker's CPU evaluator does.
     """
+    cos, sin = ("sbs_cos", "sbs_sin") if engine_trig else ("cos", "sin")
     lines: list[str] = []
     names: list[str] = []
     kinds: list[tuple[int, int]] = []
@@ -627,7 +689,9 @@ def to_glsl(
             expr = f"atan({v(ops[0])}.y, {v(ops[0])}.x)"
         elif ins.op == 0x2E:  # noqa: PLR2004
             r, th = v(ops[0]), v(ops[1])
-            expr = f"vec2({r} * cos({th}), {r} * sin({th}))"
+            expr = f"vec2({r} * {cos}({th}), {r} * {sin}({th}))"
+        elif ins.op in (0x26, 0x27):
+            expr = f"{cos if ins.op == 0x26 else sin}({v(ops[0])})"  # noqa: PLR2004
         elif ins.op == 0x2F:  # noqa: PLR2004
             expr = f"mix({v(ops[0])}, {v(ops[1])}, {v(ops[2])})"
         elif ins.op == 0x32 and rand is not None:  # noqa: PLR2004
