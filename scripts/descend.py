@@ -663,6 +663,11 @@ class Search:
         o = load(png, 3 if color else 1, self.side)
         if alpha:
             o = np.concatenate([o, load(alpha_png, 1, self.side)[..., None]], axis=-1)
+        if o.shape[0] > t.shape[0]:
+            # --exact keeps sizes: a node smaller than the graph (Biomech's
+            # 32-pixel n1398) exports at the graph's, each texel a block
+            k = o.shape[0] // t.shape[0]
+            o = o[k // 2 :: k, k // 2 :: k]
         if magnify:
             t = magnified(t, *magnify)
         result, text, self.corr[node] = (compare_color if color else compare)(

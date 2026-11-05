@@ -76,7 +76,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.16"
+VERSION = "1.17"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -506,28 +506,33 @@ INPUT8 = _bool("input8", "8-bit input", default=False)
 
 
 def _by_format(g: str, body: Any, second: str) -> tuple[str, str]:
-    """Return a warp's helpers and body: warp_glsl's for each format, by $format.
+    """Return a warp's helpers and body: warp_glsl's for each format and GPU.
 
-    ``body`` is the body for helpers named ``$(name)_`` (a function of
-    nothing, read once per format); ``second`` its second input's key,
-    whose 8 bits are a setting (EIGHT), as the input's are (INPUT8).
+    By $format and $gpu: its bilinear read, rounding and stores are the
+    GPU's (translate._DMB_AMD), as the inline translation's are (warp_g:
+    88.96% of 16-bit levels as AMD's with NVIDIA's, 100% now). ``body`` is
+    the body for helpers named ``$(name)_`` (a function of nothing, read
+    once per format and GPU); ``second`` its second input's key, whose 8
+    bits are a setting (EIGHT), as the input's are (INPUT8).
     """
-    helpers, calls = [WARP_GLSL], []
+    helpers, lines = [WARP_GLSL], []
     eight = ("$input8", f"${EIGHT[second]['name']}")
-    for fmt in (0, 1, 2):
-        tag = f"$(name)_v{fmt}_"
-        glsl = warp_glsl(g, fmt, N, "$input1", eight=eight)
-        helpers.append(glsl.replace("$(name)_", tag))
-        helpers.append(
-            f"{g} {tag}body(vec2 uv) {{\n{body().replace('$(name)_', tag)}\n}}\n"
-        )
-        calls.append(f"{tag}body(uv)")
-    text = (
-        f"if ($format == 0) return {calls[0]};\n"
-        f"if ($format == 1) return {calls[1]};\n"
-        f"return {calls[2]};"
-    )
-    return "".join(helpers), text
+    saved = translate._DMB_AMD  # noqa: SLF001
+    try:
+        for amd in (False, True):
+            translate._DMB_AMD = amd  # noqa: SLF001
+            for fmt in (0, 1, 2):
+                tag = f"$(name)_v{fmt}{'a' if amd else 'n'}_"
+                glsl = warp_glsl(g, fmt, N, "$input1", eight=eight)
+                helpers.append(glsl.replace("$(name)_", tag))
+                code = body().replace("$(name)_", tag)
+                helpers.append(f"{g} {tag}body(vec2 uv) {{\n{code}\n}}\n")
+                cond = f"$gpu == {int(amd)} && $format == {fmt}"
+                lines.append(f"if ({cond}) return {tag}body(uv);")
+    finally:
+        translate._DMB_AMD = saved  # noqa: SLF001
+    lines[-1] = f"return {lines[-1].split(' return ')[1]}"
+    return "".join(helpers), "\n".join(lines)
 
 
 def _warp(*, color: bool) -> Atom:

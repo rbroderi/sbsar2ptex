@@ -355,6 +355,16 @@ def cases() -> list[tuple]:
             "",
             True,
         ),
+        # Biomech's n1643: a warp of a tiny intensity, its shift far
+        # below a texel
+        (
+            "warp_tiny_g",
+            "warp",
+            GRAY,
+            (("intensity", F1, "0.0021875"),),
+            "",
+            True,
+        ),
         # Biomech's n667 (and each cell's blur above n725): a fractional
         # radius (25.76 texels), so the box's end taps weigh less than one
         ("blur322_g", "blur", GRAY, (("intensity", F1, "3.22"),), "", True),

@@ -129,6 +129,20 @@ def test_plugin_blurs_store_as_the_gpu() -> None:
     assert "4096.0 + c" in dmb
 
 
+def test_plugin_warps_read_as_the_gpu() -> None:
+    # a warp's bilinear read and rounding are $gpu's, as the inline
+    # translation's are (warp_g on AMD: 88.96% with NVIDIA's, 100% now)
+    for atom in ("sbs_warp_gray", "sbs_directionalwarp_gray"):
+        code = plugin.definitions()[atom]["shader_model"]["instance"]
+        for gpu, tag in ((0, "n"), (1, "a")):
+            assert (
+                f"if ($gpu == {gpu} && $format == 1) return $(name)_v1{tag}_body(uv);"
+                in code
+            )
+        assert "roundEven(" in code  # AMD's
+        assert "+ 0.5)" in code  # NVIDIA's
+
+
 def test_a_nearest_transformation_reads_one_texel() -> None:
     # transform_nearx3_g/_c: a 3x zoom out reads mip level 2's texel q is in,
     # not a bilinear mix of four (66.6% / 87.3% before, 100% now)
