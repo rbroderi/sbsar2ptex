@@ -76,7 +76,7 @@ from sbsar2ptex.translate import warp_body
 from sbsar2ptex.translate import warp_glsl
 from sbsar2ptex.translate import wire
 
-VERSION = "1.15"
+VERSION = "1.16"
 """The plugin's version: graphs require it (``requires``)."""
 PLUGIN_ID = "sbs"
 N = "$pass_size.x"
@@ -603,7 +603,8 @@ def _emboss(*, color: bool) -> Atom:
         "float h = $inputgradient(uv);",
         (
             "vec2 g = vec2(h - $inputgradient(fract(uv - e)),"
-            " h - $inputgradient(fract(uv - e.yx)));"
+            " h - $inputgradient(fract(uv - e.yx)))"
+            " * vec2($pixelsize_x, $pixelsize_y);"
         ),
         f"vec2 light = vec2(cos({a}), sin({a}));",
         f"float s = (($intensity * {N}) / 256.0) * dot(g, light);",
@@ -625,14 +626,17 @@ def _emboss(*, color: bool) -> Atom:
     return _shader_atom(
         f"sbs_emboss{sfx}", "Emboss",
         "Substance's Emboss: the input lit by the intensity input's slope along"
-        " the light angle (turns).",
+        " the light angle (turns), its x and y each times the node's pixel"
+        " size.",
         [Port("input1", t, "Input", "input"),
          Port("inputgradient", "f", "Intensity input", "gradient")],
         t, "\n".join(lines),
         [_float("intensity", "Intensity", 5.0, 0.0, 16.0),
          _float("lightangle", "Light angle", 0.0, 0.0, 1.0),
          _value("highlightcolor", "Highlight color", 1.0, color=color),
-         _value("shadowcolor", "Shadow color", 0.0, color=color)],
+         _value("shadowcolor", "Shadow color", 0.0, color=color),
+         _float("pixelsize_x", "Pixel size x", 1.0, 0.0, 4.0),
+         _float("pixelsize_y", "Pixel size y", 1.0, 0.0, 4.0)],
     )  # fmt: skip
 
 
@@ -1230,6 +1234,7 @@ def _read_emboss(node: Node, k: _Knobs, *, color: bool) -> None:
     k.float("lightangle", p["angle"])
     k.value("highlightcolor", p["highlight"], color=color)
     k.value("shadowcolor", p["shadow"], color=color)
+    k.floats("pixelsize", translate.emboss_scale(node), 2)
 
 
 def _read_distance(node: Node, k: _Knobs, *, color: bool) -> None:

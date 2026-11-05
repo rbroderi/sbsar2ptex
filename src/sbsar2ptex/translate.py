@@ -3030,11 +3030,56 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
     return buffered(made, ["input"], {"input"}, size, precise={"input"})
 
 
+EMBOSS_SETTINGS = (1, 3, 5, 7)
+"""An emboss's settings' flag bit positions (intensity, angle, highlight, shadow)."""
+
+
+def emboss_scale_block(node: Node) -> int | None:
+    """Return the offset of an emboss's pixel size function; None if it has none.
+
+    It is the node's last code block: its Pixel Size (a hidden float2
+    setting, check_filters emboss_px_g), which multiplies the slope along x
+    and y. Substance's default is 1 at any size (2^min of the size's
+    log2s); Biomech's n4291 and n4287 have 0.1 * 2048 / $size, 0.1 at 2048
+    pixels, which makes the slope ten times smaller. A setting a function
+    drives may own that block instead (_dynamic_offset): then there is
+    none.
+    """
+    states = [(node.fields[0] >> bit) & 3 for bit in EMBOSS_SETTINGS]
+    if len(node.code) < 2 or 2 in states:  # noqa: PLR2004 (a function's)
+        return None
+    return node.code[-1]
+
+
+def emboss_scale(node: Node) -> list[float]:
+    """Return an emboss's pixel size (emboss_scale_block) at the node's size.
+
+    For a value that cannot follow the graph live (the sbs plugin's knobs):
+    one that reads a graph input or the pixel raises UnsupportedError.
+    """
+    at = emboss_scale_block(node)
+    if at is None:
+        return [1.0, 1.0]
+    block = decode(node.at(at, (node.end - at) // 4))
+    n = float(1 << _CTX.size)
+    try:
+        v = evaluate(block, {}, {1: [n, n], 3: [float(_CTX.size)] * 2})
+    except (FunctionError, KeyError) as e:
+        msg = "an emboss's pixel size reads more than the size"
+        raise UnsupportedError(msg) from e
+    if len(v) != 2:  # noqa: PLR2004
+        msg = "an emboss's pixel size is not a float2"
+        raise UnsupportedError(msg)
+    return [float(c) for c in v]
+
+
 def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Emboss: light the input by the gradient image's slope.
 
     s = intensity N / 256 times the backward-difference slope along (cos,
-    sin) of the light angle; out = in + max(s, 0) highlight - max(-s, 0) (1 - shadow).
+    sin) of the light angle, its x and y each times the node's pixel size
+    (emboss_scale_block); out = in + max(s, 0) highlight - max(-s, 0) (1 -
+    shadow).
     """
     t = "rgba" if color else "f"
     n = 4 if color else 1  # colors: four floats, or one (grayscale)
@@ -3055,10 +3100,15 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
     hi = knob("highlight", "Highlight", p["highlight"])
     sh = knob("shadow", "Shadow", p["shadow"])
     a = f"6.28318531 * {num(turn)}"
+    at = emboss_scale_block(node)
+    scaled = "" if at is None else f" * {vec(dynamic(node, at), 2)}"
     lines = [
         f"vec2 e = vec2({num(1 / (1 << size))}, 0.0);",
         "float h = $gradient(uv);",
-        "vec2 g = vec2(h - $gradient(fract(uv - e)), h - $gradient(fract(uv - e.yx)));",
+        (
+            "vec2 g = vec2(h - $gradient(fract(uv - e)),"
+            f" h - $gradient(fract(uv - e.yx))){scaled};"
+        ),
         f"vec2 light = vec2(cos({a}), sin({a}));",
         f"float s = {num(p['intensity'] * (1 << size) / 256)} * dot(g, light);",
     ]

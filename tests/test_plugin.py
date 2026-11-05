@@ -183,6 +183,24 @@ def test_plugin_fxmaps_draw_triangles() -> None:
     assert not any(n["type"] == "sbs_splats" for n in inline)
 
 
+def test_an_emboss_scales_its_slope_by_its_pixel_size() -> None:
+    # Biomech's n4291: an emboss whose Pixel Size is 0.1 lights ten times
+    # less (18.9% of pixels as Substance's before; emboss_px_g 100% now)
+    inline, _, _ = translated("emboss_pixelsize", None)
+    code = next(json.dumps(n) for n in inline if "$gradient(uv)" in json.dumps(n))
+    assert "h - $gradient(fract(uv - e.yx))) * f" in code
+    nodes, _, outs = translated("emboss_pixelsize", plugin.Maker(11))
+    node = next(n for n in nodes if n["name"] == outs["output"][0])
+    assert node["type"] == "sbs_emboss_gray"
+    p = node["parameters"]
+    assert (p["pixelsize_x"], p["pixelsize_y"]) == (pytest.approx(0.1),) * 2
+    # Substance's default is 1
+    shader = plugin.definitions()["sbs_emboss_gray"]["shader_model"]
+    assert "vec2($pixelsize_x, $pixelsize_y)" in shader["instance"]
+    defaults = {p["name"]: p["default"] for p in shader["parameters"]}
+    assert defaults["pixelsize_x"] == defaults["pixelsize_y"] == 1.0
+
+
 def test_levels_is_a_plugin_node() -> None:
     maker = plugin.Maker(11)
     nodes, wires, outs = translated("levels_gray", maker)

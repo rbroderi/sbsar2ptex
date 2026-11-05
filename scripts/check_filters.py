@@ -320,6 +320,41 @@ def cases() -> list[tuple]:
             ),
         ]
     out += [
+        # Biomech's n4291 (a quarter turn) and n4287: intensity 1, the
+        # default highlight and shadow
+        (
+            "emboss_q1_g",
+            "emboss",
+            GRAY,
+            (("intensity", F1, "1"), ("lightangle", F1, "0.25")),
+            "",
+            True,
+        ),
+        ("emboss_01_g", "emboss", GRAY, (("intensity", F1, "1"),), "", True),
+        (
+            "emboss_px_g",
+            "emboss",
+            GRAY,
+            (
+                ("intensity", F1, "1"),
+                ("lightangle", F1, "0.25"),
+                ("pixelsize", "constantValueFloat2", "0.1 0.1"),
+            ),
+            "",
+            True,
+        ),
+        (
+            "emboss_px_c",
+            "emboss",
+            COLOR,
+            (
+                ("intensity", F1, "4"),
+                ("lightangle", F1, "0.1"),
+                ("pixelsize", "constantValueFloat2", "0.5 0.25"),
+            ),
+            "",
+            True,
+        ),
         # Biomech's n667 (and each cell's blur above n725): a fractional
         # radius (25.76 texels), so the box's end taps weigh less than one
         ("blur322_g", "blur", GRAY, (("intensity", F1, "3.22"),), "", True),
