@@ -195,6 +195,25 @@ def test_plugin_fxmaps_draw_triangles() -> None:
     )
     inline, _, _ = translated("fxmap_gradation", None)
     assert not any(n["type"] == "sbs_splats" for n in inline)
+    gd = (Path(plugin.__file__).parent / "mm_plugin" / "gen_sbs_splats.gd").read_text(
+        encoding="utf-8"
+    )
+    assert "2.0/rw, -2.0/rh, size.x/rw, size.y/rh, rw/size.x, rh/size.y" in gd
+
+
+def test_plugin_fxmaps_draw_their_regions() -> None:
+    # x_region3: render and tiling regions -0.25 to 1.25 by 0.1 to 0.9
+    # (Biomech's n2369: -3 to 4), the image the render region (99.93%
+    # inline, 99.98% drawn)
+    nodes, _, _ = translated("fxmap_region", plugin.Maker(8))
+    (drawn,) = [n for n in nodes if n["type"] == "sbs_splats"]
+    p = drawn["parameters"]
+    region = (p["region_x"], p["region_y"], p["region_w"], p["region_h"])
+    assert region == pytest.approx((-0.25, 0.9, 1.5, 0.8))
+    # x_region5: a disc's copy ends at the tiling region's edge, in the
+    # image: inline, as Substance (99.91%; 93.66% drawn)
+    nodes, _, _ = translated("fxmap_region_edge", plugin.Maker(8))
+    assert not any(n["type"] == "sbs_splats" for n in nodes)
 
 
 def test_an_emboss_scales_its_slope_by_its_pixel_size() -> None:

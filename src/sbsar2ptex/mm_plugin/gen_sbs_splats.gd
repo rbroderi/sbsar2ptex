@@ -22,7 +22,9 @@ extends MMGenBase
 #	bool fxpat_fx(int id, vec2 q, float s, out float v)
 # (false where the pattern does not cover q); patterns from 15 add their
 # supplement after the color. The output (rgba, 32-bit floats) starts at the
-# background.
+# background. The image is the render region: its left, top, width and height
+# (parameters region_x, region_y, region_w, region_h; the unit square's top is
+# 1), in the splats' units.
 
 
 const FLOATS_PER_SPLAT : int = 16
@@ -131,6 +133,10 @@ func get_parameter_defs() -> Array:
 	return [
 		{ name="size", label="Size", type="size", first=0, last=14, default=9 },
 		{ name="background", label="Background", type="float", min=0.0, max=1.0, step=0.001, default=0.0 },
+		{ name="region_x", label="Region left", type="float", min=-16.0, max=16.0, step=0.001, default=0.0 },
+		{ name="region_y", label="Region top", type="float", min=-16.0, max=16.0, step=0.001, default=1.0 },
+		{ name="region_w", label="Region width", type="float", min=0.001, max=32.0, step=0.001, default=1.0 },
+		{ name="region_h", label="Region height", type="float", min=0.001, max=32.0, step=0.001, default=1.0 },
 	]
 
 func get_input_defs() -> Array:
@@ -219,6 +225,13 @@ func in_thread_render(splats : PackedFloat32Array, patterns : String, size : Vec
 	var uniform_set : RID = rd.uniform_set_create([ uniform ], shader, 0)
 	var pipelines : Array[RID] = [ create_pipeline(rd, framebuffer, false), create_pipeline(rd, framebuffer, true) ]
 	var background : float = float(get_parameter("background"))
+	# The region to clip space, and its texels: the unit square's (0, 1, 2, -2)
+	# and (n, n, 1/n, 1/n)
+	var rx : float = float(get_parameter("region_x"))
+	var ry : float = float(get_parameter("region_y"))
+	var rw : float = float(get_parameter("region_w"))
+	var rh : float = float(get_parameter("region_h"))
+	var view : PackedFloat32Array = PackedFloat32Array([ rx, ry, 2.0/rw, -2.0/rh, size.x/rw, size.y/rh, rw/size.x, rh/size.y ])
 	var draw_list : int = rd.draw_list_begin(framebuffer, RenderingDevice.DRAW_CLEAR_COLOR_ALL, PackedColorArray([ Color(background, background, background, background) ]))
 	rd.draw_list_bind_uniform_set(draw_list, uniform_set, 0)
 	# Runs of splats of one blending, in order
@@ -228,7 +241,7 @@ func in_thread_render(splats : PackedFloat32Array, patterns : String, size : Vec
 		var last : int = first+1
 		while last < count and (splats[last*FLOATS_PER_SPLAT+13] > 0.5) == blend_max:
 			last += 1
-		var push : PackedByteArray = PackedFloat32Array([ 0.0, 1.0, 2.0, -2.0, size.x, size.y, 1.0/size.x, 1.0/size.y ]).to_byte_array()
+		var push : PackedByteArray = view.to_byte_array()
 		push.append_array(PackedInt32Array([ first, 0, 0, 0 ]).to_byte_array())
 		rd.draw_list_bind_render_pipeline(draw_list, pipelines[1 if blend_max else 0])
 		rd.draw_list_bind_uniform_set(draw_list, uniform_set, 0)

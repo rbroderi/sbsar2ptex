@@ -3550,17 +3550,13 @@ def _fx_raster(
     draws them so, on Material Maker's GPU (fxsplat.raster).
 
     Plugin translations only (_CTX.raster), of a gray map of built-in
-    patterns, with the default regions and no background image, that can
-    be evaluated here (fxsplat.splats, the graph inputs at their defaults:
-    the map no longer follows its parameters live).
+    patterns, with no background image, that can be evaluated here
+    (fxsplat.splats, the graph inputs at their defaults: the map no longer
+    follows its parameters live). Its regions are the Splats node's: the
+    image the render region, copies by the tiling region (Biomech's n2369,
+    both -3 to 4).
     """
-    unit = tuple(fxsplat.UNIT_REGION)
-    if (
-        not _CTX.raster
-        or layout.color
-        or (tuple(layout.render), tuple(layout.tiling)) != (unit, unit)
-        or isinstance(st.background, int)
-    ):
+    if not _CTX.raster or layout.color or isinstance(st.background, int):
         return None
     defaults = {
         uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
@@ -3573,7 +3569,9 @@ def _fx_raster(
         raise
     if any(s.pattern < 0 for s in spl):
         return None
-    return fxsplat.raster(spl, (st.tile_x, st.tile_y))
+    return fxsplat.raster(
+        spl, (st.tile_x, st.tile_y), tuple(layout.tiling), tuple(layout.render)
+    )
 
 
 def _fx_baked_lines() -> list[str]:
@@ -4289,6 +4287,7 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     if raster is not None:
         drawn = f"{name}_raster"
         background = 0.0 if st.background is None else float(st.background[0])
+        rx0, rx1, ry0, ry1 = layout.render
         sub.nodes.append(
             {
                 "name": drawn,
@@ -4297,6 +4296,10 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
                 "parameters": {
                     "size": size,
                     "background": background,
+                    "region_x": float(rx0),
+                    "region_y": float(ry1),
+                    "region_w": float(rx1 - rx0),
+                    "region_h": float(ry1 - ry0),
                     # little-endian float32s (arrays read as gradients)
                     "splats": base64.b64encode(
                         struct.pack(f"<{len(raster)}f", *raster)

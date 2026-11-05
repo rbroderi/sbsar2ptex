@@ -462,17 +462,24 @@ RASTER_FLOATS = 16
 _TAU = np.float32(6.2831855)
 
 
-def raster(spl: list[Splat], tile: tuple[bool, bool]) -> list[float]:
-    """Return gray splats as the sbs plugin's Splats node draws them.
+def raster(
+    spl: list[Splat],
+    tile: tuple[bool, bool],
+    tiling: Region = (0.0, 1.0, 0.0, 1.0),
+    render: Region = (0.0, 1.0, 0.0, 1.0),
+) -> list[float] | None:
+    """Return gray splats as the sbs plugin's Splats node draws them; None if unsure.
 
     Substance's GPU engine draws a pattern as one triangle over its
     bounding box, which it sets up in float32 from the pattern's size and
     its rotation, in turns, from radians and back: RASTER_FLOATS a tile
-    copy (fxdraw.copies, the default regions), in order: the color
+    copy (_copies32, of the tiling region), in order: the color
     (straight rgba: the gray value, opaque), the box's size and center,
     the pattern's size, the rotation and the supplement, then the pattern
     and max blending (1 or 0), and two zeros. Patterns of no area draw
-    nothing and are left out.
+    nothing and are left out. None when a copy that reaches the render
+    region (the image) ends at the tiling region's edge (_copies32): which
+    side Substance takes it is not known.
     """
     f = np.float32
     out: list[float] = []
@@ -486,11 +493,59 @@ def raster(spl: list[Splat], tile: tuple[bool, bool]) -> list[float]:
         bx = f(f(abs(w) * c) + f(abs(h) * n))
         by = f(f(abs(w) * n) + f(abs(h) * c))
         v = f(s.value[0])
-        for ox, oy in fxdraw.copies(s, UNIT_REGION, tile):
-            x, y = f(f(s.x) + f(ox)), f(f(s.y) + f(oy))
+        centers = _copies32(s, tiling, tile, render)
+        if centers is None:
+            return None
+        for x, y in centers:
             out += [v, v, v, 1.0, bx, by, x, y, w, h, turns, f(s.suppl)]
             out += [float(s.pattern), 1.0 if s.blend_max else 0.0, 0.0, 0.0]
     return [float(x) for x in out]
+
+
+def _copies32(
+    s: Splat, tiling: Region, tile: tuple[bool, bool], render: Region
+) -> list[tuple[np.float32, np.float32]] | None:
+    """Return the centers of a pattern's tile copies (float32); None if one is unsure.
+
+    fxdraw.copies' test: the copy's box overlaps the tiling region,
+    strictly. A box that ends at the region's edge, to float32 rounding,
+    may be drawn or not: x_region5's disc ends at 0.6 - 0.5 + 0.15, which
+    is 0.25 + 2^-25 in float32, and neither Substance nor the inline
+    shader draws it (where a strict test in float32 would). Such a copy
+    that reaches the render region (whose pixels it would draw) makes it
+    None; one past it draws nothing either way (a full-size pattern's
+    copies at the default regions).
+    """
+    f = np.float32
+    a = f(s.angle)
+    ca, sa = f(np.cos(a)), f(np.sin(a))
+    hx, hy = f(s.hx), f(s.hy)
+    b = (f(abs(f(hx * ca)) + abs(f(hy * sa))), f(abs(f(hx * sa)) + abs(f(hy * ca))))
+    axes, unsure = [], []
+    for c, bb, (lo, hi), (r0, r1), wrap in (
+        (f(s.x), b[0], tiling[:2], render[:2], tile[0]),
+        (f(s.y), b[1], tiling[2:], render[2:], tile[1]),
+    ):
+        w = f(hi - lo)
+        ks = (
+            range(math.floor((lo - bb - c) / w) - 1, math.ceil((hi + bb - c) / w) + 2)
+            if wrap
+            else (0,)
+        )
+        cs = [f(c + f(f(k) * w)) for k in ks]
+        near = 4 * np.finfo(np.float32).eps * max(abs(lo), abs(hi), 1.0)
+        axes.append([cc for cc in cs if f(cc - bb) < f(hi) and f(cc + bb) > f(lo)])
+        unsure.append({
+            cc for cc in cs
+            if (abs(f(cc + bb) - lo) <= near or abs(f(cc - bb) - hi) <= near)
+            and cc - bb < r1 - near and cc + bb > r0 + near
+        })  # fmt: skip
+    # an unsure copy along one axis, drawn (or unsure) along the other
+    for k in (0, 1):
+        other = set(axes[1 - k]) | unsure[1 - k]
+        if unsure[k] and other:
+            return None
+    return [(x, y) for y in axes[1] for x in axes[0]]
 
 
 def write_png(path: Path, packed: Packed) -> None:
