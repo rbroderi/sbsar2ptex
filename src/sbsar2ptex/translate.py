@@ -4311,8 +4311,9 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
                 count = f"int({_fx_function(node, tree.count.code, 'iteratecount')})"
             else:
                 count = str(tree.count)
+            # (output 0: the incoming state, not e: fxmap-node-0x09.md 2.6)
             same = args.format(
-                pos="pos", cell="cell", depth="depth", number="number", st="e"
+                pos="pos", cell="cell", depth="depth", number="number", st="st"
             )
             lines.append(f"int n = {count};")  # first: it may set variables
             if first:

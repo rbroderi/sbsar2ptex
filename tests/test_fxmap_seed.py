@@ -68,9 +68,16 @@ def tree_node(at: dict[int, list[int]], root: int = 0x100) -> Node:
     return Node(index=0, start=BASE, end=BASE + 4 * len(words), op=8, words=words)
 
 
-def seed_of(words: list[int], variables: dict | None = None) -> int:
-    ctx = {10: [0.0]}
-    return fxseed.Seeds().seed(decode(words), {}, ctx, variables or {})
+def seed_of(
+    words: list[int],
+    variables: dict | None = None,
+    *,
+    incoming: int = 0,
+    number: float = 0.0,
+) -> int:
+    ctx = {10: [number]}
+    v = {} if variables is None else variables
+    return fxseed.Seeds().seed(decode(words), {}, ctx, v, incoming=incoming)
 
 
 def leaf_states(
@@ -183,14 +190,16 @@ def test_t5_a_quadrant() -> None:
 
 def test_t6_a_seed_from_a_float_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seed_of(B_SEED3) == 0x40400000
-    for word, want in ((0x6B, 0x40400005), (0x63, 0x40400000)):
-        # an Iterate drawing output0 (a Quadrant inheriting its state), count 0
+    for word, want in ((0x12B, 0x40400005), (0x123, 0x40400000)):
+        # an Iterate of one pass (output1, a Quadrant inheriting its state).
+        # (Output0 would see the incoming state, 2.6: T18.)
         node = tree_node({
-            0x100: [word, 0x200, 0, 0x400], 0x200: B_SEED3,
+            0x100: [word, 0x200, 0x400], 0x200: B_SEED3,
             0x400: [0x00100048, 0x408], 0x408: [0x500], 0x500: OPACITY_RAND,
         })  # fmt: skip
         tree = fxmap.read_tree(node)
-        assert leaf_states(monkeypatch, node, tree, seed=5) == [(want, "opacity")]
+        got = leaf_states(monkeypatch, node, tree, seed=5)
+        assert got == [(iterate_step(want), "opacity")]
         monkeypatch.undo()
     assert FxRng(0x40400000, "frameoffset").rand(1.0) == pytest.approx(
         0.25302231, abs=1e-8
@@ -218,11 +227,12 @@ def test_t8_floor() -> None:
 def test_t9_an_unset_integer_variable(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seed_of(B_INT0) == 0
     node = tree_node({
-        0x100: [0x63, 0x200, 0, 0x400], 0x200: B_INT0,
+        0x100: [0x123, 0x200, 0x400], 0x200: B_INT0,
         0x400: [0x00100048, 0x408], 0x408: [0x500], 0x500: OPACITY_RAND,
     })  # fmt: skip
     tree = fxmap.read_tree(node)
-    assert leaf_states(monkeypatch, node, tree, seed=5) == [(0, "opacity")]
+    got = leaf_states(monkeypatch, node, tree, seed=5)
+    assert got == [(iterate_step(0), "opacity")]
 
 
 # T10-T11: per-visit evaluation and order.
@@ -336,11 +346,210 @@ def test_t12_a_code_block_reached_as_a_node_is_an_error() -> None:
     assert isinstance(fxmap.read_tree(node), fxmap.Iterate)
 
 
-def test_untested_integer_ops_on_float_patterns_raise() -> None:
-    sub = block(("f", 3.0), (0x11, INT, 1, [0]), ("i", 1), (0x13, INT, 1, [1, 2]))
+# T13-T18: rand and arithmetic in seed blocks, and Iterate output0.
+
+B_RAND24 = [0x09000003, 0x4B800000, 0x00000532, 0x00010611]
+"""const float 16777216.0; rand float (#0); convert int (#1)."""
+
+
+def test_t13_rand_in_a_seed_block() -> None:
+    assert seed_of(B_RAND24) == 0x4B201D31  # (bit 0 used: not 0x4B201D30)
+    assert seed_of(B_RAND24, incoming=2) == 0x4B11650B
+    thousand = [B_RAND24[0], f32_word(1000.0), *B_RAND24[2:]]
+    assert seed_of(thousand) == 0x441C4000
+    assert seed_of(thousand, incoming=777) == 0x438F8000
+    three = block(
+        ("f", 16777216.0), (0x32, FLOAT, 1, [0]), (0x32, FLOAT, 1, [0]),
+        (0x32, FLOAT, 1, [0]), (0x11, INT, 1, [3]),
+    )  # fmt: skip
+    assert seed_of(three) == 0x4AA3514E
+
+
+def test_t13_rand_seeds_from_the_incoming_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # an Iterate of one pass at incoming state 2: inheriting adds it
+    for word, want in ((0x12B, 0x4B11650D), (0x123, 0x4B11650B)):
+        node = tree_node({
+            0x100: [word, 0x200, 0x400], 0x200: B_RAND24,
+            0x400: [0x00100048, 0x408], 0x408: [0x500], 0x500: OPACITY_RAND,
+        })  # fmt: skip
+        tree = fxmap.read_tree(node)
+        got = leaf_states(monkeypatch, node, tree, seed=2)
+        assert got == [(iterate_step(want), "opacity")]
+        monkeypatch.undo()
+
+
+def test_t14_the_seed_blocks_generator_is_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # T10's tree, the inner Iterate's seed block setvar r <- rand(1); 0
+    with_rand = block(("f", 1.0), (0x32, FLOAT, 1, [0]), (0x07, FLOAT, 1, [1, 1]),
+                      ("i", 0))  # fmt: skip
+    without = block(("f", 0.5), (0x07, FLOAT, 1, [0, 1]), ("i", 0))
+    states = []
+    for seed in (with_rand, without):
+        node = tree_node({
+            0x100: [0x0000030B, 0x200],
+            0x200: [0x00000089, 0x600, 0x0, 0x300],
+            0x300: [0x00000123, 0x700, 0x400],
+            0x400: [0x01000048, 0x408], 0x408: [0x800],
+            0x600: B_SETNUM, 0x700: seed, 0x800: FRAME_RAND,
+        })  # fmt: skip
+        tree = fxmap.read_tree(node)
+        states.append(leaf_states(monkeypatch, node, tree))
+        monkeypatch.undo()
+    assert states[0] == states[1]
+    leaf = [s for s, lane in states[0] if lane == "frameoffset"]
+    assert leaf == [iterate_step(0)] * 3  # (the effective state is 0)
+    # r: the value generator's first value from the inner node's incoming state
+    for incoming in (0x000038C5, 0x5C49B922, 0xECB3A657):
+        variables: dict = {}
+        assert seed_of(with_rand, variables, incoming=incoming) == 0
+        first = (incoming * 0x7FF8A3ED + 0x2AA01D31) & 0xFFFFFFFF
+        assert variables[1] == [(first & 0xFFFFFF) / (1 << 24)]
+    # a second run starts afresh
+    variables = {}
+    seed_of(with_rand, variables)
+    again: dict = {}
+    seed_of(with_rand, again)
+    assert variables == again
+
+
+def test_t15_add_adds_patterns() -> None:
+    nan = block(("f", 3.0), ("f", 1.0), (0x12, FLOAT, 1, [0, 1]), (0x11, INT, 1, [2]))
+    assert seed_of(nan) == 0x7FC00000
+    for c, number, want in (
+        (2.0, 1.0, 0x7F800000),
+        (9.0, 1.0, 0xBF800000),
+        (5.0, 1.0, 0x80000000),
+        (3.0, 0.0, 0x40400000),
+    ):
+        words = block(
+            (0x01, FLOAT, 1, [10]), ("f", c), (0x12, FLOAT, 1, [0, 1]),
+            (0x11, INT, 1, [2]),
+        )  # fmt: skip
+        assert seed_of(words, number=number) == want, (c, number)
+
+
+def _int_op(op: int, a: float, b: int | None) -> list[int]:
+    head = [("i", a)] if isinstance(a, int) else [("f", a), (0x11, INT, 1, [0])]
+    k = len(head)
+    if b is None:
+        return block(*head, (op, INT, 1, [k - 1]))
+    return block(*head, ("i", b), (op, INT, 1, [k - 1, k]))
+
+
+@pytest.mark.parametrize(
+    ("op", "a", "b", "want"),
+    [
+        (0x13, 7, 3, 0),
+        (0x14, 7, 3, 0),
+        (0x17, 7, None, 0x80000007),
+        (0x13, -5, 3, 0xFFFFFFFB),
+        (0x30, -5, 1, 0),
+        (0x15, 3.0, 2, 0x7F800000),
+        (0x13, 3.0, 1, 0x40400000),
+        (0x23, -5, None, 0x7FFFFFFB),
+        (0x31, 3.0, 1, 0x40400000),
+        (0x31, -5, 1, 0),
+        (0x30, 3.0, 1, 0),
+    ],
+)
+def test_t16_float_ops_on_patterns(op: int, a: float, b: int | None, want: int) -> None:
+    assert seed_of(_int_op(op, a, b)) == want
+
+
+@pytest.mark.parametrize(("op", "a", "b"), [(0x15, 7, 2), (0x16, 3.0, 3)])
+def test_t16_nans(op: int, a: float, b: int) -> None:
+    got = seed_of(_int_op(op, a, b))
+    assert got & 0xFFFFFF == 0xC00000
+    assert got & 0x7F800000 == 0x7F800000
+
+
+def test_t16_spec_tables() -> None:
+    # section 2.1's decoded low 24 bits: a = convert(x), x 3.0 and 6.5
+    def a_then(*rest: tuple, x: float) -> list[int]:
+        return block(("f", x), (0x11, INT, 1, [0]), *rest)
+
+    for x, sub1, div2 in ((3.0, 0x400000, 0x800000), (6.5, 0xC00000, 0x800000)):
+        assert seed_of(a_then(("i", 1), (0x13, INT, 1, [1, 2]), x=x)) & 0xFFFFFF == sub1
+        assert seed_of(a_then(("i", 2), (0x15, INT, 1, [1, 2]), x=x)) & 0xFFFFFF == div2
+        assert seed_of(a_then((0x12, INT, 1, [1, 1]), x=x)) & 0xFFFFFF == 0x800000
+        ten = a_then(("i", 10), (0x13, INT, 1, [2, 1]), x=x)
+        assert seed_of(ten) & 0xFFFFFF == sub1
+    # float ops then convert: x - 1.0, x * 2.0, x / 2.0
+    for x, want in (
+        (3.0, (0, 0xC00000, 0x800000)),
+        (6.5, (0xA00000, 0x500000, 0x400000)),
+    ):
+        for op, c, w in (
+            (0x13, 1.0, want[0]),
+            (0x14, 2.0, want[1]),
+            (0x15, 2.0, want[2]),
+        ):
+            words = block(
+                ("f", x), ("f", c), (op, FLOAT, 1, [0, 1]), (0x11, INT, 1, [2])
+            )
+            assert seed_of(words) & 0xFFFFFF == w, (x, op)
+    # plain integers 7 and -5
+    for i, plus3, minus3 in ((7, 0xA, 0), (-5, 0xFFFFFE, 0xFFFFFB)):
+        assert seed_of(_int_op(0x12, i, 3)) & 0xFFFFFF == plus3
+        assert seed_of(_int_op(0x13, i, 3)) & 0xFFFFFF == minus3
+
+
+def test_t16_number_read_directly() -> None:
+    for p in range(4):
+        words = block((0x01, FLOAT, 1, [10]), (0x11, INT, 1, [0]))
+        assert seed_of(words, number=float(p)) == f32_word(float(p))
+        words = block(
+            (0x01, FLOAT, 1, [10]), ("f", 3.0), (0x14, FLOAT, 1, [0, 1]),
+            (0x11, INT, 1, [2]),
+        )  # fmt: skip
+        assert seed_of(words, number=float(p)) == f32_word(3.0 * p)
+
+
+def test_t17_floor() -> None:
+    for x, want in ((-0.5, 0xBF800000), (-8388609.5, 0xCB000002), (2.7, 0x40000000)):
+        assert seed_of([B_SEED3[0], f32_word(x), B_SEED3[2]]) == want
+
+
+def test_t18_iterate_output0_gets_the_incoming_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # an Iterate with inline seed 5, inheriting, count 1, output0 and output1
+    node = tree_node({
+        0x100: [0x0000015B, 5, 0x400, 0x300],
+        0x300: [0x00100048, 0x308], 0x308: [0x500],
+        0x400: [0x00100048, 0x408], 0x408: [0x500], 0x500: OPACITY_RAND,
+    })  # fmt: skip
+    tree = fxmap.read_tree(node)
+    assert isinstance(tree, fxmap.Iterate)
+    assert (tree.seed, tree.count) == (5, 1)
+    assert tree.first is not None
+    assert tree.repeated is not None
+    got = leaf_states(monkeypatch, node, tree)
+    assert got == [(0, "opacity"), (0xBF8B3662, "opacity")]
+    assert iterate_step(5) == 0xBF8B3662
+    monkeypatch.undo()
+    # the deferred (lanes) walk agrees
+    st = fxmap.Settings()
+    kw = {"color": False, "size": 8}
+    want = fxsplat._walk(node, tree, st, {}, defer=False, **kw)
+    got_lanes = fxsplat.splats(node, tree, st, {}, **kw)
+    assert [s.value for s in got_lanes] == [s.value for s in want]
+    assert len(want) == 2
+
+
+def test_untested_ops_in_seed_blocks_raise() -> None:
+    compare = block(("i", 7), ("i", 2), (0x1F, 0, 1, [0, 1]),
+                    (0x09, INT, 1, [2, 0, 1]))  # fmt: skip
     with pytest.raises(FunctionError, match="untested"):
-        seed_of(sub)
-    plain = block(("i", 7), ("i", 2), (0x13, INT, 1, [0, 1]))
-    assert seed_of(plain) == 5
-    with pytest.raises(FunctionError):  # rand: its generator is untested
-        seed_of(block(("f", 1.0), (0x32, FLOAT, 1, [0]), (0x11, INT, 1, [1])))
+        seed_of(compare)
+    floor = block(("f", 3.5), (0x24, FLOAT, 1, [0]), (0x11, INT, 1, [1]))
+    with pytest.raises(FunctionError, match="untested"):
+        seed_of(floor)
+    vector = block(("i", 1), (0x0D, INT, 2, [0, 0]), (0x12, INT, 2, [1, 1]),
+                   (0x10, INT, 1, [2, 0]))  # fmt: skip
+    with pytest.raises(FunctionError, match="untested"):
+        seed_of(vector)
