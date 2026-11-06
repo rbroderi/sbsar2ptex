@@ -330,7 +330,7 @@ def test_16_state_3_is_unsupported(ctx: None) -> None:
 def test_a_version_9_warp_with_an_inline_seed() -> None:
     # Section 2.2: flag word (version 9), input, gradient, then the slot. The
     # seed looks like neither a node index nor an offset test must decide by.
-    head = [0x0249880E, 0x05, 7, 8, 0x114, "size", f32w(0.5)]
+    head = [0x2249880E, 0x05, 7, 8, 0x114, "size", f32w(0.5)]  # P bit 5: intensity
     node = cook(assemble(head, [("size", SZ)]))
     assert node.inputs == {"input": 7, "gradient": 8}
     assert node.seed == 0x114
@@ -381,11 +381,14 @@ def test_19_a_version_2_warp_in_state_1() -> None:
     node = cook([0x4748840E, 3, 1, *tail], version=2)
     assert node.inputs == {"input": 3, "gradient": 1}
     assert node.seed == 5  # rest[2], no flag word: not "not an offset"
-    assert node.inline == tail[1:]
+    # P = 0x47 (docs/node-params.md): the f32s are the pixel size (state 1);
+    # the intensity (bits 5-6 = 2) has no offset word: malformed
+    assert node.pixel_size == [1.0, 0.00390625]
+    assert node.unsupported is not None
     v9 = cook([0x4748840E, 0x05, 3, 1, *tail], version=9)
     assert v9.inputs == {"input": 3, "gradient": 1}
     assert v9.seed == 5  # rest[3], after the flag word
-    assert v9.inline == tail[1:]
+    assert v9.pixel_size == [1.0, 0.00390625]
 
 
 def test_a_curve_without_a_size_function_has_a_fixed_size(ctx: None) -> None:

@@ -100,7 +100,9 @@ def warp_file(flags: int, rest: list[int], *, version: int = 0, count: int = 100
     [
         # The cook version decides the flag word, never the look of rest[2]
         # (docs/node-seed.md section 2.2, warp note).
-        (0x2319, [7, 8, OFF, OFF, HALF], 5, 8, 0.5),  # 1: v5/v6, code
+        # 1: v5/v6, code; the second offset is the pixel size's, so P bits
+        # 2-3 = 2 (docs/node-params.md: the warp-layout correction)
+        (0x2B19, [7, 8, OFF, OFF, HALF], 5, 8, 0.5),
         (0x2B19, [0, 7, 8, OFF, OFF, HALF], 9, 8, 0.5),  # 2: v9, code
         (0x2318, [7, 8, HALF], 6, 8, 0.5),  # 3: no code (persian)
         (0x2318, [0, 7, 8, HALF], 9, 8, 0.5),  # 4: v9, no code

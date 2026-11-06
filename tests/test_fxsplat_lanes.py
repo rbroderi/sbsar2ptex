@@ -197,7 +197,7 @@ def test_a_stateful_walk_defers_its_stateless_subtrees() -> None:
     node = asm.node()
     later = fxsplat._deferrable(node, root, st)
     assert id(sub) in later
-    assert later[id(sub)] == [6]
+    assert later[id(sub)] == [(6, FLOAT, 1)]  # v6, a float: (id, type, width)
     assert id(noisy) not in later
     assert id(pick) not in later
     assert id(root) not in later

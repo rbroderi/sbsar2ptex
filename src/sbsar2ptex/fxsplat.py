@@ -23,6 +23,7 @@ the index list (splat numbers, as uints).
 
 import math
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import MutableMapping
 from collections.abc import Sequence
@@ -40,10 +41,12 @@ from sbsar2ptex.function import SETSLOT
 from sbsar2ptex.function import Diverged
 from sbsar2ptex.function import FunctionError
 from sbsar2ptex.function import Lanes
+from sbsar2ptex.function import VarKey
 from sbsar2ptex.function import decode
 from sbsar2ptex.function import evaluate
 from sbsar2ptex.function import evaluate_lanes
 from sbsar2ptex.function import glsl_type
+from sbsar2ptex.function import var_key
 from sbsar2ptex.fxrng import FxRng
 from sbsar2ptex.fxrng import FxRngLanes
 from sbsar2ptex.fxrng import depth_step
@@ -132,7 +135,7 @@ class _Deferred:
     pos: tuple[float, float]
     depth: int
     number: float
-    store: dict[int, list]
+    store: dict[VarKey, list]
     """The variables it reads (none of which it sets)."""
 
 
@@ -156,7 +159,7 @@ def _walk(
     # One variable store for the whole map: its setup sets variables the
     # tree's functions read, and they keep state from one call to the next
     # (a walk over a grid, pass by pass), in Substance's order of calls.
-    variables: dict[int, list] = {}
+    variables: dict[VarKey, list] = {}
     seeds = fxseed.Seeds()
 
     def block_at(code: int) -> Any:
@@ -316,7 +319,7 @@ def _walk(
     return SplatTable({k: v[drawing] for k, v in cols.items()}, values[drawing])
 
 
-def _reads_sets(block: Any) -> tuple[set[int], set[int]]:
+def _reads_sets(block: Any) -> tuple[set[VarKey], set[VarKey]]:
     """Return the variables a block reads before it sets them, and those it sets.
 
     A set inside a while loop does not count as before a read: run no
@@ -325,16 +328,16 @@ def _reads_sets(block: Any) -> tuple[set[int], set[int]]:
     inside: set[int] = set()
     for loop in block.loops().values():
         inside.update(range(loop.start, loop.at + 1))
-    reads: set[int] = set()
-    sets: set[int] = set()
-    set_here: set[int] = set()
+    reads: set[VarKey] = set()
+    sets: set[VarKey] = set()
+    set_here: set[VarKey] = set()
     for k, ins in enumerate(block.instrs):
         if ins.op == SETVAR:
-            sets.add(ins.operands[1])
+            sets.add(var_key(ins))
             if k not in inside:
-                set_here.add(ins.operands[1])
-        elif ins.op == GETVAR and ins.operands[0] not in set_here:
-            reads.add(ins.operands[0])
+                set_here.add(var_key(ins))
+        elif ins.op == GETVAR and var_key(ins) not in set_here:
+            reads.add(var_key(ins))
     return reads, sets
 
 
@@ -373,7 +376,7 @@ def _deferrable(
     may defer below them.
     """
     try:
-        found: dict[int, tuple[set[int], set[int]]] = {}
+        found: dict[int, tuple[set[VarKey], set[VarKey]]] = {}
         for code in _codes(tree, fxmap.Settings()):  # (the tree's alone)
             block = decode(node.at(code, (node.end - code) // 4))
             if any(ins.op == SETSLOT for ins in block.instrs):
@@ -382,11 +385,11 @@ def _deferrable(
     except Exception:  # noqa: BLE001 - unreadable functions: the walk's to raise
         return {}
     shared = set().union(*(r for r, _ in found.values()))
-    memo: dict[int, tuple[set[int], set[int]]] = {}
+    memo: dict[int, tuple[set[VarKey], set[VarKey]]] = {}
     seeded: set[int] = set()
     going: set[int] = set()
 
-    def visit(t: fxmap.Tree | None) -> tuple[set[int], set[int]]:
+    def visit(t: fxmap.Tree | None) -> tuple[set[VarKey], set[VarKey]]:
         """Return a subtree's variables read (before set) and set."""
         if t is None:
             return set(), set()
@@ -439,7 +442,7 @@ class _Front:
     path: list[np.ndarray]
     """Where each lane's splats go: its deferred subtree's number, then the
     child slots and Iterate passes (output 0 as 0, pass i as 1 + i) taken."""
-    store: dict[int, list[np.ndarray]]
+    store: dict[VarKey, list[np.ndarray]]
     """The variables the subtree reads, a component array each."""
 
     def __len__(self) -> int:
@@ -491,9 +494,9 @@ def _ints(v: np.ndarray) -> np.ndarray:
     return v.astype(np.int64)
 
 
-def _stores(entries: list[_Deferred]) -> dict[int, list[np.ndarray]]:
+def _stores(entries: list[_Deferred]) -> dict[VarKey, list[np.ndarray]]:
     """Return the deferred entries' variables as lane arrays (one kind each)."""
-    out: dict[int, list[np.ndarray]] = {}
+    out: dict[VarKey, list[np.ndarray]] = {}
     for v in entries[0].store:
         values = [d.store.get(v) for d in entries]
         if any(x is None or len(x) != len(values[0]) for x in values):
@@ -878,7 +881,7 @@ def regions(
 
     ``slots`` is the graph's slot store, which get slots read.
     """
-    variables: dict[int, list] = {}
+    variables: dict[VarKey, list] = {}
     n = float(1 << size)
 
     def run(code: int, ctx: dict[int, list[float]]) -> list:
@@ -899,11 +902,11 @@ def stateful(node: Node, tree: fxmap.Tree | None, settings: fxmap.Settings) -> b
     """
     for code in _codes(tree, settings):
         block = decode(node.at(code, (node.end - code) // 4))
-        set_here: set[int] = set()
+        set_here: set[VarKey] = set()
         for ins in block.instrs:
             if ins.op == SETVAR:
-                set_here.add(ins.operands[1])
-            elif ins.op == GETVAR and ins.operands[0] not in set_here:
+                set_here.add(var_key(ins))
+            elif ins.op == GETVAR and var_key(ins) not in set_here:
                 return True
     return False
 
@@ -942,24 +945,32 @@ def _codes(tree: fxmap.Tree | None, settings: fxmap.Settings) -> list[int]:
 
 def variable_types(
     node: Node, tree: fxmap.Tree | None, settings: fxmap.Settings
-) -> dict[int, str]:
+) -> dict[VarKey, str]:
     """Return the GLSL type of every variable the map's functions use.
 
-    Its type is what sets it (else what reads it); one set as two types
-    is an error.
+    By var_key: one id set as two types is two variables, each get reading
+    the latest set of its own type and width (docs/fxmap-variables.md).
     """
-    found: dict[int, str] = {}
-    read: dict[int, str] = {}
+    found: dict[VarKey, str] = {}
+    read: dict[VarKey, str] = {}
     for code in _codes(tree, settings):
         for ins in decode(node.at(code, (node.end - code) // 4)).instrs:
-            if ins.op == SETVAR:
-                kind = glsl_type(ins.type, ins.width)
-                if found.setdefault(ins.operands[1], kind) != kind:
-                    message = f"FX-Map variable {ins.operands[1]} is set as two types"
-                    raise FunctionError(message)
-            elif ins.op == GETVAR:
-                read.setdefault(ins.operands[0], glsl_type(ins.type, ins.width))
+            if ins.op in (SETVAR, GETVAR):
+                to = found if ins.op == SETVAR else read
+                to.setdefault(var_key(ins), glsl_type(ins.type, ins.width))
     return {**read, **found}
+
+
+def variable_name(key: VarKey, keys: Iterable[VarKey]) -> str:
+    """Return the GLSL global of FX-Map variable ``key`` among ``keys``.
+
+    ``fxv{id}`` when its id has one type in the map, else with the type
+    and width too, so that each of the id's variables has its own.
+    """
+    var, kind, width = key
+    if sum(k[0] == var for k in keys) == 1:
+        return f"fxv{var}_$(name)"
+    return f"fxv{var}t{kind}w{width}_$(name)"
 
 
 GETVAR, SETVAR = 0x04, 0x07
