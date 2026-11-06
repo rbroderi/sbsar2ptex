@@ -124,6 +124,46 @@ def test_warp_layouts(
     assert word_params(warp, [("intensity", 5, 1.0)], {}) == {"intensity": intensity}
 
 
+P = 0x3F0C8A03
+"""A pixel-size component (docs/warp-layout.md section 6.3, test 8)."""
+
+
+@pytest.mark.parametrize(
+    ("flags", "rest", "version", "inputs", "intensity"),
+    [
+        # docs/warp-layout.md section 6.3, the node count 200.
+        (0x2318, [13, 16, 0x3CA3D70A], 4, (13, 16), 0.02),  # 7
+        (0x2718, [122, 121, P, P, 0x3EC7A0F9], 4, (122, 121), 0.3899),  # 8
+        (0x2319, [23, 23, OFF, 0x3D8F5C29], 4, (23, 23), 0.07),  # 9
+        (0x2B19, [4, 7, OFF, OFF, 0x3F4F5C29], 3, (4, 7), 0.81),  # 10
+        (0x2B19, [0, 0, OFF, OFF, 0x3FA00000], 8, (0, 0), 1.25),  # 11
+        (0x2318, [0, 133, 133, 0x3E6B851F], 9, (133, 133), 0.23),  # 12
+        (0x0318, [0, 121, 126], 9, (121, 126), 1.0),  # 13: default
+    ],
+)
+def test_warp_layouts_by_version(
+    flags: int,
+    rest: list[int],
+    version: int,
+    inputs: tuple[int, int],
+    intensity: float,
+) -> None:
+    warp = warp_file(flags, rest, version=version, count=200).nodes()[-1]
+    assert warp.unsupported is None
+    assert warp.inputs == {"input": inputs[0], "gradient": inputs[1]}
+    got = word_params(warp, [("intensity", 5, 1.0)], {})["intensity"]
+    assert got == pytest.approx(intensity, rel=1e-6)
+    if flags & 0x0400:  # test 8: pixel size state 1
+        p = struct.unpack("<f", struct.pack("<I", P))[0]
+        assert warp.pixel_size == pytest.approx([p, p])
+
+
+def test_warp_version_7_is_unsupported() -> None:
+    # docs/warp-layout.md section 6.3, test 14: version 7 was never seen.
+    warp = warp_file(0x2318, [7, 8, HALF], version=7, count=200).nodes()[-1]
+    assert warp.unsupported
+
+
 def test_a_warp_without_code_in_a_file() -> None:
     # docs/warp-layout.md section 4's container: test 3's warp as node 2.
     data = bytearray(0x84)

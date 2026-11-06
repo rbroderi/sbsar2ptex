@@ -369,9 +369,9 @@ def pp_inputs(word: int) -> int:
     return word & IMAGE_COUNT
 
 
-WARP_FLAG_WORD = {2: False, 5: False, 6: False, 9: True}
+WARP_FLAG_WORD = {2: False, 3: False, 4: False, 5: False, 6: False, 8: False, 9: True}
 """Whether a warp has a leading flag word, by cook version (docs/node-seed.md
-section 2.2, warp note); other versions not seen."""
+section 2.2, warp note; docs/warp-layout.md section 6); version 7 not seen."""
 NO_NODE = UNWIRED
 """An input no node feeds."""
 
