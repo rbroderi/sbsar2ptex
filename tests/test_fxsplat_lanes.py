@@ -160,7 +160,9 @@ def test_too_many_splats_drawn_as_lanes_is_too_big(
     monkeypatch.setattr(
         fxsplat,
         "_walk",
-        lambda *a, defer, **k: plain(*a, defer=defer, **k) if defer else pytest.fail("walked again"),
+        lambda *a, defer, **k: (
+            plain(*a, defer=defer, **k) if defer else pytest.fail("walked again")
+        ),
     )
     with pytest.raises(fxsplat.TooBig):
         fxsplat.splats(node, root, st, {}, color=False, size=8)
