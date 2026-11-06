@@ -59,7 +59,10 @@ def test_no_defaults_block() -> None:
     assert asm.output_uids == [0x1234]
     assert asm.output_nodes == [(0xC0, 0)]
     assert asm.inputs == []
-    assert asm.defaults_at == 0x60
+    assert asm.defaults_at is None
+    assert asm.uid_at == 0x6C
+    (node,) = asm.nodes()
+    assert (node.start, node.end) == (0x50, 0x60)  # the old layout: at the table
 
 
 HALF = 0x3F000000
