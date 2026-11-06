@@ -300,11 +300,12 @@ def constant(instr: Instr) -> list[float] | list[int] | list[bool]:
 
 # Python evaluation (for checking and constant folding). Values are lists
 # of components (one for scalars). Every step is rounded to its type, as
-# Substance evaluates functions: floats to float32, ints wrapping at 32
-# bits. A Tile Sampler's hash of large products (1234 / (n + 4321) *
-# 3.435974e10, mod 1e6...) lands elsewhere in float64. A double operation
-# rounded once is the float32 one for + - * / and sqrt; mod rounds each of
-# its steps.
+# Substance evaluates functions: floats to float32; ints are float32 values
+# too, a float converted to one floored (docs/function-float-range.md 3.2:
+# no 32-bit wrap, no truncation). A Tile Sampler's hash of large products
+# (1234 / (n + 4321) * 3.435974e10, mod 1e6...) lands elsewhere in
+# float64. A double operation rounded once is the float32 one for + - * /
+# and sqrt; mod rounds each of its steps.
 
 
 def f32(x: float) -> float:
@@ -316,8 +317,32 @@ def f32(x: float) -> float:
 
 
 def _wrap(x: float) -> int:
-    x = int(x) & 0xFFFFFFFF
-    return x - (1 << 32) if x >> 31 else x
+    """Return ``x`` as an integer value: floored, then rounded to float32.
+
+    docs/function-float-range.md 3.2: at run time an integer is a float32
+    value, and a float converts to one by floor. It is held as a Python int
+    (exact: a float32 integer is one). Past float32's range it is 0 (see
+    _as), as before: an integer cannot hold an infinity here.
+    """
+    n = x if isinstance(x, int) else math.floor(x)
+    m = abs(n)
+    shift = m.bit_length() - 24
+    if shift <= 0:
+        return n
+    q, r = divmod(m, 1 << shift)  # round to 24 bits, ties to even
+    half = 1 << (shift - 1)
+    if r > half or (r == half and q & 1):
+        q += 1
+    m = q << shift
+    if m > _F32_MAX_INT:  # an infinity
+        return 0
+    return -m if n < 0 else m
+
+
+_F32_EXACT = 1 << 24
+"""Integers below this in magnitude are float32 values as they are."""
+_F32_MAX_INT = ((1 << 24) - 1) << 104
+"""FLT_MAX, as an integer."""
 
 
 def _div(a: float, b: float, kind: int) -> float:
@@ -425,7 +450,9 @@ def _as(kind: int, values: list) -> list:
     if kind == FLOAT:
         return [f32(float(x)) for x in values]
     if kind == INT:
-        return [_wrap(x) if math.isfinite(x) else 0 for x in values]
+        return [
+            _wrap(x) if isinstance(x, int) or math.isfinite(x) else 0 for x in values
+        ]
     return [bool(x) for x in values]
 
 
@@ -877,6 +904,8 @@ class Lanes:
         """Return evaluate's ``fn`` of each lane, converted to ``kind``."""
         lanes = zip(*(a.tolist() for a in args), strict=True)
         out = [_as(kind, [fn(*xs)])[0] for xs in lanes]
+        if kind != FLOAT and any(abs(x) >= _INT_SAFE for x in out):
+            raise Diverged  # (ints no longer wrap: Lanes.wrap)
         return np.array(out, dtype=np.float64 if kind == FLOAT else np.int64)
 
     def sin(self, x: np.ndarray) -> np.ndarray:
@@ -997,13 +1026,21 @@ class Lanes:
 
     @staticmethod
     def wrap(x: np.ndarray) -> np.ndarray:
-        """Return _as(INT): truncated, wrapped to 32 bits; 0 past the finite."""
+        """Return _as(INT) (_wrap): floored, a float32 value; 0 past the finite.
+
+        Lanes past _INT_SAFE raise Diverged, so int64 sums and products of
+        int lanes stay exact: evaluate follows those one by one.
+        """
         if not _is_int(x):
             ok = np.isfinite(x)
-            # fmod is exact: the truncation's low 32 bits, as int(x) & mask
-            x = np.where(ok, np.fmod(np.trunc(np.where(ok, x, 0)), 2.0**32), 0)
-            x = x.astype(np.int64)
-        return ((x.astype(np.int64) + _INT_SAFE) & 0xFFFFFFFF) - _INT_SAFE
+            x = np.where(ok, np.floor(np.where(ok, x, 0)), 0)
+        if (np.abs(x) >= _INT_SAFE).any():
+            raise Diverged
+        x = np.asarray(x).astype(np.int64)
+        big = np.abs(x) >= _F32_EXACT
+        if big.any():
+            x = np.where(big, x.astype(np.float32).astype(np.int64), x)
+        return x
 
     @staticmethod
     def select(c: np.ndarray, a: list, b: list) -> list:
@@ -1204,9 +1241,8 @@ def bounds(
             src, sel = arg(0, width=4), ops[1]
             v = [src[sel >> (2 * k) & 3] for k in range(ins.width)]
         elif ins.op == 0x11:  # noqa: PLR2004
+            # to an integer: floor (docs/function-float-range.md 3.2)
             v = [_iunary(0x24, x) if ins.type != FLOAT else x for x in arg(0)]
-            if ins.type != FLOAT:  # truncation toward zero: widen by one
-                v = [(lo - 1, hi + 1) for lo, hi in v]
         elif ins.op in (0x12, 0x13, 0x14, 0x30, 0x31):
             a, b = _spread(arg(0), arg(1))
             v = []
@@ -1296,16 +1332,36 @@ def _lit(kind: int, vals: list) -> str:
     return inner if len(vals) == 1 else f"vec{len(vals)}({inner})"
 
 
+def _f32_bits(v: float) -> bytes | None:
+    """Return ``v``'s float32 bytes; None past the float32 range.
+
+    Past it is beyond FLT_MAX plus half a unit in the last place (float32
+    rounding would give an infinity): such a candidate is no match.
+    """
+    try:
+        return struct.pack("<f", v)
+    except OverflowError:
+        return None
+
+
 def _flt(v: float) -> str:
-    if math.isinf(v):
-        return "1e30" if v > 0 else "-1e30"
+    """Return a GLSL literal of the float32 ``v``, its 32 bits kept.
+
+    docs/function-float-range.md section 2: the shortest decimal that reads
+    back to the same bits (a candidate past the float32 range is no match);
+    an infinity or a NaN by its bits, as GLSL has no literal for them.
+    """
+    if not math.isfinite(v):
+        bits = struct.unpack("<I", struct.pack("<f", v))[0]
+        return f"uintBitsToFloat({bits}u)"
+    want = struct.pack("<f", v)
     for digits in range(1, 10):
         text = f"{v:.{digits}g}"
-        if struct.pack("<f", float(text)) == struct.pack("<f", v):
+        if _f32_bits(float(text)) == want:
             break
     else:
         text = repr(v)
-    return text if any(c in text for c in ".en") else f"{text}.0"
+    return text if any(c in text for c in ".e") else f"{text}.0"
 
 
 _GLSL_BINARY = {
@@ -1507,7 +1563,12 @@ def to_glsl(
             sel = "".join("xyzw"[ops[1] >> (2 * c) & 3] for c in range(ins.width))
             expr = f"{v(ops[0])}.{sel}" if ops[0] != NO_VALUE else f"{t}(0)"
         elif ins.op == 0x11:  # noqa: PLR2004
-            expr = f"{t}({v(ops[0], t)})"
+            src = v(ops[0], t)
+            if ins.type == INT and ops[0] != NO_VALUE and kinds[ops[0]][0] == FLOAT:
+                # float to int is floor, not GLSL's truncation (-2.7 is -3:
+                # docs/function-float-range.md 3.2)
+                src = f"floor({src})"
+            expr = f"{t}({src})"
         elif ins.op == 0x18:  # noqa: PLR2004
             expr = "dot({}, {})".format(*pair(ops[0], ops[1], t))
         elif ins.op == 0x2D:  # noqa: PLR2004

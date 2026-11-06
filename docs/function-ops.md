@@ -54,7 +54,7 @@ needed, and it is included in `count`.
 | 0x0C | sequence | a, b | b (a is run first) |
 | 0x0D, 0x0E, 0x0F | vector | 2, 3 or 4 values | their components, joined in order |
 | 0x10 | swizzle | a, selector | component `selector >> 2k & 3` of a, for each result component k |
-| 0x11 | convert | a | a converted to the instruction's type (float to int truncates toward zero) |
+| 0x11 | convert | a | a converted to the instruction's type (float to int is `floor`: `docs/function-float-range.md` 3.2) |
 | 0x12 | add | a, b | a + b |
 | 0x13 | sub | a, b | a - b |
 | 0x14 | mul | a, b | a * b |
@@ -65,7 +65,9 @@ needed, and it is included in `count`.
 | 0x20 | >= | a, b | bool |
 | 0x21 | < | a, b | bool |
 
-Float values are float32 and integer values are 32-bit two's complement.
+Float values are float32. At run time integer values are float32 values
+too (no 32-bit wrap: `docs/function-float-range.md` 3.2); only the
+cooker's constant folding wraps at 32 bits (section 2).
 A bool constant takes one u16 operand (0 is false), with no padding.
 
 Variables are named by small integer ids, which the cooker assigns. They
@@ -1065,9 +1067,10 @@ Also:
 - A slot written twice, or read before it is written: never seen.
 - Value Processors with an image input (first field 0x20001), such as
   mosaic's n5:
-  - Sampling inside them was not tested. In a probe, a Value Processor's
-    `samplelum` of a uniform image input was folded by the cooker to
-    0.0.
+  - Sampling inside them is specified in `docs/function-sample.md`. A
+    probe here saw a Value Processor's `samplelum` folded by the cooker
+    to 0.0; that came from writing the op's constant as an int1, not
+    from the uniform input (`docs/function-sample.md` 1.3).
   - `$size` read the graph's size, but that the input image really had
     another size was not verified (2.4).
 - `rand` in a Value Processor: rand(1000) gave 2.984 on vk and d3d11
