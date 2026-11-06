@@ -21,6 +21,7 @@ then the grid's cells (start and count in the index list, as uints), then
 the index list (splat numbers, as uints).
 """
 
+import contextlib
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,13 +33,19 @@ from PIL import Image
 
 from sbsar2ptex import fxdraw
 from sbsar2ptex import fxmap
+from sbsar2ptex.function import Diverged
 from sbsar2ptex.function import FunctionError
+from sbsar2ptex.function import Lanes
 from sbsar2ptex.function import decode
 from sbsar2ptex.function import evaluate
+from sbsar2ptex.function import evaluate_lanes
 from sbsar2ptex.function import glsl_type
 from sbsar2ptex.fxrng import FxRng
+from sbsar2ptex.fxrng import FxRngLanes
 from sbsar2ptex.fxrng import depth_step
+from sbsar2ptex.fxrng import depth_steps
 from sbsar2ptex.fxrng import iterate_step
+from sbsar2ptex.fxrng import iterate_steps
 from sbsar2ptex.rng import UINT32_MASK
 from sbsar2ptex.sbsasm import Node
 
@@ -88,9 +95,46 @@ def splats(
     are the graph inputs' values by uid (defaults). Raises FunctionError for
     what cannot be evaluated here (sampling an input) and TooBig past
     MAX_SPLATS.
+
+    The tree is walked in Substance's order of calls, but the subtrees that
+    keep no state the rest of the walk reads (``_deferrable``) are left for
+    later and drawn together, a whole tree level at a time (``_lanes``).
+    Should that raise anything, or lanes part ways, the plain walk runs
+    instead: it raises, or draws, as it would.
     """
+    # (whatever the deferred walk raises, the plain walk raises again, in order)
+    with contextlib.suppress(Exception):
+        return _walk(node, tree, settings, inputs, color=color, size=size, defer=True)
+    return _walk(node, tree, settings, inputs, color=color, size=size, defer=False)
+
+
+@dataclass
+class _Deferred:
+    """A subtree the walk left for ``_lanes``: where it was entered."""
+
+    tree: Any
+    incoming: int
+    pos: tuple[float, float]
+    depth: int
+    number: float
+    store: dict[int, list]
+    """The variables it reads (none of which it sets)."""
+
+
+def _walk(
+    node: Node,
+    tree: fxmap.Tree | None,
+    settings: fxmap.Settings,
+    inputs: dict[int, list[float]],
+    *,
+    color: bool,
+    size: int,
+    defer: bool,
+) -> list[Splat]:
+    """Return ``splats``, ``_deferrable`` subtrees left for ``_lanes`` if ``defer``."""
     n = float(1 << size)
     weights = depth_weights(settings.hurst, fxmap.max_depth(tree))
+    later = _deferrable(node, tree, settings) if defer else {}
 
     blocks: dict[int, Any] = {}
     # One variable store for the whole map: its setup sets variables the
@@ -98,11 +142,14 @@ def splats(
     # (a walk over a grid, pass by pass), in Substance's order of calls.
     variables: dict[int, list] = {}
 
-    def run(code: int, state: int, lane: str, ctx: dict[int, list[float]]) -> list:
+    def block_at(code: int) -> Any:
         block = blocks.get(code)
         if block is None:
             block = blocks[code] = decode(node.at(code, (node.end - code) // 4))
-        return evaluate(block, inputs, ctx, FxRng(state, lane).rand, variables)
+        return block
+
+    def run(code: int, state: int, lane: str, ctx: dict[int, list[float]]) -> list:
+        return evaluate(block_at(code), inputs, ctx, FxRng(state, lane).rand, variables)
 
     def param(
         p: fxmap.Param | None,
@@ -129,7 +176,7 @@ def splats(
     # (the regions' functions run here, in Substance's order: they may read
     # or set the map's variables)
     _regions(settings, lambda code: run(code, 0, "frameoffset", {}))
-    out: list[Splat] = []
+    out: list[Splat | _Deferred] = []
 
     def enter(
         t: fxmap.Tree | None,
@@ -140,6 +187,11 @@ def splats(
         number: float,
     ) -> None:
         if t is None:
+            return
+        reads = later.get(id(t))
+        if reads is not None:
+            store = {v: variables[v] for v in reads if v in variables}
+            out.append(_Deferred(t, incoming, pos, depth, number, store))
             return
         inherited = not isinstance(t, (fxmap.Iterate, fxmap.Switch)) or t.inherited
         e = ((incoming if inherited else 0) + (t.seed or 0)) & UINT32_MASK
@@ -215,7 +267,428 @@ def splats(
             enter(t.if_true if value else t.if_false, e, pos, cell, depth, number)
 
     enter(tree, root & UINT32_MASK, (0.5, 0.5), 1.0, 0, 0.0)
-    return [out[k] for k in fxdraw.order(out)]
+    if defer:
+        drawn = _lanes(
+            [d for d in out if isinstance(d, _Deferred)],
+            block_at,
+            inputs,
+            weights,
+            settings,
+            color=color,
+            size=size,
+        )
+        out = [
+            s for d in out for s in (drawn[id(d)] if isinstance(d, _Deferred) else [d])
+        ]
+        if len(out) > MAX_SPLATS:
+            raise TooBig
+    done = [s for s in out if isinstance(s, Splat)]
+    return [done[k] for k in fxdraw.order(done)]
+
+
+def _reads_sets(block: Any) -> tuple[set[int], set[int]]:
+    """Return the variables a block reads before it sets them, and those it sets.
+
+    A set inside a while loop does not count as before a read: run no
+    times, it leaves what an earlier call set.
+    """
+    inside: set[int] = set()
+    for loop in block.loops().values():
+        inside.update(range(loop.start, loop.at + 1))
+    reads: set[int] = set()
+    sets: set[int] = set()
+    set_here: set[int] = set()
+    for k, ins in enumerate(block.instrs):
+        if ins.op == SETVAR:
+            sets.add(ins.operands[1])
+            if k not in inside:
+                set_here.add(ins.operands[1])
+        elif ins.op == GETVAR and ins.operands[0] not in set_here:
+            reads.add(ins.operands[0])
+    return reads, sets
+
+
+def _own_codes(t: fxmap.Tree) -> list[int]:
+    """Return the function blocks a tree node itself runs."""
+    if isinstance(t, fxmap.Quadrant):
+        codes = [p.code for p in t.params.values() if p.state == fxmap.CODE]
+        return codes + ([t.image_index.code] if t.image_index is not None else [])
+    param = t.count if isinstance(t, fxmap.Iterate) else t.value
+    return [param.code] if isinstance(param, fxmap.Param) else []
+
+
+def _kids(t: fxmap.Tree) -> list[fxmap.Tree | None]:
+    if isinstance(t, fxmap.Quadrant):
+        return list(t.children)
+    if isinstance(t, fxmap.Iterate):
+        return [t.first, t.repeated]
+    return [t.if_false, t.if_true]
+
+
+def _deferrable(
+    node: Node, tree: fxmap.Tree | None, settings: fxmap.Settings
+) -> dict[int, list[int]]:
+    """Return the subtrees the walk may leave for later (by id), and what each reads.
+
+    A subtree may be drawn out of the walk's order when nothing it sets is
+    read by any of the tree's functions before they set it themselves:
+    then no call outside it sees what it does, and within it the variables
+    it reads (set before it is entered) hold still. Only the outermost
+    such subtrees, as the walk meets them, are left for later.
+    """
+    try:
+        found: dict[int, tuple[set[int], set[int]]] = {}
+        for code in _codes(tree, fxmap.Settings()):  # (the tree's alone)
+            found[code] = _reads_sets(decode(node.at(code, (node.end - code) // 4)))
+    except Exception:  # noqa: BLE001 - unreadable functions: the walk's to raise
+        return {}
+    shared = set().union(*(r for r, _ in found.values()))
+    memo: dict[int, tuple[set[int], set[int]]] = {}
+
+    def visit(t: fxmap.Tree | None) -> tuple[set[int], set[int]]:
+        """Return a subtree's variables read (before set) and set."""
+        if t is None:
+            return set(), set()
+        if id(t) not in memo:
+            memo[id(t)] = (set(), set())  # (a cycle reads and sets nothing new)
+            reads, sets = set(), set()
+            for code in _own_codes(t):
+                reads |= found[code][0]
+                sets |= found[code][1]
+            for kid in _kids(t):
+                r, s = visit(kid)
+                reads |= r
+                sets |= s
+            memo[id(t)] = (reads, sets)
+        return memo[id(t)]
+
+    visit(tree)
+    return {k: sorted(r) for k, (r, s) in memo.items() if not s & shared}
+
+
+LANES_MAX = 1 << 22
+"""Most lanes a level of deferred subtrees may spread to (else the walk draws)."""
+
+
+@dataclass
+class _Front:
+    """Lanes entering one tree node: each one of the walk's entries into it."""
+
+    incoming: np.ndarray
+    """Incoming states (uint64s holding 32 bits)."""
+    x: np.ndarray
+    y: np.ndarray
+    number: np.ndarray
+    path: list[np.ndarray]
+    """Where each lane's splats go: its deferred subtree's number, then the
+    child slots and Iterate passes (output 0 as 0, pass i as 1 + i) taken."""
+    store: dict[int, list[np.ndarray]]
+    """The variables the subtree reads, a component array each."""
+
+    def __len__(self) -> int:
+        return len(self.incoming)
+
+    def take(self, sel: np.ndarray) -> "_Front":
+        """Return the lanes ``sel`` picks (a mask or indices)."""
+        return _Front(
+            self.incoming[sel],
+            self.x[sel],
+            self.y[sel],
+            self.number[sel],
+            [k[sel] for k in self.path],
+            {v: [c[sel] for c in cs] for v, cs in self.store.items()},
+        )
+
+    @staticmethod
+    def join(fronts: list["_Front"]) -> "_Front":
+        """Return the lanes of ``fronts``, one after another."""
+        if len(fronts) == 1:
+            return fronts[0]
+        first = fronts[0]
+
+        def cat(get: Callable[["_Front"], np.ndarray]) -> np.ndarray:
+            return np.concatenate([get(f) for f in fronts])
+
+        return _Front(
+            cat(lambda f: f.incoming),
+            cat(lambda f: f.x),
+            cat(lambda f: f.y),
+            cat(lambda f: f.number),
+            [cat(lambda f, k=k: f.path[k]) for k in range(len(first.path))],
+            {
+                v: [cat(lambda f, v=v, c=c: f.store[v][c]) for c in range(len(cs))]
+                for v, cs in first.store.items()
+            },
+        )
+
+
+def _ints(v: np.ndarray) -> np.ndarray:
+    """Return int(v) of each lane (int64), raising where int() would."""
+    if v.dtype.kind == "f":
+        if not np.isfinite(v).all():
+            msg = "cannot convert float NaN or infinity to integer"
+            raise ValueError(msg)
+        if (np.abs(v) >= float(LANES_MAX) ** 2).any():
+            raise Diverged
+        v = np.trunc(v)
+    return v.astype(np.int64)
+
+
+def _stores(entries: list[_Deferred]) -> dict[int, list[np.ndarray]]:
+    """Return the deferred entries' variables as lane arrays (one kind each)."""
+    out: dict[int, list[np.ndarray]] = {}
+    for v in entries[0].store:
+        values = [d.store.get(v) for d in entries]
+        if any(x is None or len(x) != len(values[0]) for x in values):
+            raise Diverged
+        comps = []
+        for c in range(len(values[0])):
+            col = [x[c] for x in values]
+            ints = [isinstance(x, int) for x in col]
+            if any(ints) != all(ints):
+                raise Diverged
+            comps.append(np.array(col, dtype=np.int64 if ints[0] else np.float64))
+        out[v] = comps
+    if any(d.store.keys() != entries[0].store.keys() for d in entries):
+        raise Diverged
+    return out
+
+
+def _lanes(
+    entries: list[_Deferred],
+    block_at: Callable[[int], Any],
+    inputs: dict[int, list[float]],
+    weights: list[float],
+    settings: fxmap.Settings,
+    *,
+    color: bool,
+    size: int,
+) -> dict[int, list[Splat]]:
+    """Return the deferred subtrees' splats, each's in the walk's order, by id.
+
+    Entries into one node at one depth run together, as lanes: each node's
+    functions run once for all its lanes (function.evaluate_lanes,
+    fxrng.FxRngLanes), the walk's arithmetic over arrays, so the splats
+    are the walk's, bit for bit. A Quadrant's children that are one node
+    take all four slots' lanes at once. Each splat keeps its path, to be
+    put in the walk's order at the end.
+    """
+    n = float(1 << size)
+    drawn: list[dict[str, Any]] = []
+    spread = 0
+    f = np.float32
+    tau = fxdraw.f32(2 * math.pi)
+
+    def run(code: int, at: tuple[np.ndarray, _Front], lane: str, ctx: dict) -> list:
+        """Run a node's function: ``at`` its lanes' effective states and lanes."""
+        states, front = at
+        rand = FxRngLanes(states, lane).rand
+        block = block_at(code)
+        return evaluate_lanes(block, inputs, ctx, rand, len(front), dict(front.store))
+
+    def param(
+        p: fxmap.Param | None,
+        default: list[float],
+        at: tuple[np.ndarray, _Front],
+        lane: str,
+        ctx: dict,
+    ) -> list:
+        if p is None:
+            return default
+        if p.state == fxmap.CODE:
+            vals = [v.astype(np.float64) for v in run(p.code, at, lane, ctx)]
+        else:
+            vals = [float(v) for v in p.value]
+        return vals * len(default) if len(vals) == 1 else vals[: len(default)]
+
+    def enter(t: fxmap.Tree | None, front: _Front, depth: int) -> None:
+        nonlocal spread
+        count = len(front)
+        if t is None or not count:
+            return
+        spread += count
+        if spread > LANES_MAX:
+            raise Diverged
+        cell = 0.5**depth
+        inherited = not isinstance(t, (fxmap.Iterate, fxmap.Switch)) or t.inherited
+        base = front.incoming if inherited else np.zeros_like(front.incoming)
+        e = (base + np.uint64(t.seed or 0)) & np.uint64(UINT32_MASK)
+        here = (e, front)
+        ctx = {
+            0: [0.0],
+            1: [n, n],
+            3: [float(size), float(size)],
+            8: [front.x, front.y],
+            10: [front.number],
+            12: [float(depth)],
+        }
+        if isinstance(t, fxmap.Quadrant):
+            p = t.params
+            op = param(p.get("opacity"), [1.0] * 4, here, "opacity", ctx)
+            bo = param(p.get("branchoffset"), [0.0, 0.0], here, "branchoffset", ctx)
+            fo = param(p.get("frameoffset"), [0.0, 0.0], here, "frameoffset", ctx)
+            sz = param(p.get("patternsize"), [1.0, 1.0], here, "patternsize", ctx)
+            rot = param(p.get("patternrotation"), [0.0], here, "patternrotation", ctx)
+            sup = param(p.get("patternsuppl"), [0.0], here, "patternsuppl", ctx)
+            at = (front.x + bo[0], front.y + bo[1])
+            pattern: Any = t.pattern
+            if t.image_index is not None:
+                index = _ints(run(t.image_index.code, here, "imageindex", ctx)[0])
+                pattern = fxmap.image_id(index, t.image_flags)  # (as arrays)
+            elif t.image is not None and t.image < len(settings.patterns):
+                pattern = fxmap.image_id(t.image, t.image_flags)
+            if pattern is not None:
+                _draw(t, front, depth, cell, (op, fo, sz, rot, sup), at, pattern)
+            spawn = e
+            slots: dict[int, tuple[fxmap.Tree, list[_Front]]] = {}
+            kids = zip(t.children, CHILD, strict=False)
+            for slot, (kid, (ox, oy)) in enumerate(kids):
+                spawn = depth_steps(spawn, depth + 1)
+                if kid is not None:
+                    lanes = _Front(
+                        spawn,
+                        np.broadcast_to(at[0] + ox * cell, (count,)),
+                        np.broadcast_to(at[1] + oy * cell, (count,)),
+                        front.number,
+                        [*front.path, np.full(count, slot)],
+                        front.store,
+                    )
+                    slots.setdefault(id(kid), (kid, []))[1].append(lanes)
+            for kid, fronts in slots.values():
+                enter(kid, _Front.join(fronts), depth + 1)
+        elif isinstance(t, fxmap.Iterate):
+            if isinstance(t.count, fxmap.Param):
+                passes = _ints(run(t.count.code, here, "iteratecount", ctx)[0])
+            else:
+                passes = np.full(count, t.count, dtype=np.int64)
+            first = _Front(
+                e, front.x, front.y, front.number,
+                [*front.path, np.zeros(count, dtype=np.int64)], front.store,
+            )  # fmt: skip
+            enter(t.first, first, depth)
+            if t.repeated is None:
+                return
+            passes = np.maximum(passes, 0)
+            if int(passes.sum()) > LANES_MAX:
+                raise Diverged
+            lane = np.repeat(np.arange(count), passes)
+            i = np.arange(len(lane)) - (np.cumsum(passes) - passes)[lane]
+            again = front.take(lane)
+            again.incoming = iterate_steps(e[lane], i)
+            again.number = i.astype(np.float64)
+            again.path.append(1 + i)
+            enter(t.repeated, again, depth)
+        else:
+            if isinstance(t.value, fxmap.Param):
+                value = run(t.value.code, here, "switch", ctx)[0] != 0
+            else:
+                value = np.full(count, bool(t.value))
+            for branch, sel in ((t.if_true, value), (t.if_false, ~value)):
+                taken = front.take(sel)
+                taken.incoming = e[sel]
+                enter(branch, taken, depth)
+
+    def _draw(
+        t: fxmap.Quadrant,
+        front: _Front,
+        depth: int,
+        cell: float,
+        params: tuple,
+        at: tuple,
+        pattern: Any,
+    ) -> None:
+        op, fo, sz, rot, sup = params
+        count = len(front)
+        w, o = f(weights[depth]), f(settings.opacity)
+        if color:  # instance_color, a lane each
+            a = np.asarray(op[3], dtype=np.float64).astype(f) * w * o
+            value = [np.asarray(c, dtype=np.float64).astype(f) * a for c in op[:3]]
+            value.append(a)
+            lit = value[3] != 0
+        else:
+            value = [np.asarray(op[-1], dtype=np.float64).astype(f) * w * o]
+            lit = value[0] != 0
+        offset = np.isin(pattern, list(fxmap.OFFSET)) & (np.asarray(sup[0]) != 0)
+        keep = np.broadcast_to(lit | (t.blend_max and not color) | offset, (count,))
+        if not keep.any():
+            return
+        rows = {
+            "x": at[0] + fo[0],
+            "y": at[1] + fo[1],
+            "hx": cell * sz[0] / 2,
+            "hy": cell * sz[1] / 2,
+            "angle": Lanes.f32(Lanes.f32(rot[0]) * tau),
+            "pattern": pattern,
+            "suppl": sup[0],
+        }
+        batch = {
+            k: np.broadcast_to(np.asarray(v), (count,))[keep] for k, v in rows.items()
+        }
+        batch["value"] = [
+            np.broadcast_to(np.asarray(c, dtype=np.float64), (count,))[keep]
+            for c in value
+        ]
+        batch["blend_max"] = t.blend_max
+        batch["path"] = [k[keep] for k in front.path]
+        drawn.append(batch)
+
+    groups: dict[tuple[int, int], list[int]] = {}
+    for k, d in enumerate(entries):
+        groups.setdefault((id(d.tree), d.depth), []).append(k)
+    with np.errstate(all="ignore"):
+        for members in groups.values():
+            group = [entries[k] for k in members]
+            front = _Front(
+                np.array([d.incoming for d in group], dtype=np.uint64),
+                np.array([d.pos[0] for d in group], dtype=np.float64),
+                np.array([d.pos[1] for d in group], dtype=np.float64),
+                np.array([d.number for d in group], dtype=np.float64),
+                [np.array(members, dtype=np.int64)],
+                _stores(group),
+            )
+            enter(group[0].tree, front, group[0].depth)
+    out: dict[int, list[Splat]] = {id(d): [] for d in entries}
+    for k, s in _gather(drawn):
+        out[id(entries[k])].append(s)
+    return out
+
+
+def _gather(drawn: list[dict[str, Any]]) -> list[tuple[int, Splat]]:
+    """Return _lanes' batches as (deferred entry, splat), in the walk's order.
+
+    By path: the walk draws a node's own splat before its children's, so a
+    shorter path is padded with -1s, to sort first.
+    """
+    if not drawn:
+        return []
+    deepest = max(len(b["path"]) for b in drawn)
+    columns = [
+        np.concatenate(
+            [
+                b["path"][level] if level < len(b["path"]) else np.full(len(b["x"]), -1)
+                for b in drawn
+            ]
+        )
+        for level in range(deepest)
+    ]
+    order = np.lexsort(columns[::-1])
+
+    def joined(key: str) -> list:
+        return np.concatenate([b[key] for b in drawn])[order].tolist()
+
+    blend = np.concatenate([np.full(len(b["x"]), b["blend_max"]) for b in drawn])
+    width = len(drawn[0]["value"])
+    values = np.stack(
+        [np.concatenate([b["value"][c] for b in drawn])[order] for c in range(width)],
+        axis=1,
+    ).tolist()
+    fields = zip(
+        joined("x"), joined("y"), joined("hx"), joined("hy"), joined("angle"),
+        joined("pattern"), joined("suppl"), blend[order].tolist(), values,
+        strict=True,
+    )  # fmt: skip
+    entries = columns[0][order].tolist()
+    return list(zip(entries, (Splat(*f) for f in fields), strict=True))
 
 
 def depth_weights(hurst: float, deepest: int) -> list[float]:
