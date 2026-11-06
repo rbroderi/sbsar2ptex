@@ -46,17 +46,20 @@ from sbsar2ptex.function import INT as FUNC_INT
 from sbsar2ptex.function import TRIG_OPS
 from sbsar2ptex.function import Block
 from sbsar2ptex.function import FunctionError
+from sbsar2ptex.function import VarKey
 from sbsar2ptex.function import bounds
 from sbsar2ptex.function import decode
 from sbsar2ptex.function import evaluate
 from sbsar2ptex.function import glsl_type
 from sbsar2ptex.function import to_glsl
+from sbsar2ptex.function import var_key
 from sbsar2ptex.fxrng import FX_RNG_GLSL
 from sbsar2ptex.fxrng import PARAM_LCG
 from sbsar2ptex.rng import RNG_GLSL
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import IMAGE_COUNT
+from sbsar2ptex.sbsasm import NEIGHBOR_PARAMS
 from sbsar2ptex.sbsasm import SEED_CODE
 from sbsar2ptex.sbsasm import SEED_INLINE
 from sbsar2ptex.sbsasm import SEED_NONE
@@ -143,7 +146,7 @@ class _Context:
     """Whether FX-Maps may draw their patterns with the sbs plugin's Splats
     node (_fx_raster): plugin translations."""
     data_dir: Path | None = None
-    fx_variables: dict[int, tuple[str, str]] | None = None
+    fx_variables: dict[VarKey, tuple[str, str]] | None = None
     """The FX-Map being translated's shared variables: GLSL global, type."""
     """Where precomputed FX-Map textures go (none: FX-Maps stay live)."""
     slot_writers: Writers = field(default_factory=dict)
@@ -586,7 +589,7 @@ def dynamic(
     def param(uid: int, *_: int) -> str:
         return _param_for(uid)
 
-    shared: dict[int, tuple[str, str]] = {}
+    shared: dict[VarKey, tuple[str, str]] = {}
     first: list[str] = []
     try:
         for at in before:
@@ -596,7 +599,7 @@ def dynamic(
                 continue
             for i in sets:
                 shared.setdefault(
-                    i.operands[1],
+                    var_key(i),
                     (f"{prefix}_pv{i.operands[1]}", glsl_type(i.type, i.width)),
                 )
             _CTX.count += 1
@@ -652,16 +655,18 @@ def dynamic(
 def _dynamic_offset(node: Node, inline: list[int], at: int) -> tuple[int, int]:
     """Return a dynamic parameter's function block (file offset) and next inline index.
 
-    The parameter's inline word is the block's offset. Older cookers (2018)
-    put a neighborhood filter's function-driven intensity in its second
-    code block instead, with no inline word: then the word at ``at`` is not
-    an offset into the node, and it stays for the next parameter.
+    The parameter's inline word is the block's offset, among the other
+    parameters' words in their order. A neighborhood filter has no second
+    code block to fall back on (docs/node-params.md section 3: what was
+    taken for one is its pixel-size function); for other ops, a node whose
+    word at ``at`` is no offset uses its last code block, the word staying
+    for the next parameter.
     """
     if at < len(inline):
         target = inline[at] + BASE
         if node.start < target < node.end and inline[at] % 4 == 0:
             return target, at + 1
-    if len(node.code) > 1:
+    if node.op not in NEIGHBOR_PARAMS and len(node.code) > 1:
         return node.code[-1], at
     msg = "no function block for a dynamic parameter"
     raise UnsupportedError(msg)
@@ -1694,9 +1699,24 @@ def word_params(
             at += width
             out[pname] = vals if width > 1 else vals[0]
         else:
+            if at >= len(node.inline):
+                msg = f"node {node.index}: no word for its {pname}'s function"
+                raise UnsupportedError(msg)
             out[pname] = dynamic(node, node.inline[at] + BASE)
             at += 1
     return out
+
+
+def bool_param(node: Node, name: str) -> bool:
+    """Return a neighborhood filter's boolean parameter (Node.params).
+
+    Its state is its value (docs/node-params.md section 1.2); a function's
+    (state 2) is taken at the graph's defaults.
+    """
+    state, payload = node.params.get(name, (0, None))
+    if state == 2:  # noqa: PLR2004
+        return bool(static(dynamic(node, payload)))
+    return state == 1
 
 
 def _gradient_keys(node: Node, *, color: bool) -> list[tuple[float, list[float]]]:
@@ -3238,10 +3258,12 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
         "intensity"
     ]
     k = knob("intensity", "Intensity", k, 0.0, 8.0)
-    height = knob("height_alpha", "Height in alpha", 1.0 if flags & 0x10 else 0.0)
+    alpha = bool_param(node, "alpha") if node.params else bool(flags & 0x10)
+    height = knob("height_alpha", "Height in alpha", 1.0 if alpha else 0.0)
     # per texel at 256 px: resolution independent (N / 256 exact)
     kn = f"({num(k)} * ({px_glsl()} / 256.0))"
-    sy = "" if flags & 4 else "-"
+    flip = bool_param(node, "inverty") if node.params else bool(flags & 4)
+    sy = "" if flip else "-"
     lines = [
         f"vec2 e = vec2(1.0 / {px_glsl()}, 0.0);",
         "float h = $input(uv);",
@@ -3260,26 +3282,25 @@ EMBOSS_SETTINGS = (1, 3, 5, 7)
 def emboss_scale_block(node: Node) -> int | None:
     """Return the offset of an emboss's pixel size function; None if it has none.
 
-    It is the node's last code block: its Pixel Size (a hidden float2
-    setting, check_filters emboss_px_g), which multiplies the slope along x
-    and y. Substance's default is 1 at any size (2^min of the size's
-    log2s); Biomech's n4291 and n4287 have 0.1 * 2048 / $size, 0.1 at 2048
-    pixels, which makes the slope ten times smaller. A setting a function
-    drives may own that block instead (_dynamic_offset): then there is
-    none.
+    It is the node's pixel-size vector's function (Node.pixel_size_code,
+    docs/node-params.md section 1.1; a hidden float2 setting, check_filters
+    emboss_px_g), which multiplies the slope along x and y. Substance's
+    default is 1 at any size (2^min of the size's log2s); Biomech's n4291
+    and n4287 have 0.1 * 2048 / $size, 0.1 at 2048 pixels, which makes the
+    slope ten times smaller. A constant one is Node.pixel_size.
     """
-    states = [(node.fields[0] >> bit) & 3 for bit in EMBOSS_SETTINGS]
-    if len(node.code) < 2 or 2 in states:  # noqa: PLR2004 (a function's)
-        return None
-    return node.code[-1]
+    return node.pixel_size_code
 
 
 def emboss_scale(node: Node) -> list[float]:
     """Return an emboss's pixel size (emboss_scale_block) at the node's size.
 
     For a value that cannot follow the graph live (the sbs plugin's knobs):
-    one that reads a graph input or the pixel raises UnsupportedError.
+    one that reads a graph input or the pixel raises UnsupportedError. A
+    constant one is itself; none (state 0) is (1, 1).
     """
+    if node.pixel_size is not None:
+        return list(node.pixel_size)
     at = emboss_scale_block(node)
     if at is None:
         return [1.0, 1.0]
@@ -3327,6 +3348,8 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
     a = f"6.28318531 * {num(turn)}"
     at = emboss_scale_block(node)
     scaled = "" if at is None else f" * {vec(dynamic(node, at), 2)}"
+    if node.pixel_size is not None:
+        scaled = f" * {vec(node.pixel_size, 2)}"
     lines = [
         f"vec2 e = vec2(1.0 / {px_glsl()}, 0.0);",
         "float h = $gradient(uv);",
@@ -4379,15 +4402,17 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
         _CTX.sample_nearest = True
         if stateful:
             shared = fxsplat.variable_types(node, tree, st)
-            _CTX.fx_variables = {k: (f"fxv{k}_$(name)", t) for k, t in shared.items()}
+            _CTX.fx_variables = {
+                k: (fxsplat.variable_name(k, shared), t) for k, t in shared.items()
+            }
             _CTX.helpers.append(
-                "".join(f"{t} fxv{k}_$(name);\n" for k, t in shared.items())
+                "".join(f"{t} {g};\n" for g, t in _CTX.fx_variables.values())
                 + "int fxi_$(name);\nvec4 fxr0_$(name), fxr1_$(name), fxr2_$(name);\n"
             )
         try:
             root = emit(tree)
             if stateful:  # the per-pixel start: variables zero, then the setup
-                start = [f"fxv{k}_$(name) = {t}(0);" for k, t in shared.items()]
+                start = [f"{g} = {t}(0);" for g, t in _CTX.fx_variables.values()]
                 if st.setup_code is not None:
                     setup = _fx_function(node, st.setup_code)
                     start.append(
@@ -5081,6 +5106,8 @@ def translate_graph(
         name = f"n{k}"
         if node.op in (32, 33):
             if node.uid not in images:
+                if node.unsupported is not None:  # (Asm.image_problem)
+                    raise UnsupportedError(node.unsupported)
                 msg = f"no image for graph input {node.uid}"
                 raise UnsupportedError(msg)
             mm.append(

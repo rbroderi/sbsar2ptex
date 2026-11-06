@@ -173,10 +173,11 @@ def test_a_while_loop_runs_as_substance(
     k: float,
     i: float,
 ) -> None:
-    variables: dict[int, list] = {}
+    variables: dict[tuple[int, int, int], list] = {}
     assert evaluate(counting(limit, cap, pad=pad), {}, variables=variables) == [value]
-    assert variables[1] == [k]
-    assert variables[0] == [i]
+    # the store is keyed by (id, type, width) (docs/fxmap-variables.md)
+    assert variables[1, FLOAT, 1] == [k]
+    assert variables[0, FLOAT, 1] == [i]
 
 
 def test_while_operands_with_and_without_padding() -> None:
@@ -212,9 +213,9 @@ def test_the_body_reads_the_conditions_value() -> None:
         ins(GETVAR, 2),                   # 17
         ins(SEQ, 16, 17),                 # 18
     ])  # fmt: skip
-    variables: dict[int, list] = {}
+    variables: dict[tuple[int, int, int], list] = {}
     assert evaluate(blk, {}, variables=variables) == [6.0]
-    assert variables[1] == [4.0]
+    assert variables[1, FLOAT, 1] == [4.0]
 
 
 def nested() -> Block:

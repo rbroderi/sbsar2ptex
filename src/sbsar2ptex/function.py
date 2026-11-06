@@ -492,12 +492,25 @@ class _Scalars:
 _SCALARS = _Scalars()
 
 
+type VarKey = tuple[int, int, int]
+"""A variable's storage: (id, type, width). docs/fxmap-variables.md: an id
+names storage, a set stores with its own type and width, and a get reads
+the latest set of its own type and width (the cooker refuses other reads),
+so one id set as two types is two variables."""
+
+
+def var_key(ins: Instr) -> VarKey:
+    """Return the variable a get (0x04) or set (0x07) variable reads or writes."""
+    var = ins.operands[0] if ins.op == 0x04 else ins.operands[1]  # noqa: PLR2004
+    return (var, ins.type, ins.width)
+
+
 def evaluate(
     block: Block,
     inputs: dict[int, list],
     builtins: dict[int, list[float]] | None = None,
     rand: Callable[[float], float] | None = None,
-    variables: dict[int, list] | None = None,
+    variables: dict[VarKey, list] | None = None,
     *,
     slots: MutableMapping[int, list] | None = None,
 ) -> list:
@@ -517,7 +530,7 @@ def evaluate(
     loop's condition and body ranges again per iteration), so each value is
     stored by its index and a read sees its most recent run.
     """
-    var: dict[int, list] = {} if variables is None else variables
+    var: dict[VarKey, list] = {} if variables is None else variables
     return _run(block, inputs, builtins, rand, var, _SCALARS, slots)
 
 
@@ -673,14 +686,15 @@ def _body(ins: Instr, zero: Callable[[int, int], int]) -> Step:  # noqa: PLR0911
 
         return setslot
     if op == 0x04:  # noqa: PLR2004
+        got = var_key(ins)
 
         def getvar(vals: list, env: _Env) -> list:
-            v = env.var.get(ops[0])
+            v = env.var.get(got)
             return env.num.lift([0.0] * width) if v is None else v
 
         return getvar
     if op == 0x07:  # noqa: PLR2004
-        src, name = at(ops[0], width, kind), ops[1]
+        src, name = at(ops[0], width, kind), var_key(ins)
 
         def setvar(vals: list, env: _Env) -> list:
             env.var[name] = v = vals[src]
@@ -1026,7 +1040,7 @@ def evaluate_lanes(
     builtins: Mapping[int, list],
     rand: Callable[[np.ndarray], np.ndarray] | None,
     n: int,
-    variables: dict[int, list] | None = None,
+    variables: dict[VarKey, list] | None = None,
     *,
     slots: MutableMapping[int, list] | None = None,
 ) -> list[np.ndarray]:
@@ -1042,7 +1056,7 @@ def evaluate_lanes(
     different widths or kinds, a loop condition they disagree on): then
     evaluate each lane.
     """
-    var: dict[int, list] = {} if variables is None else variables
+    var: dict[VarKey, list] = {} if variables is None else variables
     with np.errstate(all="ignore"):
         return _run(block, inputs, builtins, rand, var, Lanes(n), slots)
 
@@ -1110,12 +1124,12 @@ def bounds(
     whose ranges cannot be read leave the whole block unbounded.
     """
     vals: list[list[Interval]] = []
-    var: dict[int, list[Interval]] = {}
+    var: dict[VarKey, list[Interval]] = {}
     try:
         starts = loops(block)
     except FunctionError:
         return [_ALL] * block.instrs[-1].width
-    loose: set[int] = set()
+    loose: set[VarKey] = set()
     """Variables a loop sets: unbounded."""
     for k, ins in enumerate(block.instrs):
         ops = ins.operands
@@ -1123,8 +1137,8 @@ def bounds(
         if loop is not None:
             for i in block.instrs[loop.start : loop.at + 1]:
                 if i.op == 0x07:  # noqa: PLR2004
-                    loose.add(i.operands[1])
-                    var[i.operands[1]] = [_ALL] * i.width
+                    loose.add(var_key(i))
+                    var[var_key(i)] = [_ALL] * i.width
 
         def arg(k: int, ops: list[int] = ops, width: int = ins.width) -> list[Interval]:
             return vals[ops[k]] if ops[k] != NO_VALUE else [(0.0, 0.0)] * width
@@ -1140,10 +1154,10 @@ def bounds(
         elif ins.op == SETSLOT:
             v = arg(0)
         elif ins.op == 0x04:  # noqa: PLR2004
-            v = var.get(ops[0], [_ALL] * ins.width)
+            v = var.get(var_key(ins), [_ALL] * ins.width)
         elif ins.op == 0x07:  # noqa: PLR2004
             v = arg(0)
-            var[ops[1]] = [_ALL] * len(v) if ops[1] in loose else v
+            var[var_key(ins)] = [_ALL] * len(v) if var_key(ins) in loose else v
         elif ins.op == 0x09:  # noqa: PLR2004
             a, b = _spread(arg(1), arg(2))
             v = [(min(p[0], q[0]), max(p[1], q[1])) for p, q in zip(a, b, strict=True)]
@@ -1316,7 +1330,7 @@ def to_glsl(
     builtins: Callable[[int, int], str],
     samples: Callable[[str, int, str, int], str] | None = None,
     rand: Callable[[str, int], str] | None = None,
-    variables: Mapping[int, tuple[str, str]] | None = None,
+    variables: Mapping[VarKey, tuple[str, str]] | None = None,
     *,
     engine_trig: bool = False,
     slots: Callable[[int, int, int], str] | None = None,
@@ -1329,8 +1343,8 @@ def to_glsl(
     constant...); ``samples(kind, input index, position, filtering)``, kind
     "lum" or "col", gives a pixel processor's input sampled; ``rand(a,
     k)`` a random value in [0, a) for instruction k. ``variables`` maps
-    variables shared beyond the block (an FX-Map's) to a GLSL global and
-    its type, which the block reads and writes instead of locals.
+    variables shared beyond the block (an FX-Map's), by var_key, to a
+    GLSL global and its type, which the block reads and writes instead of locals.
     ``engine_trig`` computes cos, sin and cartesian with ENGINE_TRIG_GLSL's
     functions (the caller adds them), as the cooker's CPU evaluator does.
     ``slots(slot, type, width)`` gives a get slot's value: the expression
@@ -1416,11 +1430,11 @@ def to_glsl(
             expr = slots(ops[0], ins.type, ins.width)
         elif ins.op == SETSLOT:
             expr = v(ops[0], t)
-        elif ins.op == 0x04 and variables and ops[0] in variables:  # noqa: PLR2004
-            glob, kind = variables[ops[0]]
+        elif ins.op == 0x04 and variables and var_key(ins) in variables:  # noqa: PLR2004
+            glob, kind = variables[var_key(ins)]
             expr = glob if kind == t else f"{t}({glob})"
-        elif ins.op == 0x07 and variables and ops[1] in variables:  # noqa: PLR2004
-            glob, kind = variables[ops[1]]
+        elif ins.op == 0x07 and variables and var_key(ins) in variables:  # noqa: PLR2004
+            glob, kind = variables[var_key(ins)]
             emit(f"{glob} = {kind}({v(ops[0], t)});")
             expr = v(ops[0], t)
         elif ins.op == 0x04:  # noqa: PLR2004
@@ -1526,7 +1540,7 @@ def _reads(ins: Instr) -> list[int]:
 
 
 def _hoisted(
-    block: Block, found: dict[int, Loop], shared: Mapping[int, tuple[str, str]]
+    block: Block, found: dict[int, Loop], shared: Mapping[VarKey, tuple[str, str]]
 ) -> tuple[dict[int, list[tuple[int, str]]], dict[int, list[int]]]:
     """Return what to_glsl declares before each outermost loop (by its start).
 
@@ -1542,7 +1556,7 @@ def _hoisted(
         if ins.op not in (0x04, 0x07):
             continue
         var = ins.operands[0] if ins.op == 0x04 else ins.operands[1]  # noqa: PLR2004
-        if var in shared or var in seen:
+        if var_key(ins) in shared or var in seen:
             continue
         seen.add(var)
         lp = outer[k]

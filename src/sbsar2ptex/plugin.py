@@ -1013,6 +1013,9 @@ def _word_settings(
             at += width
             out[name] = vals if width > 1 else vals[0]
         else:
+            if at >= len(node.inline):
+                msg = f"node {node.index}: no word for its {name}'s function"
+                raise _Unpluggable(msg)
             out[name] = _Driven(node.inline[at] + BASE)
             at += 1
     return out
@@ -1217,6 +1220,10 @@ def _read_normal(node: Node, k: _Knobs, *, color: bool) -> None:
     flags = node.fields[0]
     p = _flag_settings(flags & 3, node.inline, [("intensity", 0, 1.0)], 1, node)
     k.float("intensity", p["intensity"])
+    for name in ("inverty", "alpha"):
+        if node.params.get(name, (0, None))[0] == 2:  # noqa: PLR2004
+            msg = f"node {node.index}: its {name} is a function"
+            raise _Unpluggable(msg)
     k.plain("inversedy", bool(flags & 4))
     k.plain("input2alpha", bool(flags & 0x10))
 

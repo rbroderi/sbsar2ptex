@@ -61,6 +61,7 @@ from collections import Counter
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
+from typing import Any
 
 from sbsar2ptex.archive import read_archive
 
@@ -72,6 +73,13 @@ RAW_FORMATS = {1: (1, 1), 2: (3, 1), 3: (4, 1), 5: (1, 2), 6: (3, 2), 7: (4, 2)}
 """A raw image's format: (channels, bytes per channel). Checked against
 sbsrender's renders of previewsphere_sphere.sbsar (1, 3) and the sizes of
 stripe-new-1's (1, 2) and persian-mosaic-wall-tiels's (5, 6, 7) images."""
+ENCODED_FORMAT = 8
+"""An image input's storage format for an encoded file: at its uid, a u32
+length, then the file (docs/image-inputs.md)."""
+DATA_START = 0x38
+"""Where the embedded images' data area starts."""
+LENGTH_SIZE = 4
+"""An encoded image's length word."""
 
 
 @dataclass
@@ -165,16 +173,43 @@ node-word flags lack bit 0 has no size function; its other code offsets
 (if any) are read with its inline words. Gradient maps are 0 (grayscale
 out) and 1 (color out), both from either.
 """
-CODE_COUNT = {
-    **dict.fromkeys((2, 3, 4, 5, 6, 7, 12, 13, 29, 30, 31, 32, 33, 38, 39), 1),
-    **dict.fromkeys((14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 27, 37, 42, 43), 2),
-}
+CODE_COUNT = dict.fromkeys((2, 3, 4, 5, 6, 7, 12, 13, 29, 30, 31, 32, 33, 38, 39), 1)
 """Code offsets each op's node has after its seed slot, with node flag bit 0.
 
-The first is the output-size function's block; neighborhood filters have a
-second. Without bit 0 none are read as code. Not here: FX-Maps and pixel
-processors, whose layouts differ, and gradient maps and curves (DATA_OPS).
+The output-size function's block. Without bit 0 none are read as code. Not
+here: FX-Maps and pixel processors, whose layouts differ, gradient maps and
+curves (DATA_OPS), and the neighborhood filters (NEIGHBOR_PARAMS), which
+have no fixed count: they walk their parameter list.
 """
+BOOL = 0
+"""A NEIGHBOR_PARAMS width: a boolean, whose state is its value (no word)."""
+_NEIGHBOR = {
+    # op: (where the states are: "P" the node word's top byte, "F" the flag
+    # word), then (name, bit, width) per parameter, in bit order
+    14: ("P", (("intensity", 5, 1),)),
+    16: ("F", (("intensity", 1, 1), ("angle", 3, 1), ("highlight", 5, 1),
+               ("shadow", 7, 1))),
+    17: ("F", (("intensity", 1, 1), ("angle", 3, 1), ("highlight", 5, 4),
+               ("shadow", 7, 4))),
+    20: ("P", (("intensity", 4, 1),)),
+    22: ("F", (("intensity", 0, 1), ("angle", 2, 1))),
+    24: ("F", (("intensity", 1, 1), ("angle", 3, 1))),
+    26: ("P", (("intensity", 4, 1),)),
+    37: ("F", (("intensity", 0, 1), ("inverty", 2, BOOL), ("alpha", 4, BOOL))),
+    42: ("F", (("distance", 2, 1),)),
+}  # fmt: skip
+NEIGHBOR_PARAMS = {
+    **_NEIGHBOR,
+    **{op + 1: v for op, v in _NEIGHBOR.items() if op in _PAIRS and op != 16},  # noqa: PLR2004
+}
+"""The neighborhood filters' parameters (docs/node-params.md section 1.2).
+
+After the size offset come the pixel-size vector (P bits 2-3, a float2),
+then these, in bit order: per state, nothing (0), ``width`` f32 (1; a
+boolean none) or one offset (2), interleaved as they come (section 2).
+"""
+PIXEL_SIZE_BIT = 2
+"""P bits 2-3: the pixel-size vector's state (P bits 0-1: tiling, no word)."""
 DATA_OPS = frozenset({0, 1, 44, 45})
 """Gradient maps and curves: their data's offset (keys, points) comes
 right after their fields, always, then the seed slot, then (bit 0) the size
@@ -369,6 +404,16 @@ class Node:
     """Seed state 2: the seed function's block (file offset), one integer."""
     size_code: int | None = None
     """Flag bit 0: the output-size function's block (file offset)."""
+    pixel_size: list[float] | None = None
+    """A neighborhood filter's pixel-size vector when constant (state 1)."""
+    pixel_size_code: int | None = None
+    """A neighborhood filter's pixel-size function's block (state 2): also
+    in Node.code, after size_code."""
+    params: dict[str, tuple[int, Any]] = field(default_factory=dict)
+    """A neighborhood filter's parameters (NEIGHBOR_PARAMS), by name: (state,
+    payload), the payload None (state 0; a boolean in state 0 or 1), its f32
+    values (state 1) or its block's file offset (state 2). Its words are
+    also Node.inline, in the same order (the pixel size's are not)."""
     unsupported: str | None = None
     """Why the node's layout could not be read (seed state 3...), if so."""
 
@@ -493,6 +538,48 @@ class Asm:
             return None
         return RawImage(width, height, *form, self.d[start : start + size])
 
+    def encoded_image(self, node: "Node") -> tuple[int, int] | None:
+        """Return the encoded file (JPEG...) image input ``node`` reads, if so.
+
+        docs/image-inputs.md: storage format 8 (the node word's top byte),
+        at offset ``uid`` a u32 length, then the file's bytes; resolved by
+        the uid, never by a walk of the data area. Returns (file offset,
+        length); None for another node or format. One that does not end
+        before the node or has no known image header is malformed:
+        image_problem says so.
+        """
+        if node.op not in (32, 33) or node.uid is None or not node.words:
+            return None
+        if node.flags >> 8 != ENCODED_FORMAT:
+            return None
+        at = node.uid + BASE
+        if at < DATA_START or at + LENGTH_SIZE > node.start:
+            return None
+        length = self.u32(at)
+        start = at + LENGTH_SIZE
+        if start + length > node.start or not self.d[start : start + length].startswith(
+            MAGICS
+        ):
+            return None
+        return start, length
+
+    def image_problem(self, node: "Node") -> str | None:
+        """Return why embedded image input ``node``'s image cannot be read, if so.
+
+        docs/image-inputs.md section 3: formats 1-7 raw (raw_image), 8 an
+        encoded file (encoded_image), others unsupported.
+        """
+        fmt = node.flags >> 8
+        if fmt in RAW_FORMATS:
+            if self.raw_image(node) is None:
+                return f"node {node.index}: malformed raw image at uid {node.uid}"
+            return None
+        if fmt == ENCODED_FORMAT:
+            if self.encoded_image(node) is None:
+                return f"node {node.index}: malformed encoded image at uid {node.uid}"
+            return None
+        return f"node {node.index}: image storage format {fmt} (unsupported)"
+
     def u16(self, at: int) -> int:
         """Return the u16 at ``at``."""
         return struct.unpack_from("<H", self.d, at)[0]
@@ -523,11 +610,18 @@ class Asm:
             k = self._fxmap_words(node, rest, is_offset)
         else:
             k = self._words(node, rest, is_offset)
-        blocks = node.blocks()
-        stop = (blocks[0] - start) // 4 - 1 if blocks else len(rest)
-        node.inline = rest[k:stop]
+        walked = node.op in NEIGHBOR_PARAMS and len(node.params) == len(
+            NEIGHBOR_PARAMS[node.op][1]
+        )  # (Asm._neighbor_words set its inline words)
+        if not walked:
+            blocks = node.blocks()
+            stop = (blocks[0] - start) // 4 - 1 if blocks else len(rest)
+            node.inline = rest[k:stop]
         node.reads = [w for w in words if w in known]
         self._inputs(node)
+        if node.op in (32, 33) and node.uid not in known and node.unsupported is None:
+            # an embedded image, not a graph input: found by its uid
+            node.unsupported = self.image_problem(node)
         # An input no node feeds (UNWIRED): not an input at all, so that
         # what reads it sees nothing, as Substance's empty input.
         node.inputs = {k: v for k, v in node.inputs.items() if v != UNWIRED}
@@ -570,6 +664,8 @@ class Asm:
             node.size_code = rest[k] + BASE
             node.code.append(node.size_code)
             k += 1
+        if known and node.op in NEIGHBOR_PARAMS:
+            return self._neighbor_words(node, rest, k, is_offset)
         fixed = CODE_COUNT.get(node.op)
         if fixed is not None:
             # Offsets after a set number of code offsets (none without bit 0)
@@ -583,6 +679,70 @@ class Asm:
                 node.code.append(rest[k] + BASE)
                 k += 1
         return k
+
+    @staticmethod
+    def _neighbor_words(node: Node, rest: list[int], k: int, is_offset) -> int:  # noqa: PLR0911
+        """Walk a neighborhood filter's parameter words from ``rest[k]``.
+
+        docs/node-params.md section 2: the pixel-size vector, then the op's
+        parameters in bit order (NEIGHBOR_PARAMS), each nothing, its f32
+        values or one offset by its state. They must end exactly at the
+        node's first block (or its end, with none). Returns the index where
+        the inline words (the parameters') start; Asm._node takes them up to
+        the first block. A state 3, a state-2 word that is no offset or a
+        region that does not end at the first block marks the node
+        unsupported.
+        """
+        where, spec = NEIGHBOR_PARAMS[node.op]
+        top = node.flags >> 8
+        states = top if where == "P" else (node.fields[0] if node.fields else 0)
+
+        def bad(why: str) -> int:
+            node.unsupported = f"node {node.index}: {why}"
+            return min(k, len(rest))
+
+        def f32s(words: list[int]) -> list[float]:
+            return [struct.unpack("<f", struct.pack("<I", w))[0] for w in words]
+
+        pixel = top >> PIXEL_SIZE_BIT & 3
+        if pixel == 3:  # noqa: PLR2004
+            return bad("pixel size in state 3 (unsupported)")
+        if pixel == 1:
+            if k + 2 > len(rest):
+                return bad("malformed: no words for its pixel size")
+            node.pixel_size = f32s(rest[k : k + 2])
+            k += 2
+        elif pixel == 2:  # noqa: PLR2004
+            if k >= len(rest) or not is_offset(rest[k]):
+                return bad("malformed: its pixel size's word is not an offset")
+            node.pixel_size_code = rest[k] + BASE
+            node.code.append(node.pixel_size_code)
+            k += 1
+        first = k
+        offsets = []
+        for name, bit, width in spec:
+            state = states >> bit & 3
+            if state == 3:  # noqa: PLR2004
+                return bad(f"{name} in state 3 (unsupported)")
+            if state == 0 or (width == BOOL and state == 1):
+                node.params[name] = (state, None)
+            elif state == 1:
+                if k + width > len(rest):
+                    return bad(f"malformed: no words for its {name}")
+                node.params[name] = (1, f32s(rest[k : k + width]))
+                k += width
+            else:
+                if k >= len(rest) or not is_offset(rest[k]):
+                    return bad(f"malformed: its {name}'s word is not an offset")
+                node.params[name] = (2, rest[k] + BASE)
+                offsets.append(rest[k] + BASE)
+                k += 1
+        node.inline = rest[first:k]
+        blocks = [*node.blocks(), *offsets]
+        end = (min(blocks) - node.start) // 4 - 1 if blocks else len(rest)
+        if k != end:
+            bad(f"malformed: its parameter words end at word {k + 1}, not {end + 1}")
+        return first
 
     @staticmethod
     def _seed_slot(node: Node, rest: list[int], k: int, is_offset) -> int:
