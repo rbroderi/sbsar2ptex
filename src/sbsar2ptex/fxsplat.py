@@ -21,7 +21,6 @@ then the grid's cells (start and count in the index list, as uints), then
 the index list (splat numbers, as uints).
 """
 
-import contextlib
 import math
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -102,12 +101,21 @@ def splats(
     keep no state the rest of the walk reads (``_deferrable``) are left for
     later and drawn together, a whole tree level at a time (``_lanes``).
     Should that raise anything, or lanes part ways, the plain walk runs
-    instead: it raises, or draws, as it would.
+    instead: it raises, or draws, as it would. Only TooBig found once
+    every function ran without error (_Counted) stands: the plain walk
+    would have run them too, and drawn past MAX_SPLATS.
     """
-    # (whatever the deferred walk raises, the plain walk raises again, in order)
-    with contextlib.suppress(Exception):
-        return _walk(node, tree, settings, inputs, color=color, size=size, defer=True)
-    return _walk(node, tree, settings, inputs, color=color, size=size, defer=False)
+    kw = {"color": color, "size": size}
+    try:
+        return _walk(node, tree, settings, inputs, defer=True, **kw)
+    except _Counted:
+        raise
+    except Exception:  # noqa: BLE001 - the plain walk raises it again, in its order
+        return _walk(node, tree, settings, inputs, defer=False, **kw)
+
+
+class _Counted(TooBig):
+    """TooBig, found with the whole tree evaluated."""
 
 
 @dataclass
@@ -283,7 +291,7 @@ def _walk(
     where = np.concatenate([np.array(walked, dtype=np.int64), met])
     order = np.argsort(where, kind="stable")
     if len(order) > MAX_SPLATS:
-        raise TooBig
+        raise _Counted
     own = _columns(mine)
     width = 4 if color else 1
     rows = np.array([s.value for s in mine], dtype=np.float64).reshape(-1, width)

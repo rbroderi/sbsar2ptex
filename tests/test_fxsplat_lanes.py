@@ -143,6 +143,29 @@ def test_a_stateless_tree_draws_as_lanes() -> None:
     assert fxsplat.float_bytes(got_raster) == expected
 
 
+def test_too_many_splats_drawn_as_lanes_is_too_big(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asm = Asm()
+    params = quad_blocks(asm)
+    leaf = fxmap.Quadrant(pattern=3, params=params)
+    root = fxmap.Quadrant(pattern=2, params=params, children=[leaf] * 4)
+    st = fxmap.Settings(seed=8)
+    node = asm.node()
+    monkeypatch.setattr(fxsplat, "MAX_SPLATS", 3)
+    with pytest.raises(fxsplat.TooBig):
+        fxsplat._walk(node, root, st, {}, color=False, size=8, defer=False)
+    # found with every function run: it stands, no plain walk after it
+    plain = fxsplat._walk
+    monkeypatch.setattr(
+        fxsplat,
+        "_walk",
+        lambda *a, defer, **k: plain(*a, defer=defer, **k) if defer else pytest.fail("walked again"),
+    )
+    with pytest.raises(fxsplat.TooBig):
+        fxsplat.splats(node, root, st, {}, color=False, size=8)
+
+
 def test_a_stateful_walk_defers_its_stateless_subtrees() -> None:
     asm = Asm()
     # Iterate: count 40, setting v5 = 0.25; each pass's Switch reads v5,
