@@ -225,7 +225,9 @@ def _walk(
         own = t.seed or 0
         if t.seed_code is not None:  # first of the node's functions, each visit
             block = block_at(t.seed_code)
-            own = seeds.seed(block, inputs, ctx, variables, slots=slots)
+            own = seeds.seed(
+                block, inputs, ctx, variables, incoming=incoming, slots=slots
+            )
         inherited = not isinstance(t, (fxmap.Iterate, fxmap.Switch)) or t.inherited
         e = ((incoming if inherited else 0) + own) & UINT32_MASK
         if isinstance(t, fxmap.Quadrant):
@@ -279,7 +281,8 @@ def _walk(
                 count = int(run(t.count.code, e, "iteratecount", ctx)[0])
             else:
                 count = t.count
-            enter(t.first, e, pos, cell, depth, number)
+            # (output 0 gets the incoming state, not the effective one: 2.6)
+            enter(t.first, incoming, pos, cell, depth, number)
             passes = e
             for i in range(count):
                 passes = iterate_step(passes)
@@ -629,8 +632,8 @@ def _lanes(
                 passes = _ints(run(t.count.code, here, "iteratecount", ctx)[0])
             else:
                 passes = np.full(count, t.count, dtype=np.int64)
-            first = _Front(
-                e, front.x, front.y, front.number,
+            first = _Front(  # (output 0: the incoming states, 2.6)
+                front.incoming, front.x, front.y, front.number,
                 [*front.path, np.zeros(count, dtype=np.int64)], front.store,
             )  # fmt: skip
             enter(t.first, first, depth)

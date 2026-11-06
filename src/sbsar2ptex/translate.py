@@ -1278,6 +1278,101 @@ def _uniform(node: Node, name: str, *, color: bool, size: int) -> Made:
     return shader(name, [], "f", f"return {num(v)};"), []
 
 
+TEXT_PARAMS = (("background", 2), ("fontcolor", 4), ("matrix", 10),
+               ("position", 6), ("fontsize", 8))  # fmt: skip
+"""A Text node's parameters in their words' order (not bit order), with
+their state's bit in F (docs/op-34.md 2.2)."""
+TEXT_KNOWN_F = 0x3FFC
+"""F's bits in use: five 2-bit states and the alignment (bits 12-13)."""
+
+
+def text_params(node: Node, *, color: bool) -> dict[str, tuple[str, Any]]:
+    """Return a Text node's parameters: (state, value) by name (docs/op-34.md 2).
+
+    "default" (None), "const" (its f32s) or "func" (its block's file
+    offset). Raises UnsupportedError for what the spec does not know: a
+    state 3, an alignment of 3, F bits 0-1 or 14-31 set, a non-zero second
+    word, or words missing.
+    """
+    where = f"node {node.index} (text)"
+    if len(node.fields) < 4:  # noqa: PLR2004
+        msg = f"{where}: its fields could not be read"
+        raise UnsupportedError(msg)
+    f, unknown = node.fields[0], node.fields[1]
+    if f & ~TEXT_KNOWN_F & 0xFFFFFFFF:
+        msg = f"{where}: unknown parameter-state bits {f:#010x}"
+        raise UnsupportedError(msg)
+    if unknown:
+        msg = f"{where}: its second word is {unknown:#x}, not 0 (unknown)"
+        raise UnsupportedError(msg)
+    if f >> 12 & 3 == 3:  # noqa: PLR2004
+        msg = f"{where}: alignment 3 (unknown)"
+        raise UnsupportedError(msg)
+    width = {"background": 4 if color else 1, "fontcolor": 4 if color else 1,
+             "matrix": 4, "position": 2, "fontsize": 1}  # fmt: skip
+    out: dict[str, tuple[str, Any]] = {}
+    at = 0
+    for pname, bit in TEXT_PARAMS:
+        state = f >> bit & 3
+        if state == 0:
+            out[pname] = ("default", None)
+            continue
+        if state == 3:  # noqa: PLR2004
+            msg = f"{where}: {pname} in state 3 (unknown)"
+            raise UnsupportedError(msg)
+        n = width[pname] if state == 1 else 1
+        words = node.inline[at : at + n]
+        if len(words) < n:
+            msg = f"{where}: no words for its {pname}"
+            raise UnsupportedError(msg)
+        at += n
+        if state == 1:
+            out[pname] = ("const", [f32(w) for w in words])
+            continue
+        target = words[0] + BASE
+        if not (node.start < target < node.end and words[0] % 4 == 0):
+            msg = f"{where}: its {pname} function's offset is not in the node"
+            raise UnsupportedError(msg)
+        out[pname] = ("func", target)
+    return out
+
+
+def _text(node: Node, name: str, *, color: bool, size: int) -> Made:
+    """Translate a Text node (docs/op-34.md): drawn without ink, a uniform fill.
+
+    With no font, an empty text or one of spaces only, nothing is drawn and
+    the node is its background colour, filled as a uniform colour is
+    (stored rounds it so: TEXT_OPS). The background stays live: a knob, or
+    its function. Text with ink needs its embedded font's glyphs drawn,
+    which is not translated (UnsupportedError).
+    """
+    params = text_params(node, color=color)
+    text_at, font_at = node.fields[2], node.fields[3]
+    if font_at:
+        text = [] if text_at == 0 else node.text
+        if text is None:
+            msg = f"node {node.index} (text): its text record could not be read"
+            raise UnsupportedError(msg)
+        if any(c != 0x20 for c in text):  # noqa: PLR2004 (a space: no outline)
+            msg = (
+                f"node {node.index} (text): text drawn with an embedded font"
+                " (glyph rendering is not translated)"
+            )
+            raise UnsupportedError(msg)
+    state, value = params["background"]
+    n, t = (4, "rgba") if color else (1, "f")
+    if state == "func":  # (gray: the block returns the colour's mean)
+        bg: Any = dynamic(node, value)
+    else:
+        default = [0.0, 0.0, 0.0, 1.0] if color else [0.0]
+        vals = value if state == "const" else default
+        bg = knob("background", "Background", vals if color else vals[0])
+    return shader(name, [], t, f"return {vec(bg, n)};"), []
+
+
+TEXT_OPS = (34, 35)
+
+
 def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
     t, n = ("rgba", 4) if color else ("f", 1)
     p = flag_params(node.fields[0], node.inline, LEVELS, n, node)
@@ -1986,7 +2081,9 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     of pixels equal, the rest by one level; 8 bits: all but 0.002%), the
     first's image stored in the node's format as a node's is. So it is
     translated as those (dmb_glsl): their pixel-area box, end-tap merges
-    and, at 8 bits, Substance's 8-bit arithmetic.
+    and, at 8 bits, Substance's 8-bit arithmetic. The pixel-size vector v
+    (docs/node-params.md 7.2) makes the x pass's intensity k v.x and the y
+    pass's k v.y.
     """
     t = "rgba" if color else "f"
     g = "vec4" if color else "float"
@@ -1997,7 +2094,12 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
         # Read for each: a function's helper goes with the shader made next.
         p = word_params(node, [("intensity", 4, 10.0)], {})
         k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
-        setup = dmb_setup_glsl(num(k), turn, n, lpx=fmt == 1)
+        # the pixel-size vector: k v.x along x, k v.y along y (7.2)
+        v = pixel_size_glsl(node)
+        kv = (
+            num(k) if v is None else f"({num(k)} * {v}.{'x' if turn == '0.0' else 'y'})"
+        )
+        setup = dmb_setup_glsl(kv, turn, n, lpx=fmt == 1)
         helpers, body = dmb_glsl(g, fmt, n, f"({px_int_glsl()} - 1)", setup)
         made = shader(pass_name, [("input", t)], t, body)
         made["shader_model"]["instance"] = helpers + made["shader_model"]["instance"]
@@ -2043,10 +2145,47 @@ def _dmb_setup(node: Node, size: int, *, lpx: bool = False) -> str:
     )
     k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
     turn = knob("angle", "Angle", p["angle"])
-    return dmb_setup_glsl(num(k), num(turn), px_glsl(), lpx=lpx)
+    v = pixel_size_glsl(node)
+    return dmb_setup_glsl(num(k), num(turn), px_glsl(), lpx=lpx, v=v)
 
 
-def dmb_setup_glsl(k: str, turn: str, n: str, *, lpx: bool = False) -> str:
+def dmb_pixel_size_glsl(k: str, turn: str, v: str) -> list[str]:
+    """Return GLSL giving a directional motion blur's intensity and angle with v.
+
+    docs/node-params.md 7.2: with the pixel-size vector ``v`` (a GLSL vec2)
+    the blur's x geometry is times v.x, its y times v.y. Declares ``psk``
+    and ``psA``, the intensity and angle (turns) of the blur with v = (1,
+    1) that this is: for an isotropic v = (p, p), k p and the angle; at 0
+    or 0.5 turns k v.x, at 0.25 or 0.75 k v.y (all float32 products).
+
+    At other angles with an unequal v the engine's geometry is unknown
+    (7.4): this uses the vector form, the blur of (k v.x cos, k v.y sin),
+    which the spec measured close to Substance's (same extent, the line's
+    angle within 0.3 degrees) but not pixel-exact. Approximate.
+    """
+    return [
+        f"vec2 psv = {v};",
+        f"float psk = {k} * psv.x;",
+        f"float psA = {turn};",
+        "if (psv.x != psv.y) {",
+        f"\tfloat a4 = {turn} * 4.0;",
+        "\tfloat m4 = floor(a4 + 0.5);",
+        "\tif (a4 == m4) {",
+        f"\t\tpsk = {k} * (mod(m4, 2.0) == 0.0 ? psv.x : psv.y);",
+        "\t} else {",
+        "\t\t// approximate: the vector form (docs/node-params.md 7.4)",
+        f"\t\tfloat pa = 6.28318531 * {turn};",
+        f"\t\tvec2 pd = vec2({k} * psv.x * cos(pa), {k} * psv.y * sin(pa));",
+        "\t\tpsk = length(pd);",
+        "\t\tpsA = atan(pd.y, pd.x) / 6.28318531;",
+        "\t}",
+        "}",
+    ]
+
+
+def dmb_setup_glsl(
+    k: str, turn: str, n: str, *, lpx: bool = False, v: str | None = None
+) -> str:
     """Return GLSL deriving a directional motion blur's geometry.
 
     From its intensity ``k`` and angle ``turn`` (GLSL values) and the image
@@ -2054,10 +2193,16 @@ def dmb_setup_glsl(k: str, turn: str, n: str, *, lpx: bool = False) -> str:
     y), the slope ``t`` (minor-axis texels per step), the radius ``R`` in
     steps, the tap count ``n`` either side, the end taps' weight ``f``, and
     ``X0``, the image center the frame is sheared about; with ``lpx`` also
-    ``Lpx``, the length in texels.
+    ``Lpx``, the length in texels. ``v``, a pixel-size vector (a GLSL
+    vec2), changes the intensity and angle first (dmb_pixel_size_glsl).
     """
+    head: list[str] = []
+    if v is not None:
+        head = dmb_pixel_size_glsl(k, turn, v)
+        k, turn = "psk", "psA"
     return "\n".join(
         [
+            *head,
             f"float N = {n};",
             f"float A = {turn};",
             "float ang = 6.28318531 * A;",
@@ -2711,7 +2856,9 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     input's exact levels (a 32-bit buffer).
 
     Intensity and angle are live: everything is computed from them in the
-    shader, so the tap loops run to a bound counted per pixel.
+    shader, so the tap loops run to a bound counted per pixel. So is the
+    pixel-size vector (dmb_pixel_size_glsl; approximate at oblique angles
+    with an unequal one).
     """
     t = "rgba" if color else "f"
     g = "vec4" if color else "float"
@@ -2830,19 +2977,46 @@ def dmb_glsl(g: str, fmt: int, n: str, mask: str, setup: str) -> tuple[str, str]
 
 
 def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:
-    """Sharpen: x + k (4 x - its four neighbors), k the intensity."""
+    """Sharpen: x + k (4 x - its four neighbors), k the intensity.
+
+    With the pixel-size vector v (docs/node-params.md 7.2): x + k v.x (2 x
+    - left - right) + k v.y (2 x - up - down), k v each a float32 product;
+    an isotropic v = (p, p) is the form above with intensity k p.
+    """
     t = "rgba" if color else "f"
     k = word_params(node, [("intensity", 4, 1.0)], {})["intensity"]
     k = knob("intensity", "Intensity", k, 0.0, 4.0)
     e = f"1.0 / {px_glsl()}"
+    v = pixel_size_glsl(node)
+    reads = [
+        "vec4 sr = vec4($input(fract(uv + e)));",
+        "vec4 sl = vec4($input(fract(uv - e)));",
+        "vec4 su = vec4($input(fract(uv + e.yx)));",
+        "vec4 sd = vec4($input(fract(uv - e.yx)));",
+        "vec4 s = sr + sl + su + sd;",
+    ]
+    if v is None:
+        sharp = [f"vec4 r = clamp(c + {num(k)} * (4.0 * c - s), 0.0, 1.0);"]
+        reads = [
+            (
+                "vec4 s = vec4($input(fract(uv + e))) + vec4($input(fract(uv - e)))"
+                " + vec4($input(fract(uv + e.yx))) + vec4($input(fract(uv - e.yx)));"
+            )
+        ]
+    else:
+        kx, ky = f"({num(k)} * psv.x)", f"({num(k)} * psv.y)"
+        sharp = [
+            f"vec2 psv = {v};",
+            "vec4 r = psv.x == psv.y",
+            f"\t? c + {kx} * (4.0 * c - s)",
+            f"\t: c + {kx} * (2.0 * c - (sr + sl)) + {ky} * (2.0 * c - (su + sd));",
+            "r = clamp(r, 0.0, 1.0);",
+        ]
     lines = [
         f"vec2 e = vec2({e}, 0.0);",
         "vec4 c = vec4($input(uv));",
-        (
-            "vec4 s = vec4($input(fract(uv + e))) + vec4($input(fract(uv - e)))"
-            " + vec4($input(fract(uv + e.yx))) + vec4($input(fract(uv - e.yx)));"
-        ),
-        f"vec4 r = clamp(c + {num(k)} * (4.0 * c - s), 0.0, 1.0);",
+        *reads,
+        *sharp,
         "return r;" if color else "return r.x;",
     ]
     return buffered(
@@ -3142,15 +3316,32 @@ def _warp_round(x: str) -> str:
     return f"roundEven({x})" if _DMB_AMD else f"floor({x} + 0.5)"
 
 
-def warp_body(n: str, k: str, gradient: str = "$gradient") -> str:
+def warp_body(n: str, k: str, gradient: str = "$gradient", v: str | None = None) -> str:
     """Return a warp's GLSL body (warp_glsl's helpers): K = intensity N / 256.
 
     The sample is at the pixel's center plus K times the gradient's slope,
     backward differences over a texel of exact level values: all float32,
     in Substance's order. ``k`` is the intensity, ``n`` the image width
-    (GLSL values).
+    (GLSL values). With the pixel-size vector ``v`` (a GLSL vec2;
+    docs/node-params.md 7.2), K along each axis is the float32 product of
+    the intensity and that axis's component, times N / 256: so v = (p, p)
+    is intensity k p exactly.
     """
     at = f"((mod(px - vec2({{}}), {n}) + 0.5) / {n})"
+    if v is None:
+        scale = [
+            f"float K = {k} * ({n} / 256.0);",
+            "float ox = wnc_$(name)((h - hx) * K, z);",
+            "vec2 o = vec2(ox, wnc_$(name)((h - hy) * K, z));",
+        ]
+    else:
+        scale = [
+            f"vec2 psv = {v};",
+            f"float Kx = wnc_$(name)({k} * psv.x, z) * ({n} / 256.0);",
+            f"float Ky = wnc_$(name)({k} * psv.y, z) * ({n} / 256.0);",
+            "float ox = wnc_$(name)((h - hx) * Kx, z);",
+            "vec2 o = vec2(ox, wnc_$(name)((h - hy) * Ky, z));",
+        ]
     return "\n".join(
         [
             "uint z = uint(uv.x > 1e30);",
@@ -3159,15 +3350,15 @@ def warp_body(n: str, k: str, gradient: str = "$gradient") -> str:
             f"float h = $(name)_val({gradient}(c));",
             f"float hx = $(name)_val({gradient}{at.format('1.0, 0.0')});",
             f"float hy = $(name)_val({gradient}{at.format('0.0, 1.0')});",
-            f"float K = {k} * ({n} / 256.0);",
-            "float ox = wnc_$(name)((h - hx) * K, z);",
-            "vec2 o = vec2(ox, wnc_$(name)((h - hy) * K, z));",
+            *scale,
             f"return $(name)_read({_warp_round(f'(c + o) * ({n} * 256.0) - 128.0')});",
         ]
     )
 
 
-def dwarp_body(n: str, k: str, turn: str, intensity: str = "$intensity") -> str:
+def dwarp_body(
+    n: str, k: str, turn: str, intensity: str = "$intensity", v: str | None = None
+) -> str:
     """Return a directional warp's GLSL body (warp_glsl's helpers, WARP_SIN_GLSL).
 
     The direction (C, S) is sin(2 pi turn + pi / 2) and sin(2 pi turn), all
@@ -3175,8 +3366,22 @@ def dwarp_body(n: str, k: str, turn: str, intensity: str = "$intensity") -> str:
     added, rounded first); (C, S) times intensity / 256 first, then times
     the intensity image's level value at the pixel, added to its center.
     ``k`` and ``turn`` are the intensity and the angle, ``n`` the image
-    width (GLSL values).
+    width (GLSL values). With the pixel-size vector ``v`` (a GLSL vec2;
+    docs/node-params.md 7.2) the offset is (k / 256) m (v.x C, v.y S): the
+    intensity times each component in float32 first, so v = (p, p) is
+    intensity k p exactly.
     """
+    if v is None:
+        scale = [f"float i8 = {k} * 0.00390625;", "vec2 kv = vec2(i8 * C, i8 * S);"]
+    else:
+        scale = [
+            f"vec2 psv = {v};",
+            (
+                f"vec2 i8 = vec2(wnc_$(name)({k} * psv.x, z),"
+                f" wnc_$(name)({k} * psv.y, z)) * 0.00390625;"
+            ),
+            "vec2 kv = vec2(i8.x * C, i8.y * S);",
+        ]
     return "\n".join(
         [
             "uint z = uint(uv.x > 1e30);",
@@ -3184,8 +3389,7 @@ def dwarp_body(n: str, k: str, turn: str, intensity: str = "$intensity") -> str:
             f"float arg = wnc_$(name)({turn} * 6.2831855, z);",
             "float C = wsin_$(name)(arg + 1.5707964);",
             "float S = wsin_$(name)(arg);",
-            f"float i8 = {k} * 0.00390625;",
-            "vec2 kv = vec2(i8 * C, i8 * S);",
+            *scale,
             f"float v = $(name)_val({intensity}(c));",
             "vec2 o = vec2(wnc_$(name)(v * kv.x, z), wnc_$(name)(v * kv.y, z));",
             f"return $(name)_read({_warp_round(f'(c + o) * ({n} * 256.0) - 128.0')});",
@@ -3207,7 +3411,8 @@ def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     k = word_params(node, [("intensity", 5, 1.0)], {})["intensity"]
     k = knob("intensity", "Intensity", k, 0.0, 32.0)
     n = px_glsl()
-    made = shader(name, [("input", t), ("gradient", "f")], t, warp_body(n, num(k)))
+    body = warp_body(n, num(k), v=pixel_size_glsl(node))
+    made = shader(name, [("input", t), ("gradient", "f")], t, body)
     model = made["shader_model"]
     eight = _eight("input", "gradient")
     model["instance"] = (
@@ -3239,7 +3444,7 @@ def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     k = knob("warp_intensity", "Intensity", p["intensity"], 0.0, 64.0)
     turn = knob("angle", "Angle", p["angle"])
     n = px_glsl()
-    body = dwarp_body(n, num(k), num(turn))
+    body = dwarp_body(n, num(k), num(turn), v=pixel_size_glsl(node))
     made = shader(name, [("input", t), ("intensity", "f")], t, body)
     model = made["shader_model"]
     eight = _eight("input", "intensity")
@@ -3255,6 +3460,8 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
 
     k is the intensity times N / 256 (N the image width); flag 0x4 flips y
     (inverse dy); alpha is the height if flag 0x10 (input2alpha), else 1.
+    The pixel-size vector v (docs/node-params.md 7.2) makes the slopes
+    -k v.x dx and -k v.y dy, k v each a float32 product first.
     """
     flags = node.fields[0]
     k = flag_params(flags & 3, node.inline, [("intensity", 0, 1.0)], 1, node)[
@@ -3265,13 +3472,20 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
     height = knob("height_alpha", "Height in alpha", 1.0 if alpha else 0.0)
     # per texel at 256 px: resolution independent (N / 256 exact)
     kn = f"({num(k)} * ({px_glsl()} / 256.0))"
+    knx = kny = kn
+    v = pixel_size_glsl(node)
+    scale = [] if v is None else [f"vec2 psv = {v};"]
+    if v is not None:
+        knx = f"(({num(k)} * psv.x) * ({px_glsl()} / 256.0))"
+        kny = f"(({num(k)} * psv.y) * ({px_glsl()} / 256.0))"
     flip = bool_param(node, "inverty") if node.params else bool(flags & 4)
     sy = "" if flip else "-"
     lines = [
         f"vec2 e = vec2(1.0 / {px_glsl()}, 0.0);",
+        *scale,
         "float h = $input(uv);",
         "vec2 g = vec2(h - $input(fract(uv - e)), h - $input(fract(uv - e.yx)));",
-        f"vec3 n = normalize(vec3(-{kn} * g.x, {sy}{kn} * g.y, 1.0));",
+        f"vec3 n = normalize(vec3(-{knx} * g.x, {sy}{kny} * g.y, 1.0));",
         f"return vec4(n * 0.5 + 0.5, {num(height)} > 0.5 ? h : 1.0);",
     ]
     made = shader(name, [("input", "f")], "rgba", "\n".join(lines))
@@ -3320,6 +3534,82 @@ def emboss_scale(node: Node) -> list[float]:
         msg = "an emboss's pixel size is not a float2"
         raise UnsupportedError(msg)
     return [float(c) for c in v]
+
+
+_SIZE_BUILTINS = (1, 3)
+"""$size and $sizelog2: what a pixel-size function may read and be (1, 1)."""
+_LIVE_OPS = (0x02, 0x03, RAND, 0x33, 0x34)
+"""Ops whose value is not the output size's (graph input, get slot, rand, samples)."""
+MAX_SIZE_LOG2 = 14
+"""The largest Material Maker image (log2) pixel_size_unit checks."""
+
+
+def pixel_size_unit(node: Node) -> bool:
+    """Return whether a neighborhood filter's pixel-size vector is (1, 1).
+
+    docs/node-params.md section 7: none (state 0) is (1, 1); a constant is
+    its value. A function (state 2) is (1, 1) when it reads only the output
+    size and is (1, 1) at every square size Material Maker renders, as the
+    cooker's default block pow2(min(s.yx - s.xy, 0)) (and the warp's, with
+    the exponent doubled) is: the same vector whatever the graph does, so
+    nothing to keep live (section 1.1). Anything else must be kept live.
+    """
+    if node.pixel_size is not None:
+        return [float(c) for c in node.pixel_size] == [1.0, 1.0]
+    at = node.pixel_size_code
+    if at is None:
+        return True
+    block = decode(node.at(at, (node.end - at) // 4))
+    for ins in block.instrs:
+        if ins.op in _LIVE_OPS or (
+            ins.op == 0x01 and ins.operands[0] not in _SIZE_BUILTINS
+        ):
+            return False
+    for s in range(MAX_SIZE_LOG2 + 1):
+        n = float(1 << s)
+        try:
+            v = evaluate(block, {}, {1: [n, n], 3: [float(s)] * 2})
+        except (FunctionError, KeyError, IndexError, ValueError):
+            return False
+        if [float(c) for c in v] != [1.0, 1.0]:
+            return False
+    return True
+
+
+def pixel_size_glsl(node: Node) -> str | None:
+    """Return GLSL for a neighborhood filter's pixel-size vector v, a vec2.
+
+    docs/node-params.md section 7: the filter's x geometry is times v.x,
+    its y geometry times v.y. A function stays live (dynamic: its helper
+    goes with the shader made next, so call this once per shader); a
+    constant is a literal. None when v is (1, 1) (pixel_size_unit): the
+    filter is as without it.
+    """
+    if pixel_size_unit(node):
+        return None
+    if node.pixel_size is not None:
+        return vec(node.pixel_size, 2)
+    return vec(dynamic(node, node.pixel_size_code), 2)
+
+
+def pixel_size_static(node: Node) -> list[float]:
+    """Return v with the graph inputs at their defaults (for fixed step counts)."""
+    if node.pixel_size is not None:
+        return [float(c) for c in node.pixel_size]
+    at = node.pixel_size_code
+    if at is None:
+        return [1.0, 1.0]
+    block = decode(node.at(at, (node.end - at) // 4))
+    n = float(1 << _CTX.size)
+    values = {
+        uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
+    }
+    try:
+        v = evaluate(block, values, {1: [n, n], 3: [float(_CTX.size)] * 2},
+                     slots=_slot_store(values))  # fmt: skip
+    except (FunctionError, KeyError):
+        return [1.0, 1.0]
+    return [float(c) for c in v][:2] if len(v) >= 2 else [1.0, 1.0]  # noqa: PLR2004
 
 
 def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
@@ -3427,22 +3717,40 @@ JFA_OWN = "if (all(lessThan(abs(c.xy - uv), vec2({half})))) d = 0.0;"
 """A mask pixel, its own seed (within half a texel): at distance 0."""
 
 
-def jfa_step_lines(step: str) -> list[str]:
+TORUS_SCALED_GLSL = """float tdistv_$(name)(vec2 a, vec2 b, vec2 s) {
+\tvec2 d = abs(a - b);
+\treturn length(min(d, vec2(1.0) - d) / s);
+}
+"""
+"""TORUS_GLSL's distance with each axis over ``s`` (a distance's pixel-size
+vector: docs/node-params.md 7.2 and 7.4, the nearest in the scaled metric)."""
+
+
+def jfa_step_lines(step: str, scale: str | None = None) -> list[str]:
     """Return a jump flooding pass's GLSL, its neighbours ``step`` (uv) away.
 
     In Substance's order: itself, +x, -x, +y, -y, then the diagonals
     (+, +), (-, -), (+, -), (-, +); the first of equally near ones wins.
+    With ``scale``, a distance's pixel-size vector (a GLSL vec2), nearest is
+    in the metric |(dx / v.x, dy / v.y)| (TORUS_SCALED_GLSL) when v's
+    components differ, and plain when they are equal.
     """
+    if scale is None:
+        head, dist = [], "tdist_$(name)(uv, {})"
+    else:
+        head = [f"vec2 pss = {scale};", "if (pss.x == pss.y) pss = vec2(1.0);"]
+        dist = "tdistv_$(name)(uv, {}, pss)"
     return [
+        *head,
         "vec4 best = $input(uv);",
-        "float bd = best.z > 0.5 ? tdist_$(name)(uv, best.xy) : 1e9;",
+        f"float bd = best.z > 0.5 ? {dist.format('best.xy')} : 1e9;",
         (
             "const ivec2 jo[8] = ivec2[8](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1),"
             " ivec2(0, -1), ivec2(1, 1), ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1));"
         ),
         "for (int j = 0; j < 8; j++) {",
         f"\tvec4 c = $input(fract(uv + vec2(jo[j]) * {step}));",
-        "\tfloat d = tdist_$(name)(uv, c.xy);",
+        f"\tfloat d = {dist.format('c.xy')};",
         "\tif (c.z > 0.5 && d < bd) { best = c; bd = d; }",
         "}",
         "return best;",
@@ -3460,6 +3768,11 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
     positions (nearest sampling; JFA_SEED, to 1/65535), steps halving
     from the largest power of two that covers D down to one texel, then
     one more one-texel pass (jfa_step_lines).
+
+    The pixel-size vector v (docs/node-params.md 7.2) makes the reach D
+    v.x along x and D v.y along y: the falloff 1 - |(dx / v.x, dy / v.y)| /
+    (D N / 256), the nearest pixel in that metric (7.4, inferred); an
+    isotropic v = (p, p) is distance D p exactly.
     """
     t = "rgba" if color else "f"
     flags = node.fields[0]
@@ -3468,7 +3781,9 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
         "distance"
     ]
     n = 1 << size
-    reach_px = static(reach) * n / 256
+    unit = pixel_size_unit(node)
+    # the steps cover the reach along the longer axis (v at the graph's defaults)
+    reach_px = static(reach) * n / 256 * (1.0 if unit else max(pixel_size_static(node)))
     steps = []
     s = 1
     while s < min(reach_px, n / 2):
@@ -3488,20 +3803,40 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
         # The steps are the build size's, as parts of the image (they reach
         # as far at any size); the one-texel ones are a texel at any size.
         offset = f"1.0 / {live}" if step == 1 else num(step / n)
-        body = "\n".join(jfa_step_lines(offset))
+        scale = None if unit else pixel_size_glsl(node)  # (live: one per shader)
+        body = "\n".join(jfa_step_lines(offset, scale))
         jfa = shader(f"{name}_pass{k}", [("input", "rgba")], "rgba", body)
-        jfa["shader_model"]["instance"] = TORUS_GLSL + jfa["shader_model"]["instance"]
+        torus = TORUS_GLSL if unit else TORUS_SCALED_GLSL
+        jfa["shader_model"]["instance"] = torus + jfa["shader_model"]["instance"]
         nodes += [buf, jfa]
         wires += [wire(last, buf["name"]), wire(buf["name"], jfa["name"])]
         last = jfa["name"]
     final_buf = buffer(f"{name}_near", size, filtering=False)
-    lines = [
-        "vec4 c = $input(uv);",
-        f"float r = max({num(reach)} * ({live} / 256.0), 1e-6);",
-        f"float d = tdist_$(name)(uv, c.xy) * {live};",
-        JFA_OWN.format(half=f"(0.5 / {live})"),
-        "float f = c.z > 0.5 ? clamp(1.0 - d / r, 0.0, 1.0) : 0.0;",
-    ]
+    if unit:
+        lines = [
+            "vec4 c = $input(uv);",
+            f"float r = max({num(reach)} * ({live} / 256.0), 1e-6);",
+            f"float d = tdist_$(name)(uv, c.xy) * {live};",
+            JFA_OWN.format(half=f"(0.5 / {live})"),
+            "float f = c.z > 0.5 ? clamp(1.0 - d / r, 0.0, 1.0) : 0.0;",
+        ]
+    else:
+        lines = [
+            "vec4 c = $input(uv);",
+            f"vec2 psv = {pixel_size_glsl(node)};",
+            f"float r = max(({num(reach)} * psv.x) * ({live} / 256.0), 1e-6);",
+            f"float d = tdist_$(name)(uv, c.xy) * {live};",
+            JFA_OWN.format(half=f"(0.5 / {live})"),
+            "float q = d / r;",
+            "if (psv.x != psv.y && d > 0.0) {",
+            "\tvec2 rr = max(vec2({0} * psv.x, {0} * psv.y) * ({1} / 256.0),"
+            " vec2(1e-6));".format(num(reach), live),
+            "\tvec2 dd = abs(c.xy - uv);",
+            f"\tdd = min(dd, vec2(1.0) - dd) * {live};",
+            "\tq = length(dd / rr);",
+            "}",
+            "float f = c.z > 0.5 ? clamp(1.0 - q, 0.0, 1.0) : 0.0;",
+        ]
     inputs = [("input", "rgba")]
     if has_source:
         inputs.append(("source", t))
@@ -4337,8 +4672,9 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
                 count = f"int({_fx_function(node, tree.count.code, 'iteratecount')})"
             else:
                 count = str(tree.count)
+            # (output 0: the incoming state, not e: fxmap-node-0x09.md 2.6)
             same = args.format(
-                pos="pos", cell="cell", depth="depth", number="number", st="e"
+                pos="pos", cell="cell", depth="depth", number="number", st="st"
             )
             lines.append(f"int n = {count};")  # first: it may set variables
             if first:
@@ -4635,6 +4971,8 @@ TRANSLATORS = {
     39: _dyngradient,
     44: _curve,
     45: _curve,
+    34: _text,
+    35: _text,
 }
 """Each op's translator: (node, MM node name, *, color, size log2) -> Made."""
 
@@ -4836,7 +5174,7 @@ def stored(made: Sub, node: Node) -> bool:
         out = next((n for n in out["nodes"] if n["name"] == last), None)
     if out is None or out.get("type") != "shader":
         return False
-    return store_shader(out, steps, fill=node.op in (12, 13))
+    return store_shader(out, steps, fill=node.op in (12, 13, *TEXT_OPS))
 
 
 def store_shader(out: dict[str, Any], steps: int | None, *, fill: bool = False) -> bool:

@@ -191,6 +191,9 @@ class Loop:
     range, ending at ``init`` (run once); the condition range, (init,
     cond]; the body range, (cond, body]; the loop instruction, ``at``,
     comes right after ``body``. A ``cap`` of 0 is no cap.
+
+    ``cond`` may be NO_VALUE (section 1.4.1): no condition range, the body
+    range is (init, body], and the loop runs exactly ``cap`` times.
     """
 
     init: int
@@ -201,8 +204,18 @@ class Loop:
 
     @property
     def start(self) -> int:
-        """The first instruction the loop repeats (its condition range's)."""
+        """The first instruction the loop repeats (its condition's, or body's)."""
         return self.init + 1
+
+    @property
+    def has_cond(self) -> bool:
+        """Whether the loop has a condition range (``cond`` is not NO_VALUE)."""
+        return self.cond != NO_VALUE
+
+    @property
+    def body_start(self) -> int:
+        """The body range's first instruction."""
+        return self.cond + 1 if self.has_cond else self.init + 1
 
 
 def while_operands(ins: Instr) -> tuple[int, int, int, int]:
@@ -223,15 +236,22 @@ def while_operands(ins: Instr) -> tuple[int, int, int, int]:
 def loops(block: Block) -> dict[int, Loop]:
     """Return the block's while loops, by their start (``Loop.start``).
 
-    Raises FunctionError for ranges that are not as section 1.2 has them,
-    or loops that overlap without one inside a range of the other.
+    Raises FunctionError for ranges that are not as section 1.2 has them
+    (``init < cond < body``, or ``cond`` NO_VALUE and ``init < body``, with
+    ``body`` just before the loop), a NO_VALUE ``init`` or ``body``
+    (unsupported), or loops that overlap without one inside a range of the
+    other.
     """
     found: dict[int, Loop] = {}
     for k, ins in enumerate(block.instrs):
         if ins.op != WHILE:
             continue
         init, cond, body, cap = while_operands(ins)
-        if not 0 <= init < cond < body == k - 1:
+        if NO_VALUE in (init, body):
+            msg = f"while #{k}: unsupported NO_VALUE init or body ({init}, {body})"
+            raise FunctionError(msg)
+        ordered = init < cond < body if cond != NO_VALUE else init < body
+        if not (init >= 0 and ordered and body == k - 1):
             msg = f"while #{k}: ranges ({init}, {cond}, {body}) not just before it"
             raise FunctionError(msg)
         if init + 1 in found:
@@ -242,7 +262,8 @@ def loops(block: Block) -> dict[int, Loop]:
         for inner in found.values():
             if not outer.start < inner.start <= outer.body:
                 continue
-            end = outer.cond if inner.start <= outer.cond else outer.body
+            in_cond = outer.has_cond and inner.start <= outer.cond
+            end = outer.cond if in_cond else outer.body
             if inner.at > end:
                 msg = f"while #{inner.at} straddles a range of while #{outer.at}"
                 raise FunctionError(msg)
@@ -597,10 +618,13 @@ def _run(
             if n >= MAX_ITERATIONS:
                 msg = f"while #{loop.at} still running after {n} iterations"
                 raise FunctionError(msg)
-            run(loop.start, loop.cond, loop)
-            if num.truth(vals[loop.cond][0]):
-                break
-            run(loop.cond + 1, loop.body)
+            if loop.has_cond:  # (none: exactly cap iterations, 1.4.1)
+                run(loop.start, loop.cond, loop)
+                if num.truth(vals[loop.cond][0]):
+                    break
+                run(loop.body_start, loop.body)
+            else:
+                run(loop.body_start, loop.body, loop)
             n += 1
         ins = instrs[loop.at]
         zero = num.as_kind(ins.type, num.lift([0] * ins.width))
@@ -1354,7 +1378,9 @@ def to_glsl(
     A while loop becomes one loop statement (docs/function-ops.md 1.7): its
     result declared before it, zero; ``cap`` iterations, or ``while (true)``
     without a cap; the condition range, a break when it is true, then the
-    body range and the result set to the body's value. Variables first
+    body range and the result set to the body's value. A loop without a
+    condition (1.4.1) has no condition statements and no break, only its
+    cap's bound; without a cap too it is endless: FunctionError. Variables first
     used in a loop, and values a loop computes that are read after it, are
     declared before the outermost loop, zero, and only assigned inside.
     """
@@ -1366,7 +1392,12 @@ def to_glsl(
     ends: dict[int, tuple[bool, Loop]] = {}
     """A loop's condition (False) or body (True) ending at an instruction."""
     for lp in found.values():
-        ends[lp.cond], ends[lp.body] = (False, lp), (True, lp)
+        if lp.has_cond:  # (none: no condition statements, no break; 1.4.1)
+            ends[lp.cond] = (False, lp)
+        elif not lp.cap:
+            msg = f"cannot translate while #{lp.at}: no condition and no cap (endless)"
+            raise FunctionError(msg)
+        ends[lp.body] = (True, lp)
     lines: list[str] = []
     names = [f"{prefix}_{k}" for k in range(len(instrs))]
     kinds = [(i.type, i.width) for i in instrs]
