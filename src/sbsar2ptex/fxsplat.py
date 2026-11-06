@@ -62,7 +62,7 @@ class TooBig(Exception):  # noqa: N818
     """The tree draws more splats than MAX_SPLATS."""
 
 
-@dataclass
+@dataclass(slots=True)
 class Splat:
     """One pattern as drawn: where, how big, how turned, which, how strong."""
 
@@ -852,11 +852,17 @@ Region = tuple[float, float, float, float]
 
 def _columns(spl: list[Splat]) -> dict[str, np.ndarray]:
     """Return the splats' scalar fields as arrays (float64; pattern int64)."""
-    keys = ("x", "y", "hx", "hy", "angle", "suppl")
-    out = {k: np.array([getattr(s, k) for s in spl], dtype=np.float64) for k in keys}
-    out["pattern"] = np.array([s.pattern for s in spl], dtype=np.int64)
-    out["blend_max"] = np.array([s.blend_max for s in spl], dtype=bool)
-    return out
+    f = np.float64
+    return {
+        "x": np.array([s.x for s in spl], dtype=f),
+        "y": np.array([s.y for s in spl], dtype=f),
+        "hx": np.array([s.hx for s in spl], dtype=f),
+        "hy": np.array([s.hy for s in spl], dtype=f),
+        "angle": np.array([s.angle for s in spl], dtype=f),
+        "suppl": np.array([s.suppl for s in spl], dtype=f),
+        "pattern": np.array([s.pattern for s in spl], dtype=np.int64),
+        "blend_max": np.array([s.blend_max for s in spl], dtype=bool),
+    }
 
 
 def _floors(values: np.ndarray, up: bool = False) -> np.ndarray:  # noqa: FBT001, FBT002

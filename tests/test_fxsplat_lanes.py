@@ -11,6 +11,7 @@ import fxsplat_scalar
 import numpy as np
 import pytest
 
+from sbsar2ptex import fxdraw
 from sbsar2ptex import fxmap
 from sbsar2ptex import fxsplat
 from sbsar2ptex.function import BOOL
@@ -245,3 +246,14 @@ def test_raster_as_the_original(
         assert (got is None) == (want is None)
         if want is not None:
             assert fxsplat.float_bytes(got) == struct.pack(f"<{len(want)}f", *want)
+
+
+def test_the_drawing_order_as_the_original() -> None:
+    rng = np.random.default_rng(3)
+    for n in (0, 1, 7, 500):
+        spl = random_splats(n, n)
+        for s in spl:  # some images, of a few inputs, filterings, premultiplied
+            if rng.uniform() < 0.4:
+                index, flags = int(rng.integers(0, 5)), int(rng.integers(0, 32))
+                s.pattern = fxmap.image_id(index, flags)
+        assert fxdraw.order(spl) == fxsplat_scalar.order(spl)

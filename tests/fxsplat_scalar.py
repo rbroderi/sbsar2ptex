@@ -1,4 +1,4 @@
-"""fxsplat's packing and raster as they were, a splat at a time: the reference.
+"""fxsplat's packing and raster (and fxdraw.order) as they were: the reference.
 
 test_lanes checks the vectorized versions against these, bit for bit.
 """
@@ -8,6 +8,7 @@ import math
 import numpy as np
 
 from sbsar2ptex import fxdraw
+from sbsar2ptex import fxmap
 from sbsar2ptex.fxsplat import RECORD
 from sbsar2ptex.fxsplat import WIDTH
 from sbsar2ptex.fxsplat import Packed
@@ -144,6 +145,24 @@ def copies32(
         if unsure[k] and other:
             return None
     return [(x, y) for y in axes[1] for x in axes[0]]
+
+
+def order(instances: list) -> list[int]:
+    """fxdraw.order as it was: a sort keyed a splat at a time."""
+    first: dict[int, int] = {}
+    for s in instances:
+        if s.pattern < 0:
+            first.setdefault(fxmap.image_parts(s.pattern)[0], len(first))
+
+    def key(k: int) -> tuple:
+        s = instances[k]
+        if s.pattern >= 0:
+            group = s.pattern
+        else:
+            group = 1000 + len(first) - first[fxmap.image_parts(s.pattern)[0]]
+        return (group, s.blend_max, k)
+
+    return sorted(range(len(instances)), key=key)
 
 
 def pixel_work(
