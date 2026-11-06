@@ -11,6 +11,10 @@ Iterate step.
 Material Maker.
 """
 
+import numpy as np
+
+from sbsar2ptex.rng import MANTISSA_MASK
+from sbsar2ptex.rng import ONE_BITS
 from sbsar2ptex.rng import UINT32_MASK
 from sbsar2ptex.rng import float32
 from sbsar2ptex.rng import unit_value
@@ -110,6 +114,72 @@ class FxRng:
         """Advance the state and return a value in [0, amplitude), in binary32."""
         self.state = (self.state * self.multiplier + self.increment) & UINT32_MASK
         return float32(unit_value(self.state) * float32(amplitude))
+
+
+class FxRngLanes:
+    """FxRng over many lanes at once: states a uint64 array (32-bit values)."""
+
+    __slots__ = ("increment", "multiplier", "state")
+
+    def __init__(self, state: np.ndarray, parameter: str = "frameoffset") -> None:
+        """Start a parameter lane from each lane's tree node state."""
+        self.state = np.asarray(state, dtype=np.uint64) & np.uint64(UINT32_MASK)
+        m, c = PARAM_LCG[parameter]
+        self.multiplier, self.increment = np.uint64(m), np.uint64(c)
+
+    def rand(self, amplitude: np.ndarray) -> np.ndarray:
+        """Return FxRng.rand of each lane (float32 values, as float64s)."""
+        # (a 32-bit product fits in 64 bits: the low 32 are the LCG's)
+        s = (self.state * self.multiplier + self.increment) & np.uint64(UINT32_MASK)
+        self.state = s
+        a = np.asarray(amplitude, dtype=np.float64)
+        a32 = a.astype(np.float32)
+        if (np.isfinite(a) & ~np.isfinite(a32)).any():
+            msg = "float too large to pack with f format"  # as struct's
+            raise OverflowError(msg)
+        return lane_float32(unit_values(s) * a32.astype(np.float64))
+
+
+def lane_float32(x: np.ndarray) -> np.ndarray:
+    """Return float32 of each lane (as float64s), raising where float32 would."""
+    y = x.astype(np.float32)
+    if (np.isfinite(x) & ~np.isfinite(y)).any():
+        msg = "float too large to pack with f format"
+        raise OverflowError(msg)
+    return y.astype(np.float64)
+
+
+def unit_values(states: np.ndarray) -> np.ndarray:
+    """Return unit_value of each (advanced) state, as float64s."""
+    mantissa = (states >> np.uint64(1)) & np.uint64(MANTISSA_MASK)
+    bits = (mantissa | np.uint64(ONE_BITS)).astype(np.uint32)
+    return bits.view(np.float32).astype(np.float64) - 1.0
+
+
+def depth_steps(states: np.ndarray, depth: int) -> np.ndarray:
+    """Return depth_step of each lane's state (uint64 arrays)."""
+    index = depth & 15
+    m, c = np.uint64(DEPTH_M[index]), np.uint64(DEPTH_C[index])
+    return (states * m + c) & np.uint64(UINT32_MASK)
+
+
+def iterate_steps(states: np.ndarray, passes: np.ndarray) -> np.ndarray:
+    """Return each lane's state after ``passes + 1`` Iterate steps (uint64s).
+
+    The steps compose to one affine map a pass count: m^k s + c (1 + m + ...
+    + m^(k-1)), mod 2^32, tabled up to the most passes.
+    """
+    most = int(passes.max()) + 1 if passes.size else 0
+    mul, add = [], []
+    m, c = 1, 0
+    for _ in range(most):
+        m, c = (m * ITERATE_M) & UINT32_MASK, (c * ITERATE_M + ITERATE_C) & UINT32_MASK
+        mul.append(m)
+        add.append(c)
+    k = passes.astype(np.intp)
+    ms = np.array(mul, dtype=np.uint64)[k]
+    cs = np.array(add, dtype=np.uint64)[k]
+    return (states * ms + cs) & np.uint64(UINT32_MASK)
 
 
 def _depth_glsl() -> str:

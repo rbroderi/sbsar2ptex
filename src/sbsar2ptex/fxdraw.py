@@ -308,20 +308,24 @@ def order(instances: Sequence) -> list[int]:
     reverse order of their first appearance), then blending: add before
     max, then the tree's own order.
     """
-    first: dict[int, int] = {}
-    for s in instances:
-        if s.pattern < 0:
-            first.setdefault(fxmap.image_parts(s.pattern)[0], len(first))
+    n = len(instances)
+    pattern = np.fromiter((s.pattern for s in instances), dtype=np.int64, count=n)
+    blend = np.fromiter((bool(s.blend_max) for s in instances), dtype=bool, count=n)
+    return order_of(pattern, blend).tolist()
 
-    def key(k: int) -> tuple:
-        s = instances[k]
-        if s.pattern >= 0:
-            group = s.pattern
-        else:
-            group = 1000 + len(first) - first[fxmap.image_parts(s.pattern)[0]]
-        return (group, s.blend_max, k)
 
-    return sorted(range(len(instances)), key=key)
+def order_of(pattern: np.ndarray, blend: np.ndarray) -> np.ndarray:
+    """Return ``order`` of instances given as their patterns and blendings."""
+    group = np.array(pattern, dtype=np.int64)
+    images = group < 0
+    if images.any():
+        index = (-1 - group[images]) % fxmap.IMAGE_STRIDE  # (image_parts' input)
+        inputs, at = np.unique(index, return_index=True)
+        first = np.empty(len(inputs), dtype=np.int64)  # each input's appearance rank
+        first[np.argsort(at)] = np.arange(len(inputs))
+        group[images] = 1000 + len(inputs) - first[np.searchsorted(inputs, index)]
+    # (a stable sort: ties stay in the tree's order)
+    return np.lexsort((np.asarray(blend, dtype=bool), group))
 
 
 def box(s: object) -> tuple[float, float]:
