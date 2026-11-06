@@ -344,13 +344,16 @@ def _deferrable(
         return {}
     shared = set().union(*(r for r, _ in found.values()))
     memo: dict[int, tuple[set[int], set[int]]] = {}
+    going: set[int] = set()
 
     def visit(t: fxmap.Tree | None) -> tuple[set[int], set[int]]:
         """Return a subtree's variables read (before set) and set."""
         if t is None:
             return set(), set()
+        if id(t) in going:
+            raise RecursionError  # a tree that loops: walk it as it is
         if id(t) not in memo:
-            memo[id(t)] = (set(), set())  # (a cycle reads and sets nothing new)
+            going.add(id(t))
             reads, sets = set(), set()
             for code in _own_codes(t):
                 reads |= found[code][0]
@@ -360,9 +363,13 @@ def _deferrable(
                 reads |= r
                 sets |= s
             memo[id(t)] = (reads, sets)
+            going.discard(id(t))
         return memo[id(t)]
 
-    visit(tree)
+    try:
+        visit(tree)
+    except RecursionError:
+        return {}
     return {k: sorted(r) for k, (r, s) in memo.items() if not s & shared}
 
 
