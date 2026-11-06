@@ -148,6 +148,9 @@ in `rest[2]` is not an offset either.
 | 5, 6 | input, gradient: slot at `rest[2]` | 714 in the survey (state 0 only) |
 | 2 | input, gradient: slot at `rest[2]` | probes, states 0, 1 and 2, with and without bit 0 |
 
+Versions 3, 4 and 8 have no flag word either: only version 9 has one
+(`docs/warp-layout.md` section 6).
+
 A version-2 probe warp in state 1 with bit 0 clear reads: input,
 gradient, seed (5), then the inline intensity values and a parameter
 offset. The rule of section 2.1 holds there.
