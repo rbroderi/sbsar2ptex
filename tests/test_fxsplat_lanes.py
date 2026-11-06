@@ -1,10 +1,15 @@
 """fxsplat's vectorized paths against the scalar ones, bit for bit.
 
 splats (deferred subtrees drawn as lanes) against the plain walk, on
-synthetic FX-Maps.
+synthetic FX-Maps; packing, raster and pixel work against their
+splat-at-a-time originals (fxsplat_scalar), on random splats.
 """
 
 import struct
+
+import fxsplat_scalar
+import numpy as np
+import pytest
 
 from sbsar2ptex import fxmap
 from sbsar2ptex import fxsplat
@@ -153,3 +158,90 @@ def test_a_stateful_walk_defers_its_stateless_subtrees() -> None:
     assert id(pick) not in later
     assert id(root) not in later
     assert len(splats_both(node, root, st)) > 40
+
+
+# Packing, raster and pixel work.
+
+
+def random_splats(seed: int, n: int, *, color: bool = False) -> list[fxsplat.Splat]:
+    rng = np.random.default_rng(seed)
+    out = []
+    for k in range(n):
+        size = rng.choice([0.0, 0.002, 0.03, 0.2, 0.7, 1.3])
+        value = [float(np.float32(v)) for v in rng.uniform(0, 1, 4 if color else 1)]
+        out.append(
+            fxsplat.Splat(
+                float(rng.uniform(-0.6, 1.6)),
+                float(rng.uniform(-0.6, 1.6)),
+                float(size * rng.uniform(0.2, 1)),
+                float(size * rng.uniform(0.2, 1)),
+                float(np.float32(rng.uniform(-7, 7))) if k % 3 else 0.0,
+                int(rng.integers(0, 17)),
+                float(rng.uniform(0, 1)),
+                bool(k % 5 == 0),
+                value,
+            )
+        )
+    return out
+
+
+REGIONS = [
+    ((0.0, 1.0, 0.0, 1.0), (0.0, 1.0, 0.0, 1.0)),
+    ((-3.0, 4.0, -3.0, 4.0), (-3.0, 4.0, -3.0, 4.0)),
+    ((0.1, 0.9, 0.2, 0.7), (0.0, 0.5, 0.25, 1.0)),
+    ((0.0, 1.0, 0.0, 1.0), (0.1, 0.6, 0.0, 0.75)),
+]
+
+
+@pytest.mark.parametrize("tile", [(True, True), (True, False), (False, False)])
+@pytest.mark.parametrize(("render", "tiling"), REGIONS)
+def test_pack_and_pixel_work_as_the_originals(
+    render: tuple, tiling: tuple, tile: tuple[bool, bool]
+) -> None:
+    for seed, n in ((1, 0), (2, 1), (3, 40), (4, 400)):
+        for color in (False, True):
+            spl = random_splats(seed, n, color=color)
+            kw = {"render": render, "tiling": tiling}
+            want = fxsplat_scalar.pack(spl, color=color, tile=tile, **kw)
+            got = fxsplat.pack(spl, color=color, tile=tile, **kw)
+            parts = (got.grid, got.cells, got.index)
+            assert parts == (want.grid, want.cells, want.index)
+            assert got.image.tobytes() == want.image.tobytes()
+        args = (spl, render, tiling, tile)
+        work = fxsplat.pixel_work(*args), fxsplat_scalar.pixel_work(*args)
+        assert struct.pack("<d", work[0]) == struct.pack("<d", work[1])
+
+
+def test_a_dense_pack_takes_the_finest_grid_that_fits() -> None:
+    spl = [s for s in random_splats(8, 3000) if s.hx < 0.05]
+    want = fxsplat_scalar.pack(spl, color=False, tile=(True, True))
+    got = fxsplat.pack(spl, color=False, tile=(True, True))
+    assert got.grid == want.grid > 8
+    assert got.image.tobytes() == want.image.tobytes()
+
+
+@pytest.mark.parametrize("tile", [(True, True), (False, True), (False, False)])
+@pytest.mark.parametrize(("render", "tiling"), REGIONS)
+def test_raster_as_the_original(
+    render: tuple, tiling: tuple, tile: tuple[bool, bool]
+) -> None:
+    outcomes = set()
+    for seed in range(12):
+        spl = random_splats(100 + seed, 1 + seed * 7)
+        want = fxsplat_scalar.raster(spl, tile, tiling, render)
+        got = fxsplat.raster(spl, tile, tiling, render)
+        outcomes.add(want is None)
+        if want is None:
+            assert got is None
+        else:
+            assert got is not None
+            assert fxsplat.float_bytes(got) == struct.pack(f"<{len(want)}f", *want)
+    # a disc ending at the tiling region's edge to float32 rounding (x_region5)
+    edge = fxsplat.Splat(0.6, 0.5, 0.15, 0.15, 0.0, 3, 0.0, False, [1.0])  # noqa: FBT003
+    for spl in ([edge], [*random_splats(7, 5), edge]):
+        args = (spl, (True, True), (0.25, 0.75, 0.0, 1.0), (0.0, 1.0, 0.0, 1.0))
+        want = fxsplat_scalar.raster(*args)
+        got = fxsplat.raster(*args)
+        assert (got is None) == (want is None)
+        if want is not None:
+            assert fxsplat.float_bytes(got) == struct.pack(f"<{len(want)}f", *want)

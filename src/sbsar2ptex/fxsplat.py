@@ -850,22 +850,118 @@ Region = tuple[float, float, float, float]
 """A render or tiling region: x0 x1 y0 y1 of pattern space."""
 
 
-def _boxes(
-    s: Splat, render: Region, tiling: Region, tile: tuple[bool, bool]
-) -> list[tuple[float, float, float, float]]:
-    """Return the image-space boxes (x0 x1 y0 y1, uv) of a splat's copies."""
-    bx, by = fxdraw.box(s)
+def _columns(spl: list[Splat]) -> dict[str, np.ndarray]:
+    """Return the splats' scalar fields as arrays (float64; pattern int64)."""
+    keys = ("x", "y", "hx", "hy", "angle", "suppl")
+    out = {k: np.array([getattr(s, k) for s in spl], dtype=np.float64) for k in keys}
+    out["pattern"] = np.array([s.pattern for s in spl], dtype=np.int64)
+    out["blend_max"] = np.array([s.blend_max for s in spl], dtype=bool)
+    return out
+
+
+def _floors(values: np.ndarray, up: bool = False) -> np.ndarray:  # noqa: FBT001, FBT002
+    """Return math.floor (ceil if ``up``) of each value, raising as it would.
+
+    The first value (in order) past the finite raises math's error.
+    """
+    bad = ~np.isfinite(values)
+    if bad.any():
+        first = float(values.ravel()[np.flatnonzero(bad.ravel())[0]])
+        (math.ceil if up else math.floor)(first)
+    return (np.ceil(values) if up else np.floor(values)).astype(np.int64)
+
+
+def _ragged(lengths: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return, for runs of ``lengths``, each entry's run and place in it."""
+    run = np.repeat(np.arange(len(lengths)), lengths)
+    starts = np.cumsum(lengths) - lengths
+    return run, np.arange(len(run)) - starts[run]
+
+
+def _axis_copies(
+    c: np.ndarray, b: np.ndarray, lo: float, hi: float, *, wrap: bool
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return fxdraw.copies' offsets along one axis: (splat, offset), in order."""
+    w = hi - lo
+    k0 = _floors((lo - b - c) / w) - 1  # (found, and raising, either way)
+    k1 = _floors((hi + b - c) / w, up=True) + 2
+    if wrap:
+        run, at = _ragged(np.maximum(k1 - k0, 0))
+        offs = (k0[run] + at).astype(np.float64) * w
+    else:
+        run = np.arange(len(c))
+        offs = np.zeros(len(c)) * w
+    cc, bb = c[run], b[run]
+    keep = (cc + offs - bb < hi) & (cc + offs + bb > lo)
+    return run[keep], offs[keep]
+
+
+def _pairs(
+    n: int, xs: tuple[np.ndarray, np.ndarray], ys: tuple[np.ndarray, np.ndarray]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return each splat's copies, y outer and x inner: (splat, x part, y part).
+
+    ``xs`` and ``ys`` are per axis (splat, value) runs, splats in order;
+    the parts are values of those.
+    """
+    nx = np.bincount(xs[0], minlength=n)
+    ny = np.bincount(ys[0], minlength=n)
+    sx, sy = np.cumsum(nx) - nx, np.cumsum(ny) - ny
+    run, at = _ragged(nx * ny)
+    per = nx[run]
+    return run, xs[1][sx[run] + at % per], ys[1][sy[run] + at // per]
+
+
+def _copy_boxes(
+    cols: dict[str, np.ndarray],
+    render: Region,
+    tiling: Region,
+    tile: tuple[bool, bool],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``_boxes`` of every splat, in order: (splat, x0 x1 y0 y1 rows)."""
+    angle = cols["angle"].tolist()  # (math's cos and sin: fxdraw.box's)
+    c = np.abs(np.array([math.cos(a) for a in angle], dtype=np.float64))
+    s = np.abs(np.array([math.sin(a) for a in angle], dtype=np.float64))
+    hx, hy = np.abs(cols["hx"]), np.abs(cols["hy"])
+    bx, by = hx * c + hy * s, hx * s + hy * c
+    x0, x1, y0, y1 = tiling
+    xs = _axis_copies(cols["x"], bx, x0, x1, wrap=tile[0])
+    ys = _axis_copies(cols["y"], by, y0, y1, wrap=tile[1])
+    k, ox, oy = _pairs(len(angle), xs, ys)
     rx0, rx1, ry0, ry1 = render
     rw, rh = rx1 - rx0, ry1 - ry0
-    return [
-        (
-            (s.x + ox - bx - rx0) / rw,
-            (s.x + ox + bx - rx0) / rw,
-            (s.y + oy - by - ry0) / rh,
-            (s.y + oy + by - ry0) / rh,
-        )
-        for ox, oy in fxdraw.copies(s, tiling, tile)
-    ]
+    x, y, bx, by = cols["x"][k], cols["y"][k], bx[k], by[k]
+    boxes = np.stack(
+        [
+            (x + ox - bx - rx0) / rw,
+            (x + ox + bx - rx0) / rw,
+            (y + oy - by - ry0) / rh,
+            (y + oy + by - ry0) / rh,
+        ],
+        axis=1,
+    )
+    return k, boxes
+
+
+def _records(spl: list[Splat], rec: int) -> np.ndarray:
+    """Return the splat records' words (uint32s), RECORD[color] floats a splat."""
+    if any(len(s.value) != rec - 8 for s in spl):
+        floats: list[float] = []
+        for s in spl:
+            floats += [s.x, s.y, s.hx, s.hy, s.angle, float(s.pattern), s.suppl]
+            floats += [1.0 if s.blend_max else 0.0, *s.value]
+        if len(floats) != rec * len(spl):
+            msg = "splat records of the wrong size"
+            raise ValueError(msg)
+        return np.array(floats, dtype="<f4").view("<u4")
+    cols = _columns(spl)
+    table = np.zeros((len(spl), rec), dtype=np.float64)
+    for j, key in enumerate(("x", "y", "hx", "hy", "angle", "pattern", "suppl")):
+        table[:, j] = cols[key]
+    table[:, 7] = cols["blend_max"]
+    if spl:
+        table[:, 8:] = np.array([s.value for s in spl], dtype=np.float64)
+    return table.astype("<f4").view("<u4").ravel()
 
 
 def pack(
@@ -884,48 +980,39 @@ def pack(
     average.
     """
     rec = RECORD[color]
-    floats: list[float] = []
-    for s in spl:
-        floats += [s.x, s.y, s.hx, s.hy, s.angle, float(s.pattern), s.suppl]
-        floats += [1.0 if s.blend_max else 0.0, *s.value]
-    words = np.array(floats, dtype="<f4").view("<u4").tolist()
-    if len(words) != rec * len(spl):
-        msg = "splat records of the wrong size"
-        raise ValueError(msg)
-    boxes = [_boxes(s, render, tiling, tile) for s in spl]
+    words = _records(spl, rec)
+    k, boxes = _copy_boxes(_columns(spl), render, tiling, tile)
+    count = max(len(spl), 1)
 
-    def lists(g: int) -> list[list[int]]:
-        cells: list[set[int]] = [set() for _ in range(g * g)]
-        for k, bs in enumerate(boxes):
-            for x0, x1, y0, y1 in bs:
-                cx0, cx1 = max(math.floor(x0 * g), 0), min(math.floor(x1 * g), g - 1)
-                cy0, cy1 = max(math.floor(y0 * g), 0), min(math.floor(y1 * g), g - 1)
-                for cy in range(cy0, cy1 + 1):
-                    for cx in range(cx0, cx1 + 1):
-                        cells[cy * g + cx].add(k)
-        return [sorted(c) for c in cells]
+    def lists(g: int) -> np.ndarray:
+        """Return the (cell, splat) pairs as cell * count + splat, sorted."""
+        lo = _floors(boxes * g)
+        cx0, cx1 = np.maximum(lo[:, 0], 0), np.minimum(lo[:, 1], g - 1)
+        cy0, cy1 = np.maximum(lo[:, 2], 0), np.minimum(lo[:, 3], g - 1)
+        nx, ny = np.maximum(cx1 - cx0 + 1, 0), np.maximum(cy1 - cy0 + 1, 0)
+        run, at = _ragged(nx * ny)
+        cells = (cy0[run] + at // nx[run]) * g + cx0[run] + at % nx[run]
+        return np.unique(cells * count + k[run])
 
     grid, cells = 8, lists(8)
     g = 16
     while g <= 256:  # noqa: PLR2004
         finer = lists(g)
-        if sum(map(len, finer)) > 16 * max(len(spl), 1) + g * g:
+        if len(finer) > 16 * count + g * g:
             break
         grid, cells = g, finer
         g *= 2
+    members = np.bincount(cells // count, minlength=grid * grid)
+    table = np.stack([np.cumsum(members) - members, members], axis=1).ravel()
     start = len(words)
     index_at = start + 2 * grid * grid
-    table, index = [], []
-    for members in cells:
-        table += [len(index), len(members)]
-        index += members
-    words += table + index
+    data = np.concatenate([words, table.astype("<u4"), (cells % count).astype("<u4")])
     # A power of two of rows: texel centers then sit exactly where the shader
     # samples. At 4187 or 5251 rows, NVIDIA's sampler lands a sliver off a
     # center and blends in its neighbor, garbling the word.
-    rows = 1 << (-(-len(words) // WIDTH) - 1).bit_length()
+    rows = 1 << (-(-len(data) // WIDTH) - 1).bit_length()
     flat = np.zeros(rows * WIDTH, dtype="<u4")
-    flat[: len(words)] = words
+    flat[: len(data)] = data
     return Packed(flat.view(np.uint8).reshape(rows, WIDTH, 4), grid, start, index_at)
 
 
@@ -940,7 +1027,7 @@ def raster(
     tile: tuple[bool, bool],
     tiling: Region = (0.0, 1.0, 0.0, 1.0),
     render: Region = (0.0, 1.0, 0.0, 1.0),
-) -> list[float] | None:
+) -> np.ndarray | None:
     """Return gray splats as the sbs plugin's Splats node draws them; None if unsure.
 
     Substance's GPU engine draws a pattern as one triangle over its
@@ -952,34 +1039,47 @@ def raster(
     and max blending (1 or 0), and two zeros. Patterns of no area draw
     nothing and are left out. None when a copy that reaches the render
     region (the image) ends at the tiling region's edge (_copies32): which
-    side Substance takes it is not known.
+    side Substance takes it is not known. Float32s, a flat array.
     """
     f = np.float32
-    out: list[float] = []
-    for s in spl:
-        if s.hx == 0 or s.hy == 0:
-            continue
-        w, h = f(2 * s.hx), f(2 * s.hy)
-        turns = f(f(s.angle) / _TAU)
-        angle = f(turns * _TAU)
-        c, n = f(abs(np.cos(angle))), f(abs(np.sin(angle)))
-        bx = f(f(abs(w) * c) + f(abs(h) * n))
-        by = f(f(abs(w) * n) + f(abs(h) * c))
-        v = f(s.value[0])
-        centers = _copies32(s, tiling, tile, render)
-        if centers is None:
-            return None
-        for x, y in centers:
-            out += [v, v, v, 1.0, bx, by, x, y, w, h, turns, f(s.suppl)]
-            out += [float(s.pattern), 1.0 if s.blend_max else 0.0, 0.0, 0.0]
-    return [float(x) for x in out]
+    drawn = [s for s in spl if not (s.hx == 0 or s.hy == 0)]
+    cols = _columns(drawn)
+    w, h = (2 * cols["hx"]).astype(f), (2 * cols["hy"]).astype(f)
+    turns = cols["angle"].astype(f) / _TAU
+    angle = turns * _TAU
+    c, n = np.abs(np.cos(angle)), np.abs(np.sin(angle))
+    bx = np.abs(w) * c + np.abs(h) * n
+    by = np.abs(w) * n + np.abs(h) * c
+    copies = _copies32(cols, tiling, tile, render)
+    if copies is None:
+        return None
+    k, x, y = copies
+    v = np.array([s.value[0] for s in drawn], dtype=np.float64).astype(f)
+    out = np.zeros((len(k), RASTER_FLOATS), dtype=f)
+    out[:, 0] = out[:, 1] = out[:, 2] = v[k]
+    out[:, 3] = 1.0
+    out[:, 4], out[:, 5], out[:, 6], out[:, 7] = bx[k], by[k], x, y
+    out[:, 8], out[:, 9], out[:, 10] = w[k], h[k], turns[k]
+    out[:, 11] = cols["suppl"].astype(f)[k]
+    out[:, 12] = cols["pattern"].astype(np.float64)[k]
+    out[:, 13] = cols["blend_max"][k]
+    return out.ravel()
+
+
+def float_bytes(values: np.ndarray | list[float]) -> bytes:
+    """Return values as little-endian float32s (``raster``'s, for a ptex)."""
+    return np.asarray(values, dtype="<f4").tobytes()
 
 
 def _copies32(
-    s: Splat, tiling: Region, tile: tuple[bool, bool], render: Region
-) -> list[tuple[np.float32, np.float32]] | None:
-    """Return the centers of a pattern's tile copies (float32); None if one is unsure.
+    cols: dict[str, np.ndarray],
+    tiling: Region,
+    tile: tuple[bool, bool],
+    render: Region,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return the centers of the patterns' tile copies (float32); None if one is unsure.
 
+    As (pattern, x, y), each pattern's copies y outer, x inner.
     fxdraw.copies' test: the copy's box overlaps the tiling region,
     strictly. A box that ends at the region's edge, to float32 rounding,
     may be drawn or not: x_region5's disc ends at 0.6 - 0.5 + 0.15, which
@@ -987,38 +1087,45 @@ def _copies32(
     shader draws it (where a strict test in float32 would). Such a copy
     that reaches the render region (whose pixels it would draw) makes it
     None; one past it draws nothing either way (a full-size pattern's
-    copies at the default regions).
+    copies at the default regions). Float32 throughout, numpy's scalar
+    rules: a Python float meeting a float32 is rounded to one first.
     """
     f = np.float32
-    a = f(s.angle)
-    ca, sa = f(np.cos(a)), f(np.sin(a))
-    hx, hy = f(s.hx), f(s.hy)
-    b = (f(abs(f(hx * ca)) + abs(f(hy * sa))), f(abs(f(hx * sa)) + abs(f(hy * ca))))
+    a = cols["angle"].astype(f)
+    ca, sa = np.cos(a), np.sin(a)
+    hx, hy = cols["hx"].astype(f), cols["hy"].astype(f)
+    b = (np.abs(hx * ca) + np.abs(hy * sa), np.abs(hx * sa) + np.abs(hy * ca))
+    count = len(a)
     axes, unsure = [], []
     for c, bb, (lo, hi), (r0, r1), wrap in (
-        (f(s.x), b[0], tiling[:2], render[:2], tile[0]),
-        (f(s.y), b[1], tiling[2:], render[2:], tile[1]),
+        (cols["x"].astype(f), b[0], tiling[:2], render[:2], tile[0]),
+        (cols["y"].astype(f), b[1], tiling[2:], render[2:], tile[1]),
     ):
         w = f(hi - lo)
-        ks = (
-            range(math.floor((lo - bb - c) / w) - 1, math.ceil((hi + bb - c) / w) + 2)
-            if wrap
-            else (0,)
-        )
-        cs = [f(c + f(f(k) * w)) for k in ks]
+        if wrap:
+            k0 = _floors((lo - bb - c) / w) - 1
+            k1 = _floors((hi + bb - c) / w, up=True) + 2
+            run, at = _ragged(np.maximum(k1 - k0, 0))
+            ks = k0[run] + at
+        else:
+            run, ks = np.arange(count), np.zeros(count, dtype=np.int64)
+        cs = c[run] + ks.astype(f) * w
+        bb = bb[run]  # noqa: PLW2901
         near = 4 * np.finfo(np.float32).eps * max(abs(lo), abs(hi), 1.0)
-        axes.append([cc for cc in cs if f(cc - bb) < f(hi) and f(cc + bb) > f(lo)])
-        unsure.append({
-            cc for cc in cs
-            if (abs(f(cc + bb) - lo) <= near or abs(f(cc - bb) - hi) <= near)
-            and cc - bb < r1 - near and cc + bb > r0 + near
-        })  # fmt: skip
+        keep = ((cs - bb) < f(hi)) & ((cs + bb) > f(lo))
+        doubt = (
+            ((np.abs((cs + bb) - lo) <= near) | (np.abs((cs - bb) - hi) <= near))
+            & ((cs - bb) < (r1 - near))
+            & ((cs + bb) > (r0 + near))
+        )
+        axes.append((run[keep], cs[keep]))
+        unsure.append(np.bincount(run[doubt], minlength=count) > 0)
+    drawn = [np.bincount(r, minlength=count) > 0 for r, _ in axes]
     # an unsure copy along one axis, drawn (or unsure) along the other
     for k in (0, 1):
-        other = set(axes[1 - k]) | unsure[1 - k]
-        if unsure[k] and other:
+        if (unsure[k] & (drawn[1 - k] | unsure[1 - k])).any():
             return None
-    return [(x, y) for y in axes[1] for x in axes[0]]
+    return _pairs(count, axes[0], axes[1])
 
 
 def write_png(path: Path, packed: Packed) -> None:
@@ -1033,12 +1140,15 @@ def pixel_work(
     tile: tuple[bool, bool] = (True, True),
 ) -> float:
     """Return about how many patterns the shader draws a pixel, on average."""
+    _, boxes = _copy_boxes(_columns(spl), render, tiling, tile)
+    x0, x1, y0, y1 = boxes.T
+    # Python's min(a, b) is b only when b < a, max(a, b) b only when b > a
+    w = np.where(x1 > 1.0, 1.0, x1) - np.where(x0 < 0.0, 0.0, x0)
+    h = np.where(y1 > 1.0, 1.0, y1) - np.where(y0 < 0.0, 0.0, y0)
+    areas = np.where(w < 0.0, 0.0, w) * np.where(h < 0.0, 0.0, h)
     total = 0.0
-    for s in spl:
-        for x0, x1, y0, y1 in _boxes(s, render, tiling, tile):
-            w = min(x1, 1.0) - max(x0, 0.0)
-            h = min(y1, 1.0) - max(y0, 0.0)
-            total += max(w, 0.0) * max(h, 0.0)
+    for a in areas.tolist():  # summed in order, as the copies come
+        total += a
     return total
 
 

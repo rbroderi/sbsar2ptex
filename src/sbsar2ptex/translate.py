@@ -3586,7 +3586,7 @@ def _fx_raster(
     tree: fxmap.Tree | None,
     st: fxmap.Settings,
     layout: fxglsl.Layout,
-) -> list[float] | None:
+) -> Sequence[float] | None:
     """Return the FX-Map's patterns for the sbs plugin's Splats node, or None.
 
     Substance draws a pattern as a triangle, its position in the pattern
@@ -4347,9 +4347,7 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
                     "region_w": float(rx1 - rx0),
                     "region_h": float(ry1 - ry0),
                     # little-endian float32s (arrays read as gradients)
-                    "splats": base64.b64encode(
-                        struct.pack(f"<{len(raster)}f", *raster)
-                    ).decode(),
+                    "splats": base64.b64encode(fxsplat.float_bytes(raster)).decode(),
                     "pattern_code": fxmap.PATTERN_GLSL.replace("$(name)", "fx"),
                 },
             }
