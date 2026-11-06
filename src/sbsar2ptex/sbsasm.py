@@ -160,10 +160,22 @@ CODE_COUNT = {
 }
 """Code offsets each op's node has (when it has code: node flag bit 0).
 
-The first is the output size's block, or for gradients and curves their
-data; neighborhood filters have a second. Not here: FX-Maps and pixel
-processors, whose layouts differ.
+The first is the output size's block, or for curves their data;
+neighborhood filters have a second. Not here: FX-Maps and pixel
+processors, whose layouts differ, and gradient maps (gradient_code_count).
 """
+
+
+def gradient_code_count(flags: int) -> int:
+    """Return how many block offsets a gradient map (ops 0, 1) has.
+
+    Its keys' always (with or without flag bit 0), then its size
+    function's with bit 0, then its seed block's with bits 6-7 = 2
+    (docs/gradient-map.md).
+    """
+    return 1 + (flags & 1) + (flags >> 6 & 3 == 2)  # noqa: PLR2004
+
+
 TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
 """Bytes a graph input of each type takes in the defaults block."""
 
@@ -352,7 +364,10 @@ class Asm:
         if fixed is not None:
             # A set number of code offsets (none for a node without code);
             # offsets after them belong to parameters (function blocks).
-            for _ in range(fixed if node.flags & 1 else 0):
+            count = fixed if node.flags & 1 else 0
+            if node.op in (0, 1):
+                count = gradient_code_count(node.flags)
+            for _ in range(count):
                 if k < len(rest) and is_offset(rest[k]):
                     node.code.append(rest[k] + BASE)
                     k += 1

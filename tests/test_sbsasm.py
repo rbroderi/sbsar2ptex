@@ -78,6 +78,39 @@ def test_raw_image() -> None:
     assert asm.raw_image(node) is None
 
 
+def one_node(words: list[int]) -> Node:
+    """Parse a cook whose one node, at 0x40, is ``words``."""
+    at, table = 0x40, 0x40 + 4 * len(words)
+    data = bytearray(table + 36)
+    data[:4] = b"SBAM"
+    struct.pack_into("<H", data, 6, 5)
+    struct.pack_into(f"<{len(words)}I", data, at, *words)
+    struct.pack_into("<I", data, table, at - BASE)  # the node table
+    struct.pack_into("<II", data, table + 4, 0xC0, 0)  # the outputs
+    struct.pack_into("<HHI", data, table + 12, 1, 0, 0x1234)  # the uid table
+    struct.pack_into("<4I", data, table + 20, 1, table - BASE, table + 4 - BASE, 0)
+    (node,) = Asm(bytes(data)).nodes()
+    return node
+
+
+@pytest.mark.parametrize(
+    ("flags", "blocks"), [(0x18, 1), (0x19, 2), (0x119, 2), (0x9, 2), (0x99, 3)]
+)
+def test_gradient_block_offsets(flags: int, blocks: int) -> None:
+    # docs/gradient-map.md: after the input and the key count, the keys'
+    # offset (with or without flag bit 0), the size function's (bit 0), the
+    # seed block's (bits 6-7 = 2); then the keys, 6 bytes each with 0x100.
+    at = 0x40 + 4 * (3 + blocks)
+    keys = [0, 0x80000000, 0xFFFFFFFF] if flags & 0x100 else [0, 0xFFFFFFFF]
+    offsets = [at - BASE] + [at + 4 * (len(keys) + i) - BASE for i in range(blocks - 1)]
+    node = one_node([flags << 16 | 0x88 << 8, 7, 2, *offsets, *keys, *[0] * blocks])
+    assert node.op == 0
+    assert node.inputs == {"input": 7}
+    assert node.fields == [7, 2]
+    assert node.code == [o + BASE for o in offsets]
+    assert node.inline == []
+
+
 def test_blend_inputs_and_opacity() -> None:
     _, nodes, names = load("blend_gray_chain")
     inputs = by_input(nodes, names)
