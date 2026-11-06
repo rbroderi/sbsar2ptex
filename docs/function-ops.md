@@ -106,6 +106,29 @@ The loop's instructions lie in three consecutive ranges before it:
 The loop instruction comes right after `body`. Each range is run as a
 whole, every time its part of the loop runs.
 
+**A loop without a condition.** **[measured]** `cond` may be 0xFFFF
+(NO_VALUE, section 2.5). The loop then has no condition range: it is
+empty, and the body range is `(init, body]`. Seen: `[5, 0xFFFF, 10, 0,
+3, 0]` (a probe, cap 3) and `[136, 0xFFFF, 499, 3, 0]` (mosaic, cap 3).
+Section 1.4.1 gives its semantics.
+
+**Where the ranges sit.** **[measured]** In every loop seen (the 1.4
+probes, the 1.4.1 probes, stripe-new-1's seven, and the five loops of
+each of mosaic's seven pixel processors):
+
+- `body` is the instruction just before the loop: `body = k - 1` for the
+  loop at `#k`.
+- `init < cond < body`, or `cond` is NO_VALUE and `init < body`.
+
+A reader should accept exactly these and report anything else as
+malformed. A NO_VALUE `init` or `body` was never seen: report it as
+unsupported.
+
+Only the end of the init range is marked. Its start is not: it is
+whatever the block runs before `init` that no loop range claims. A
+nested loop sits wholly inside one range of the loop around it, its own
+init range included (1.4.2).
+
 **Cap values:**
 
 - A cap of -1 in the .sbs file cooks to 0, and 0 means unlimited. 300
@@ -172,6 +195,52 @@ gave this on vk, d3d11 and sse2:
 | integer: `j = 0`, stop at `j >= 5`, `j += 2` | 6 | - | - |
 | 300 iterations, no cap | - | 301 | - |
 
+#### 1.4.1 No condition
+
+**[measured]** A While Loop whose `cond` input is not connected in the
+.sbs file cooks to a loop with `cond` = NO_VALUE (1.2). It runs as 1.4
+with step 2.2 left out: nothing is run there, and the loop never stops
+on a condition. So it runs exactly `cap` iterations, then stops.
+
+Probes (pixel processor; `i` from 7, `i += 10` per body; the node's value
+is the loop's, by the hidden variable of 1.3), identical on vk, d3d11 and
+sse2 (vk and d3d11 read at 8 bits, sse2 at 16):
+
+| condition | cap | value |
+|---|---|---|
+| not connected | 3 | 37 |
+| not connected | 1 | 17 |
+| not connected | 5 | 57 (vk, sse2) |
+| constant false (`const_bool 0`) | 3 | 37 |
+| constant true (`const_bool 1`) | 3 | 0 (no iteration) |
+
+- A constant condition is not removed: it cooks to a bool const
+  instruction as the condition range (`[5, 11, 10, ...]` with `#11 const
+  false`). It runs as 1.4 says.
+- **Cap and no condition.** A cap of 0 in the .sbs file still cooks to
+  no loop (1.2). A cap of -1 (unlimited) with no condition cooked to a
+  block of one instruction, the float constant 0: the cooker drops the
+  endless loop and the node's value is 0. So a NO_VALUE condition with a
+  cooked cap of 0 was never seen. An evaluator meeting one should treat
+  it as endless (1.7's limit).
+
+#### 1.4.2 Nested loops
+
+**[measured]** A loop in another's body runs whole, init range included,
+each time the outer body runs. Probe: outer loop with no condition and
+cap 3, its body a loop with no condition and cap 2 whose body is `i +=
+10`, `i` from 7. Value 67 (7 + 3 × 2 × 10) on vk, d3d11 and sse2. Its
+cooked block:
+
+    #5  init end of the outer loop
+    #6  .. #10   the inner loop's init range (#10 its init)
+    #11 .. #15   the inner loop's body
+    #16 while (10, NO_VALUE, 15, cap 2)
+    #17 .. #19   the rest of the outer body (#19 its body)
+    #20 while (5, NO_VALUE, 19, cap 3)
+
+mosaic nests five loops this way (1.6).
+
 ### 1.5 Engines and paths
 
 **[measured]** Two paths were tested:
@@ -191,6 +260,25 @@ GPU engines.
 stripe-new-1 (cooked by a v9 cooker): pixel processors n158, n179, n205,
 n579, n600, n619 and n641, all with cap 13.
 
+mosaic (v9): pixel processors n102, n127, n173, n219, n278, n313 and
+n353. Each is one block of 546 instructions with five nested loops, as
+(init, cond, body, cap), outermost first:
+
+| loop | operands | |
+|---|---|---|
+| #528 | (20, 23, 527, 0) | |
+| #519 | (28, 31, 518, 0) | in #528's body |
+| #509 | (131, NO_VALUE, 508, 3) | in #519's body |
+| #500 | (136, NO_VALUE, 499, 3) | in #509's body |
+| #491 | (141, 393, 490, 1) | in #500's body |
+
+#509 and #500 are no-condition loops that each run three times (a
+variable from -1 counting up by 1 per body). A reader that requires
+`init < cond` rejects #500 with "ranges (136, 65535, 499) not just
+before it". The ranges are in fact where 1.2 puts them. Its Value
+Processors n2, n3, n17, n18 (and others) also hold loops, all with a
+condition.
+
 ### 1.7 Implementation notes
 
 **Evaluator** [inferred from 1.4]. Do not walk a block's instructions
@@ -200,9 +288,10 @@ once, in order. Run them in the order the loop runs them:
     n = 0
     repeat:
         if cap != 0 and n >= cap: stop
-        run the condition range (init, cond]
-        if value[cond] is true: stop
-        run the body range (cond, body]
+        if cond is not NO_VALUE:
+            run the condition range (init, cond]
+            if value[cond] is true: stop
+        run the body range: (cond, body], or (init, body] without a cond
         n = n + 1
     value[loop] = value[body] if n > 0, else the loop type's zero
     continue after the loop instruction
@@ -228,7 +317,8 @@ statement:
 1. Before the loop, declare the result, set to the type's zero.
 2. Loop `cap` times, or without bound when the cap is 0.
 3. In each iteration, emit the condition range, then break if its value
-   is true.
+   is true. A loop without a condition (1.4.1) has neither: no condition
+   statements and no `break`, only the cap's bound.
 4. Then emit the body range, and assign the body's value to the result.
 
 Two scoping rules:
@@ -316,9 +406,80 @@ n579, n600, n619 and n641 without error. Each block has 1157 to 3413
 instructions and cap 13. A prototype of the GLSL form above compiled for
 all seven.
 
+**Test E: a loop without a condition** (1.4.1). This is the probe's
+cooked block. v0 is `i`, v1 the hidden result; all float, width 1; N is
+0xFFFF.
+
+    #0  const 7.0
+    #1  setvar v0 <- #0          (i = 7)
+    #2  sequence (#1, N)
+    #3  const 0.0
+    #4  setvar v1 <- #3          (hidden = 0)
+    #5  sequence (#2, #4)        init = 5
+    #6  getvar v0
+    #7  const 10.0
+    #8  add (#6, #7)
+    #9  setvar v0 <- #8          (i += 10)
+    #10 setvar v1 <- #9          body = 10
+    #11 while (5, N, 10, CAP)    operands [5, 0xFFFF, 10, 0, cap_lo, cap_hi]
+    #12 getvar v1
+    #13 sequence (#11, #12)
+    #14 const 100.0
+    #15 div (#13, #14)           the block's value
+
+| CAP | block value | i (v0) |
+|---|---|---|
+| 3 | 0.37 | 37 |
+| 1 | 0.17 | 17 |
+| 5 | 0.57 | 57 |
+
+The reader must accept the ranges (no "not just before it" error). The
+evaluator must not run a condition range or index its values with
+0xFFFF. The GLSL translation must hold no `break` and loop `CAP` times.
+
+**Test F: CAP 0 without a condition.** Test E with CAP 0 is endless. The
+evaluator must give up at its iteration limit (1.7) and report the value
+as unknown, not hang. The GLSL translation must report it as
+unsupported, or emit a bounded loop and say so. (The cooker never emits
+it: 1.4.1.)
+
+**Test G: nested loops without a condition** (1.4.2). Operands as in
+1.4.2's listing: an outer `while (5, N, 19, cap 3)` whose body holds the
+inner init range (#6 to #10, setting `j = 0` and the inner hidden
+variable to 0) and the inner `while (10, N, 15, cap 2)`, whose body is
+`i += 10`. With `i` from 7, the outer hidden variable, and so the block,
+is 67. The inner loop's init range runs at the start of each outer
+iteration.
+
+**Test H: malformed ranges.** Each of these must be reported as
+malformed, not run:
+
+- `body` not the instruction just before the loop: `[5, N, 9, 0, 3, 0]`
+  at #11.
+- `cond` not between `init` and `body`: `[5, 12, 10, 0, 3, 0]` at #11.
+- `init` NO_VALUE: `[N, 7, 10, 0, 3, 0]` at #11 (unsupported).
+
+**Test I: mosaic** (a real file). The seven pixel processors of 1.6
+must decode, evaluate and translate without error. Their loops are
+#509 and #500 without a condition, cap 3 each, inside #519 and #528,
+with #491 (cap 1) innermost.
+
 ### 1.9 Unknowns
 
-- Nested loops: neither probed nor seen.
+- Nested loops: now probed for loops without a condition (1.4.2).
+  Nesting with conditions in both loops was not probed, but mosaic has
+  it (#491 inside #500, #519 inside #528).
+- **A condition whose value is a NO_VALUE.** A constant-false condition
+  that also sets a variable cooked to a bool `sequence (setvar, N)` as
+  the condition. The engines disagree on it: vk took it as false (three
+  iterations, cap 3), d3d11 and sse2 as true (none). Not seen in a real
+  file. Such a condition is not portable.
+- **Cooked version 9 for small probes.** Every probe with a loop cooked
+  to an .sbsasm of version 9 (version 4 without one). sbsar2ptex's
+  reader did not find the uid table of those small archives ("no uid
+  table before the trailer"), so they were decoded by scanning for the
+  block. That is a reader gap, not a loop rule. It is noted here so that
+  a test that cooks probes expects it.
 - Whether a cooker ever reads a condition-range or body-range SSA value
   after the loop. Not seen: results pass through variables.
 - Caps above 2^31 - 1. Integer caps up to 16777215 appear in Designer's
