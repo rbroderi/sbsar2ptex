@@ -13,8 +13,11 @@ import pytest
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.sbsasm import BASE
+from sbsar2ptex.sbsasm import UNWIRED
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.sbsasm import field_count
+from sbsar2ptex.sbsasm import pp_inputs
 from sbsar2ptex.sbsasm import reachable
 
 DATA = Path(__file__).parent / "data"
@@ -55,6 +58,35 @@ def test_no_defaults_block() -> None:
     assert asm.output_nodes == [(0xC0, 0)]
     assert asm.inputs == []
     assert asm.defaults_at == 0x60
+
+
+def test_pixel_processor_input_count_is_16_bits() -> None:
+    # Version 9 cooks (mosaic.sbsar's n5) set 0x20000 above a pixel
+    # processor's input count: one input, node 4, then its code offsets.
+    rest = [0x20001, 4, 0x3F48, 0x3C4C, 0x3C40]
+
+    def is_offset(w: int) -> bool:
+        return w > 0x1000
+
+    assert pp_inputs(rest[0]) == 1
+    assert field_count(40, rest, is_offset) == 2
+    assert field_count(41, [0x20000, 0x2BD8], is_offset) == 1
+    assert field_count(40, [3, 1, 2, 3], is_offset) == 4  # (older cooks)
+
+
+def test_an_unwired_input_is_no_input() -> None:
+    # mosaic.sbsar's pixel processors: an input of node 0xFFFFFFFF
+    data = bytearray(0x84)
+    data[:4] = b"SBAM"
+    struct.pack_into("<HHI", data, 0x6C, 1, 0, 0x1234)
+    struct.pack_into("<4I", data, 0x74, 2, 0x60 - BASE, 0x64 - BASE, 0)
+    # node 0 at 0x40: a uniform (op 12, no inputs); node 1 at 0x48: a pixel
+    # processor of two inputs, node 0 and none
+    struct.pack_into("<I", data, 0x40, 12)
+    struct.pack_into("<4I", data, 0x48, 40, 2, 0, UNWIRED)
+    struct.pack_into("<2I", data, 0x60, 0x40 - BASE, 0x48 - BASE)
+    nodes = Asm(bytes(data)).nodes()
+    assert nodes[1].inputs == {"input": 0}
 
 
 def test_raw_image() -> None:

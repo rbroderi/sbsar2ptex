@@ -188,7 +188,8 @@ def test_the_iterate_replaces_the_unrolled_nodes(fmt: int, steps: str) -> None:
     assert loop["type"] == "iterate_buffer_v2"
     samples = f"i_n{END}_Samples"
     assert loop["parameters"] | {"iterations": None} == {
-        "states": 2, "size_mode": 0, "size": 8, "size_offset": 0,
+        # the material's size (the graph is built at 8)
+        "states": 2, "size_mode": 1, "size": 8, "size_offset": 0.0,
         "iterations": None, "filter": True, "rounding": 0,
         "format_0": 1, "rg_0": False, "format_1": 1, "rg_1": False,
     }  # fmt: skip
@@ -310,7 +311,8 @@ def test_a_chain_becomes_one_iterate() -> None:
     # the blur's two buffers and the period's own, all 32-bit: one state,
     # three phases a period
     assert loop == {
-        "states": 1, "size_mode": 0, "size": 8, "size_offset": 0,
+        # its buffers' size: the material's
+        "states": 1, "size_mode": 1, "size": 8, "size_offset": 0.0,
         "iterations": "3 * 4", "filter": True, "rounding": 0,
         "format_0": 1, "rg_0": False,
     }  # fmt: skip

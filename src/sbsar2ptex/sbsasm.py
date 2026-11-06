@@ -57,6 +57,8 @@ from sbsar2ptex.archive import read_archive
 
 BASE = 0x34
 MAGICS = (b"\xff\xd8\xff", b"\x89PNG", b"DDS ", b"v/1\x01", b"II*\x00", b"MM\x00*")
+UNWIRED = 0xFFFFFFFF
+"""The node index of an input no node feeds (mosaic.sbsar's pixel processors)."""
 RAW_FORMATS = {1: (1, 1), 2: (3, 1), 3: (4, 1), 5: (1, 2), 6: (3, 2), 7: (4, 2)}
 """A raw image's format: (channels, bytes per channel). Checked against
 sbsrender's renders of previewsphere_sphere.sbsar (1, 3) and the sizes of
@@ -168,6 +170,16 @@ TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
 """Bytes a graph input of each type takes in the defaults block."""
 
 
+def pp_inputs(word: int) -> int:
+    """Return a pixel processor's input count from its first field.
+
+    The low 16 bits: newer cooks (version 6 and 9: community .sbsar files)
+    set bits above them (0x20000 with no input, 0x20001 with one), then
+    the inputs and the code offsets follow as in older ones.
+    """
+    return word & 0xFFFF
+
+
 def field_count(op: int, rest: list[int], is_offset) -> int | None:
     """Return how many fields precede ``op``'s code offsets, if known.
 
@@ -176,7 +188,7 @@ def field_count(op: int, rest: list[int], is_offset) -> int | None:
     is known it decides, not the look of the words.
     """
     if op in (40, 41):
-        return 1 + rest[0] if rest else 0
+        return 1 + pp_inputs(rest[0]) if rest else 0
     if op not in LAYOUTS:
         return None
     n = len(LAYOUTS[op])
@@ -369,6 +381,9 @@ class Asm:
         node.inline = seed + rest[k:stop]
         node.reads = [w for w in words if w in known]
         self._inputs(node)
+        # An input no node feeds (UNWIRED): not an input at all, so that
+        # what reads it sees nothing, as Substance's empty input.
+        node.inputs = {k: v for k, v in node.inputs.items() if v != UNWIRED}
         return node
 
     def _inputs(self, node: Node) -> None:
@@ -390,7 +405,7 @@ class Asm:
             if opacity == BLEND_OPACITY and node.inline:
                 node.inputs["opacity"] = node.inline[0]
         elif op in (40, 41) and fields:
-            for n, value in enumerate(fields[1 : 1 + fields[0]]):
+            for n, value in enumerate(fields[1 : 1 + pp_inputs(fields[0])]):
                 node.inputs[f"input{n or ''}"] = value
         elif op in (8, 9):
             self._fxmap_inputs(node)

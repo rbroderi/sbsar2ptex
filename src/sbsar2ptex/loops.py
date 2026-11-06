@@ -56,6 +56,7 @@ from sbsar2ptex.translate import node_shader
 from sbsar2ptex.translate import num
 from sbsar2ptex.translate import output_type
 from sbsar2ptex.translate import shader
+from sbsar2ptex.translate import size_params
 from sbsar2ptex.translate import stored
 from sbsar2ptex.translate import subgraph
 from sbsar2ptex.translate import widgets_of
@@ -159,9 +160,7 @@ class SlopeBlur:
             "node_position": {"x": 0, "y": 0},
             "parameters": {
                 "states": 2,
-                "size_mode": 0,
-                "size": size,
-                "size_offset": 0,
+                **size_params(size),
                 "iterations": f"clamp(${samples}, 1, {STEPS}) - 1",
                 "filter": True,
                 "rounding": 0,
@@ -804,13 +803,19 @@ def _fold(
         raise UnfoldableError(msg)
     states_of = [n for n, node in nodes.items() if node["type"] == "buffer"]
     looks = {
-        (b["parameters"]["size"], b["parameters"]["filter"], b["parameters"]["mipmap"])
+        (
+            b["parameters"]["size"],
+            b["parameters"].get("size_mode", 0),
+            b["parameters"].get("size_offset", 0.0),
+            b["parameters"]["filter"],
+            b["parameters"]["mipmap"],
+        )
         for b in (nodes[n] for n in states_of)
     }
     if len(looks) != 1:
         msg = "its buffers differ in size or filtering"
         raise UnfoldableError(msg)
-    ((size, filtering, _),) = looks
+    ((size, size_mode, size_offset, filtering, _),) = looks
     feeding: dict[str, list[dict[str, Any]]] = {}
     for w in tw:
         feeding.setdefault(w["to"], []).append(w)
@@ -958,7 +963,8 @@ def _fold(
         "type": "iterate_buffer_v2",
         "node_position": {"x": 0, "y": 0},
         "parameters": {
-            "states": n, "size_mode": 0, "size": size, "size_offset": 0,
+            "states": n, "size_mode": size_mode, "size": size,
+            "size_offset": size_offset,  # (its buffers': the material's)
             "iterations": f"{phases} * {count}", "filter": filtering, "rounding": 0,
             **{f"format_{k}": st["key"][0] for k, st in enumerate(states)},
             **{f"rg_{k}": False for k in range(n)},
