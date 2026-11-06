@@ -52,21 +52,44 @@ MM_MOD = ">=1.17"
 """The material-maker-mod version --experimental graphs need."""
 
 
+SUFFIXES = {
+    b"\x89PNG": ".png",
+    b"DDS ": ".dds",
+    b"v/1\x01": ".exr",
+    b"II*\x00": ".tif",
+    b"MM\x00*": ".tif",
+}
+"""An embedded file's suffix by its header (else a JPEG's)."""
+
+
+def _suffix(blob: bytes) -> str:
+    return next((s for magic, s in SUFFIXES.items() if blob.startswith(magic)), ".jpg")
+
+
 def bitmaps(asm: Asm, nodes: list[Node], folder: Path) -> dict[int, str]:
     """Write the embedded bitmaps; return their files by the id inputs use.
 
     An image input node names its bitmap by the offset (from BASE) of the
     length word before it, or of its raw pixels (Asm.raw_image): those are
-    written as 8-bit PNGs, as Material Maker loads images in 8 bits.
+    written as 8-bit PNGs, as Material Maker loads images in 8 bits. Each
+    node's image is resolved by its uid (docs/image-inputs.md): the files
+    in an unbroken run from the data area's start, then any other encoded
+    file a node's uid points at (Asm.encoded_image), past a raw image.
     """
     folder.mkdir(parents=True, exist_ok=True)
     out: dict[int, str] = {}
     for k, (at, length) in enumerate(asm.bitmaps):
         blob = asm.d[at : at + length]
-        suffix = ".png" if blob[:4] == b"\x89PNG" else ".jpg"
-        path = folder / f"bitmap_{k:02d}{suffix}"
+        path = folder / f"bitmap_{k:02d}{_suffix(blob)}"
         path.write_bytes(blob)
         out[at - BASE - LENGTH_SIZE] = path.resolve().as_posix()
+    for node in nodes:
+        found = None if node.uid in out else asm.encoded_image(node)
+        if found is not None:
+            blob = asm.d[found[0] : found[0] + found[1]]
+            path = folder / f"image_{node.index}{_suffix(blob)}"
+            path.write_bytes(blob)
+            out[node.uid] = path.resolve().as_posix()
     for node in nodes:
         raw = None if node.uid in out else asm.raw_image(node)
         if raw is None:

@@ -30,6 +30,12 @@ Each statement is tagged:
   position in the node table.
 - **rest.** Below, "rest" means the node's u32 words after its node word.
 
+**Correction.** `docs/node-params.md` supersedes the "two code offsets"
+below. With bit 0 set, one offset (the size function) always follows the
+fields. A second follows only when the pixel-size vector is a function
+(bits 2-3 of `flags >> 8` = 2). The intensity's offset, when a function,
+comes after it. The intensity's state is bits 5-6, as stated here.
+
 ## 1. The node word
 
 **[measured]** The node word is `flags << 16 | x << 8 | op`, with op 14
