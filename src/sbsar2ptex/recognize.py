@@ -211,6 +211,9 @@ def match_at(t: Template, nodes: list[Node], root: int, shapes: dict) -> Match |
         steps += 1
         if steps > limit:
             raise _OverBudgetError
+        if not 0 <= tk < len(t.nodes):
+            # an unconnected template input: matches only an unconnected one
+            return not 0 <= gk < len(nodes)
         tn = t.nodes[tk]
         if tn.op in INPUT_OPS:
             if tk in inputs:
@@ -250,7 +253,7 @@ def heads(t: Template, k: int, depth: int = 0) -> list[int]:
     if depth < SKIP_DEPTH:
         for name in skippable(t.nodes[k]):
             child = t.nodes[k].inputs[name]
-            if t.nodes[child].op not in INPUT_OPS:
+            if 0 <= child < len(t.nodes) and t.nodes[child].op not in INPUT_OPS:
                 out += heads(t, child, depth + 1)
     return out
 
