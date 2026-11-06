@@ -7,6 +7,7 @@ Pixel accuracy is checked against sbsrender by scripts/check_filters.py
 import json
 import re
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -171,6 +172,8 @@ def test_gradient_ignores_stored_midpoints() -> None:
         index=0,
         start=0,
         end=len(words) * 4,
+        op=1,
+        flags=0x119,
         fields=[0, 2],
         code=[4],
         words=words,
@@ -179,6 +182,76 @@ def test_gradient_ignores_stored_midpoints() -> None:
         (0.0, [0.0, 1.0, 0.0, 1.0]),
         (1.0, [1.0, 1.0, 1.0, 1.0]),
     ]
+
+
+def gradient_node(op: int, flags: int, count: int, key_bytes: str) -> Node:
+    """Return a gradient map whose keys (hex, in file order) follow its node word."""
+    raw = bytes.fromhex(key_bytes)
+    raw += bytes(-len(raw) % 4)
+    words = [flags << 16 | op, *struct.unpack(f"<{len(raw) // 4}I", raw)]
+    return Node(index=0, start=0, end=4 * len(words), op=op, flags=flags,
+                fields=[0, count], code=[4], words=words)  # fmt: skip
+
+
+RED, GREEN, BLUE = [1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]
+
+
+@pytest.mark.parametrize("mid", ["0000", "3333", "0080", "cccc", "ffff"])
+def test_gradient_keys_gray_with_trailing_u16(mid: str) -> None:
+    # docs/gradient-map.md, acceptance test 1: flag 0x100, 6-byte gray keys.
+    node = gradient_node(0, 0x119, 2, f"0000 0000 {mid} ffff ffff {mid}")
+    assert _gradient_keys(node, color=False) == [(0.0, [0.0]), (1.0, [1.0])]
+
+
+def test_gradient_keys_gray_without_trailing_u16() -> None:
+    # Acceptance test 2: no flag 0x100, 4-byte gray keys.
+    node = gradient_node(0, 0x19, 4, "0000 0000 0080 ffff 1481 0000 ffff ffff")
+    keys = _gradient_keys(node, color=False)
+    assert [v for _, v in keys] == [[0.0], [1.0], [0.0], [1.0]]
+    assert [p for p, _ in keys] == pytest.approx([0.0, 0.5, 0.50421, 1.0], abs=1e-5)
+
+
+@pytest.mark.parametrize("mid", ["0000", "3333", "0080", "cccc", "ffff"])
+def test_gradient_keys_color_with_trailing_u16(mid: str) -> None:
+    # Acceptance test 3: flag 0x100, 8-byte color keys.
+    node = gradient_node(
+        1, 0x119, 3,
+        f"0000 ff0000ff {mid} 0080 00ff00ff {mid} ffff 0000ffff {mid}",
+    )  # fmt: skip
+    keys = _gradient_keys(node, color=True)
+    assert [v for _, v in keys] == [RED, GREEN, BLUE]
+    assert [p for p, _ in keys] == pytest.approx([0.0, 0.50001, 1.0], abs=1e-5)
+
+
+def test_gradient_keys_color_without_trailing_u16() -> None:
+    # Acceptance test 4: no flag 0x100, 6-byte color keys.
+    node = gradient_node(1, 0x19, 2, "0000 000000ff ffff ffffffff")
+    assert _gradient_keys(node, color=True) == [
+        (0.0, [0.0, 0.0, 0.0, 1.0]),
+        (1.0, [1.0, 1.0, 1.0, 1.0]),
+    ]
+
+
+def test_gradient_keys_bad_data_is_unsupported() -> None:
+    keys = "0000 0000 0080 ffff ffff 0080"
+    with pytest.raises(UnsupportedError):  # more keys than bytes
+        _gradient_keys(gradient_node(0, 0x119, 3, keys), color=False)
+    with pytest.raises(UnsupportedError):  # no keys' offset
+        _gradient_keys(replace(gradient_node(0, 0x19, 2, keys), code=[]), color=False)
+    node = replace(gradient_node(0, 0x119, 2, keys), code=[4, 12])
+    with pytest.raises(UnsupportedError):  # running into the next block
+        _gradient_keys(node, color=False)
+    node = replace(gradient_node(0, 0x19, 2, keys), fields=[0])
+    with pytest.raises(UnsupportedError):  # no key count
+        _gradient_keys(node, color=False)
+
+
+def test_gradient_fixed_size() -> None:
+    # A gradient without flag bit 0 (0x18) has no size function: its node
+    # word's second byte is its size.
+    node = gradient_node(0, 0x18, 2, "0000 0000 ffff ffff")
+    node.words[0] |= 0x55 << 8
+    assert translate._output_size(node, 11) == 5
 
 
 def test_neighborhood_filters_sample_buffers() -> None:

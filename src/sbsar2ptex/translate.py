@@ -1530,26 +1530,30 @@ def word_params(
 def _gradient_keys(node: Node, *, color: bool) -> list[tuple[float, list[float]]]:
     """Return the gradient keys: (position, rgba or [gray]), by position.
 
-    Color keys are two words, [u16 position | u8 r | u8 g][u8 b | u8 a | u16
-    midpoint]; grayscale keys three u16s, position, value, midpoint. Substance
-    stores the midpoint words but does not use them during interpolation.
+    Color keys are a u16 position then u8 r, g, b, a; grayscale keys a u16
+    position then a u16 value. With node flag 0x100 each key also has a
+    trailing u16 (its midpoint slot), which Substance does not use during
+    interpolation. The keys' offset is the node's first block offset
+    (docs/gradient-map.md).
     """
-    count = node.fields[1]
-    data = node.at(node.code[0], 2 * count)  # the first offset points at the keys
+    fmt = ("<H4B" if color else "<HH") + ("H" if node.flags & 0x100 else "")
+    size = struct.calcsize(fmt)
+    count = node.fields[1] if len(node.fields) > 1 else 0
+    if not count or not node.code:
+        msg = f"gradient node {node.index} has no keys"
+        raise UnsupportedError(msg)
+    start = node.code[0]
+    end = min([o for o in node.code[1:] if o > start] + [node.end])
+    if start < node.start or start + count * size > end:
+        msg = f"gradient node {node.index}: truncated keys"
+        raise UnsupportedError(msg)
+    words = node.at(start, (count * size + 3) // 4)
+    data = struct.pack(f"<{len(words)}I", *words)
     keys: list[tuple[float, list[float]]] = []
-    if color:
-        for k in range(count):
-            w0, w1 = data[2 * k], data[2 * k + 1]
-            pos = (w0 & 0xFFFF) / 0xFFFF
-            rgba = [(w0 >> 16 & 0xFF), (w0 >> 24), (w1 & 0xFF), (w1 >> 8 & 0xFF)]
-            keys.append((pos, [c / 255 for c in rgba]))
-    else:
-        u16 = []
-        for w in data:
-            u16 += [w & 0xFFFF, w >> 16]
-        for k in range(count):
-            pos, value, _mid = u16[3 * k : 3 * k + 3]
-            keys.append((pos / 0xFFFF, [value / 0xFFFF]))
+    for key in struct.iter_unpack(fmt, data[: count * size]):
+        values = key[1:5] if color else key[1:2]
+        scale = 255 if color else 0xFFFF
+        keys.append((key[0] / 0xFFFF, [v / scale for v in values]))
     return sorted(keys, key=lambda k: k[0])
 
 
@@ -4451,8 +4455,9 @@ def _output_size(node: Node, size: int) -> int:
     (high nibble), whatever the graph's size. The size function is the
     node's first code block, or the block its first inline word points at
     (node_shader drops that word); a gradient's or a curve's first block is
-    its data instead (its size function, if any, the inline word's: Biomech's
-    n3904, 32 pixels), an FX-Map's its tree: its size function is the block
+    its data instead (a gradient's size function its second block, with
+    bit 16: Biomech's n3904, 32 pixels; a curve's the inline word's), an
+    FX-Map's its tree: its size function is the block
     that also sets its variables (fxmap.Settings.setup_code; Biomech's
     n3900, 16 pixels in a 1024 graph). Square sizes only, one pixel at
     least. A graph input's image is its own size.
@@ -4460,10 +4465,13 @@ def _output_size(node: Node, size: int) -> int:
     if node.op in (32, 33):
         return size
     data = node.op in (0, 1, 44, 45)  # its first block its keys or points
-    if not data and not node.flags & 1 and node.words:
+    gradient = node.op in (0, 1)
+    if (gradient or not data) and not node.flags & 1 and node.words:
         fixed = node.words[0] >> 8 & 0xFF
         return fixed & 15 if fixed & 15 == fixed >> 4 else size
     offsets = [] if data else list(node.code[:1])
+    if gradient:
+        offsets = list(node.code[1:2])  # keys, then the size function
     if node.op in (8, 9):
         setup = fxmap.read_settings(node, color=node.op == 9).setup_code  # noqa: PLR2004
         offsets = [setup] if setup is not None else []
