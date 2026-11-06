@@ -147,7 +147,8 @@ LAYOUTS = {**_LAYOUT, **{op + 1: v for op, v in _LAYOUT.items() if op in _PAIRS}
 Not here: pixel processors (40/41: a count, then that many inputs), FX-Maps
 (8/9: a flag word, a code offset, their pattern inputs, two code offsets,
 the background input) and blend's optional opacity input (BLEND_OPACITY).
-Warps sometimes have a leading flag word (three fields, not two); distance
+Warps have a leading flag word in version 9 cooks (three fields, not two:
+see warp_flag_word); distance
 has its source input only when its flag word's bit 0 is set. A node whose
 node-word flags lack bit 0 has no code, its constants following its fields.
 Gradient maps are 0 (grayscale out) and 1 (color out), both from either.
@@ -168,12 +169,49 @@ TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
 """Bytes a graph input of each type takes in the defaults block."""
 
 
-def field_count(op: int, rest: list[int], is_offset) -> int | None:
+WARP_FLAG_WORD = {5: False, 6: False, 9: True}
+"""Whether a warp has a leading flag word, by cook version (docs/warp-layout.md
+section 3: versions 7 and 8 not seen)."""
+NO_NODE = 0xFFFFFFFF
+"""An input no node feeds."""
+
+
+def warp_flag_word(
+    flags: int, rest: list[int], is_offset, count: int, version: int | None = None
+) -> bool:
+    """Return whether a warp's words start with a flag word (warp-layout.md 3).
+
+    With code (node flag bit 0), rest[2] is a code offset exactly when there
+    is none. Without code, the cook version decides where known; else there
+    is one when rest[2] reads as a node index (below ``count``, or NO_NODE),
+    as the gradient does after a flag word, and an intensity f32 does not.
+    """
+    if len(rest) < 3:  # noqa: PLR2004 - input and gradient alone
+        return False
+    if flags & 1:
+        return not is_offset(rest[2])
+    known = WARP_FLAG_WORD.get(version) if version is not None else None
+    if known is not None:
+        return known
+    return rest[2] == NO_NODE or rest[2] < count
+
+
+def field_count(
+    op: int,
+    rest: list[int],
+    is_offset,
+    *,
+    flags: int = 1,
+    count: int = 0,
+    version: int | None = None,
+) -> int | None:
     """Return how many fields precede ``op``'s code offsets, if known.
 
     ``rest`` is the node's words after its node word. Fields can hold values
     that look like code offsets (a flag word of 0x40), so where the layout
-    is known it decides, not the look of the words.
+    is known it decides, not the look of the words. ``flags`` (the node
+    word's), the node ``count`` and the cook ``version`` place a warp's
+    optional flag word (warp_flag_word).
     """
     if op in (40, 41):
         return 1 + rest[0] if rest else 0
@@ -182,8 +220,8 @@ def field_count(op: int, rest: list[int], is_offset) -> int | None:
     n = len(LAYOUTS[op])
     if op in (42, 43) and rest and not rest[0] & 1:
         n -= 1  # distance without a source
-    if op in (14, 15) and len(rest) > n and not is_offset(rest[n]):
-        n += 1  # a warp's optional leading flag word: three fields
+    if op in (14, 15) and warp_flag_word(flags, rest, is_offset, count, version):
+        n += 1  # a warp's leading flag word: three fields
     return min(n, len(rest))
 
 
@@ -342,7 +380,10 @@ class Asm:
         def is_offset(w: int) -> bool:
             return start < w + BASE <= end and w % 4 == 0
 
-        k = field_count(node.op, rest, is_offset)
+        k = field_count(
+            node.op, rest, is_offset,
+            flags=node.flags, count=self.count, version=self.version,
+        )  # fmt: skip
         if k is None:  # unknown layout: up to the first code offset
             k = 0
             while k < len(rest) and not is_offset(rest[k]):
@@ -377,7 +418,7 @@ class Asm:
         if op in LAYOUTS:
             layout = LAYOUTS[op]
             if op in (14, 15) and len(fields) == 3:  # noqa: PLR2004
-                layout = ("-", *layout)  # a leading flag word, sometimes
+                layout = ("-", *layout)  # a leading flag word (field_count)
             if op in (42, 43) and fields and not fields[0] & 1:
                 layout = layout[:2]  # no source input
             for name, value in zip(layout, fields, strict=False):

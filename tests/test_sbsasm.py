@@ -13,9 +13,11 @@ import pytest
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.sbsasm import BASE
+from sbsar2ptex.sbsasm import NO_NODE
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.sbsasm import reachable
+from sbsar2ptex.translate import word_params
 
 DATA = Path(__file__).parent / "data"
 
@@ -55,6 +57,79 @@ def test_no_defaults_block() -> None:
     assert asm.output_nodes == [(0xC0, 0)]
     assert asm.inputs == []
     assert asm.defaults_at == 0x60
+
+
+HALF = 0x3F000000
+"""The f32 0.5."""
+OFF = -1
+"""In a warp's words below: a code offset (to a code block after them)."""
+
+
+def warp_file(flags: int, rest: list[int], *, version: int = 0, count: int = 100):
+    """Return an SBAM file: count - 1 uniforms, then a warp with ``rest``.
+
+    Its node word is ``flags << 16 | 0x88 << 8 | 14``; each OFF in ``rest``
+    is an offset to a code block (an empty one) after its words.
+    """
+    start = 0x40 + 4 * (count - 1)
+    blocks = start + 4 * (1 + len(rest))
+    offsets = iter(range(blocks, blocks + 8, 4))
+    words = [flags << 16 | 0x88 << 8 | 14]
+    words += [next(offsets) - BASE if w == OFF else w for w in rest]
+    words += [0, 0] if OFF in rest else []
+    table = start + 4 * len(words)
+    outputs = table + 4 * count
+    data = bytearray(outputs + 8 + 8 + 16)
+    data[:4] = b"SBAM"
+    struct.pack_into("<H", data, 6, version)
+    for k in range(count - 1):
+        struct.pack_into("<I", data, 0x40 + 4 * k, 12)  # a uniform
+    struct.pack_into(f"<{len(words)}I", data, start, *words)
+    starts = [0x40 + 4 * k for k in range(count - 1)] + [start]
+    struct.pack_into(f"<{count}I", data, table, *(s - BASE for s in starts))
+    struct.pack_into("<HHI", data, outputs + 8, 1, 0, 0x1234)  # the uid table
+    struct.pack_into("<4I", data, outputs + 16, count, table - BASE, outputs - BASE, 0)
+    return Asm(bytes(data))
+
+
+@pytest.mark.parametrize(
+    ("flags", "rest", "version", "gradient", "intensity"),
+    [
+        (0x2319, [7, 8, OFF, OFF, HALF], 0, 8, 0.5),  # 1: v5/v6, code
+        (0x2B19, [0, 7, 8, OFF, OFF, HALF], 0, 8, 0.5),  # 2: v9, code
+        (0x2318, [7, 8, HALF], 0, 8, 0.5),  # 3: no code (persian)
+        (0x2318, [0, 7, 8, HALF], 0, 8, 0.5),  # 4: v9, no code
+        (0x0318, [7, 8], 0, 8, 1.0),  # 5: no code, default intensity
+        (0x2318, [7, NO_NODE, HALF], 0, NO_NODE, 0.5),  # 6: gradient unwired
+        (0x2318, [7, 8, HALF], 6, 8, 0.5),  # 3 by its version
+        (0x2318, [0, 7, 8, HALF], 9, 8, 0.5),  # 4 by its version
+        (0x2318, [7, 8, 0], 5, 8, 0.0),  # +0.0 reads as a node: the version decides
+    ],
+)
+def test_warp_layouts(
+    flags: int, rest: list[int], version: int, gradient: int, intensity: float
+) -> None:
+    # docs/warp-layout.md section 4, the node count 100.
+    warp = warp_file(flags, rest, version=version).nodes()[-1]
+    assert warp.inputs == {"input": 7, "gradient": gradient}
+    assert bool(warp.code) == bool(flags & 1)
+    assert word_params(warp, [("intensity", 5, 1.0)], {}) == {"intensity": intensity}
+
+
+def test_a_warp_without_code_in_a_file() -> None:
+    # docs/warp-layout.md section 4's container: test 3's warp as node 2.
+    data = bytearray(0x84)
+    data[:4] = b"SBAM"
+    struct.pack_into("<I", data, 0x40, 12)
+    struct.pack_into("<I", data, 0x44, 12)
+    struct.pack_into("<4I", data, 0x48, 0x2318 << 16 | 0x88 << 8 | 14, 0, 1, HALF)
+    struct.pack_into("<3I", data, 0x60, 0x40 - BASE, 0x44 - BASE, 0x48 - BASE)
+    struct.pack_into("<HHI", data, 0x6C, 1, 0, 0x1234)
+    struct.pack_into("<4I", data, 0x74, 3, 0x60 - BASE, 0x64 - BASE, 0)
+    warp = Asm(bytes(data)).nodes()[2]
+    assert warp.inputs == {"input": 0, "gradient": 1}
+    assert warp.code == []
+    assert warp.inline[0] == HALF
 
 
 def test_raw_image() -> None:

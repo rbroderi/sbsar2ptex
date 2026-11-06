@@ -18,6 +18,7 @@ Ops, from function graphs cooked by sbscooker (see sbsasm-probe):
 
     0x00 constant       0x01 built-in (id)   0x02 graph input (uid)
     0x04 get variable   0x07 set variable    0x09 if/else (c, a, b)
+    0x0b while (init, cond, body, u32 cap: see Loop)
     0x0c sequence       0x0d-0x0f vector of 2-4 parts   0x10 swizzle
     0x11 convert        0x12 add  0x13 sub   0x14 mul  0x15 div  0x16 mod
     0x17 neg  0x18 dot  0x1a and  0x1b or  0x1c not
@@ -44,7 +45,7 @@ NO_VALUE = 0xFFFF
 
 OP_NAMES = {
     0x00: "const", 0x01: "builtin", 0x02: "input", 0x04: "getvar", 0x07: "setvar",
-    0x09: "ifelse", 0x0C: "sequence", 0x0D: "concat", 0x0E: "concat3",
+    0x09: "ifelse", 0x0B: "while", 0x0C: "sequence", 0x0D: "concat", 0x0E: "concat3",
     0x0F: "concat4", 0x10: "swizzle",
     0x11: "convert", 0x12: "add", 0x13: "sub", 0x14: "mul", 0x15: "div",
     0x16: "mod", 0x17: "neg", 0x18: "dot", 0x1A: "and", 0x1B: "or", 0x1C: "not",
@@ -125,6 +126,96 @@ def decode(words: list[int]) -> Block:
         block.instrs.append(Instr(code & 0x3F, kind, width, half[at + 1 : at + 1 + n]))
         at += 1 + n
     return block
+
+
+WHILE = 0x0B
+MAX_ITERATIONS = 1 << 16
+"""Iterations after which the evaluator gives up on a while loop (where
+Substance, without a cap, would hang): its value is unknown (FunctionError)."""
+GLSL_INT_MAX = (1 << 31) - 1
+
+
+@dataclass(frozen=True)
+class Loop:
+    """A while loop (op 0x0B, docs/function-ops.md section 1).
+
+    Its instructions are three consecutive ranges just before it: the init
+    range, ending at ``init`` (run once); the condition range, (init,
+    cond]; the body range, (cond, body]; the loop instruction, ``at``,
+    comes right after ``body``. A ``cap`` of 0 is no cap.
+    """
+
+    init: int
+    cond: int
+    body: int
+    cap: int
+    at: int
+
+    @property
+    def start(self) -> int:
+        """The first instruction the loop repeats (its condition range's)."""
+        return self.init + 1
+
+
+def while_operands(ins: Instr) -> tuple[int, int, int, int]:
+    """Return a while instruction's (init, cond, body, cap).
+
+    Three u16 SSA indices, then the u32 cap, 4-byte aligned: five operand
+    u16s, or six with a u16 of padding before the cap.
+    """
+    ops = ins.operands
+    if len(ops) == 6:  # noqa: PLR2004
+        ops = [*ops[:3], *ops[4:]]
+    elif len(ops) != 5:  # noqa: PLR2004
+        msg = f"while with {len(ops)} operand u16s"
+        raise FunctionError(msg)
+    return ops[0], ops[1], ops[2], ops[3] | ops[4] << 16
+
+
+def loops(block: Block) -> dict[int, Loop]:
+    """Return the block's while loops, by their start (``Loop.start``).
+
+    Raises FunctionError for ranges that are not as section 1.2 has them,
+    or loops that overlap without one inside a range of the other.
+    """
+    found: dict[int, Loop] = {}
+    for k, ins in enumerate(block.instrs):
+        if ins.op != WHILE:
+            continue
+        init, cond, body, cap = while_operands(ins)
+        if not 0 <= init < cond < body == k - 1:
+            msg = f"while #{k}: ranges ({init}, {cond}, {body}) not just before it"
+            raise FunctionError(msg)
+        if init + 1 in found:
+            msg = f"while #{k}: two loops start at #{init + 1}"
+            raise FunctionError(msg)
+        found[init + 1] = Loop(init, cond, body, cap, k)
+    for outer in found.values():
+        for inner in found.values():
+            if not outer.start < inner.start <= outer.body:
+                continue
+            end = outer.cond if inner.start <= outer.cond else outer.body
+            if inner.at > end:
+                msg = f"while #{inner.at} straddles a range of while #{outer.at}"
+                raise FunctionError(msg)
+    return found
+
+
+def _enclosing(block: Block, found: dict[int, Loop]) -> tuple[list, list]:
+    """Return, per instruction, its outermost and innermost enclosing loop.
+
+    An instruction is inside a loop when it is in its condition or body
+    range (None when it is in none).
+    """
+    n = len(block.instrs)
+    outer: list[Loop | None] = [None] * n
+    inner: list[Loop | None] = [None] * n
+    for loop in sorted(found.values(), key=lambda lp: lp.start):
+        for k in range(loop.start, loop.body + 1):
+            if outer[k] is None:
+                outer[k] = loop
+            inner[k] = loop  # later starts are nested deeper
+    return outer, inner
 
 
 def constant(instr: Instr) -> list[float] | list[int] | list[bool]:
@@ -298,11 +389,50 @@ def evaluate(
     instruction order. ``variables``, when given, is the variable store,
     read and written in place: blocks that share one (an FX-Map's) see each
     other's variables. Samples, and what ``builtins`` and ``rand`` leave
-    out, raise FunctionError.
+    out, raise FunctionError, as does a while loop still running after
+    MAX_ITERATIONS.
+
+    Instructions run in the order the block's while loops run them (each
+    loop's condition and body ranges again per iteration), so each value is
+    stored by its index and a read sees its most recent run.
     """
-    vals: list[list] = []
+    instrs = block.instrs
+    vals: list[list] = [[] for _ in instrs]
     var: dict[int, list] = {} if variables is None else variables
-    for ins in block.instrs:
+    starts = loops(block)
+
+    def run(lo: int, hi: int, own: Loop | None = None) -> None:
+        """Run instructions lo to hi, both included, and the loops among them."""
+        k = lo
+        while k <= hi:
+            loop = starts.get(k)
+            if loop is not None and loop is not own:
+                if loop.at > hi:
+                    msg = f"while #{loop.at} ends past its range"
+                    raise FunctionError(msg)
+                run_loop(loop)
+                k = loop.at + 1
+            else:
+                vals[k] = step(instrs[k])
+                k += 1
+
+    def run_loop(loop: Loop) -> None:
+        """Run ``loop`` (its init range has run): section 1.4."""
+        n = 0
+        while not (loop.cap and n >= loop.cap):
+            if n >= MAX_ITERATIONS:
+                msg = f"while #{loop.at} still running after {n} iterations"
+                raise FunctionError(msg)
+            run(loop.start, loop.cond, loop)
+            if vals[loop.cond][0]:
+                break
+            run(loop.cond + 1, loop.body)
+            n += 1
+        ins = instrs[loop.at]
+        vals[loop.at] = vals[loop.body] if n else _as(ins.type, [0] * ins.width)
+
+    def step(ins: Instr) -> list:
+        """Return one instruction's value (a while is run_loop's)."""
         ops, op = ins.operands, ins.op
         if op == 0x00:
             v = constant(ins)
@@ -357,7 +487,9 @@ def evaluate(
             raise FunctionError(msg)
         if op not in (0x07, 0x09, 0x0C) and ins.type in (FLOAT, INT, BOOL):
             v = _as(ins.type, v)
-        vals.append(v)
+        return v
+
+    run(0, len(instrs) - 1)
     return vals[-1]
 
 
@@ -414,11 +546,27 @@ def bounds(
 
     ``inputs(uid, width)`` and ``builtins`` bound the graph inputs and built-ins;
     rand(a) is within [0, a]. Ops without a simple bound give (-inf, inf).
+
+    One pass, in order, even over while loops: a variable a loop sets is
+    unbounded from the loop's start on, and so is the loop's value. Loops
+    whose ranges cannot be read leave the whole block unbounded.
     """
     vals: list[list[Interval]] = []
     var: dict[int, list[Interval]] = {}
-    for ins in block.instrs:
+    try:
+        starts = loops(block)
+    except FunctionError:
+        return [_ALL] * block.instrs[-1].width
+    loose: set[int] = set()
+    """Variables a loop sets: unbounded."""
+    for k, ins in enumerate(block.instrs):
         ops = ins.operands
+        loop = starts.get(k)
+        if loop is not None:
+            for i in block.instrs[loop.start : loop.at + 1]:
+                if i.op == 0x07:  # noqa: PLR2004
+                    loose.add(i.operands[1])
+                    var[i.operands[1]] = [_ALL] * i.width
 
         def arg(k: int, ops: list[int] = ops) -> list[Interval]:
             return vals[ops[k]]
@@ -432,7 +580,8 @@ def bounds(
         elif ins.op == 0x04:  # noqa: PLR2004
             v = var.get(ops[0], [_ALL] * ins.width)
         elif ins.op == 0x07:  # noqa: PLR2004
-            var[ops[1]] = v = arg(0)
+            v = arg(0)
+            var[ops[1]] = [_ALL] * len(v) if ops[1] in loose else v
         elif ins.op == 0x09:  # noqa: PLR2004
             a, b = _spread(arg(1), arg(2))
             v = [(min(p[0], q[0]), max(p[1], q[1])) for p, q in zip(a, b, strict=True)]
@@ -619,21 +768,64 @@ def to_glsl(
     its type, which the block reads and writes instead of locals.
     ``engine_trig`` computes cos, sin and cartesian with ENGINE_TRIG_GLSL's
     functions (the caller adds them), as the cooker's CPU evaluator does.
+
+    A while loop becomes one loop statement (docs/function-ops.md 1.7): its
+    result declared before it, zero; ``cap`` iterations, or ``while (true)``
+    without a cap; the condition range, a break when it is true, then the
+    body range and the result set to the body's value. Variables first
+    used in a loop, and values a loop computes that are read after it, are
+    declared before the outermost loop, zero, and only assigned inside.
     """
     cos, sin = ("sbs_cos", "sbs_sin") if engine_trig else ("cos", "sin")
+    instrs = block.instrs
+    found = loops(block)
+    hoisted_vars, hoisted_vals = _hoisted(block, found, variables or {})
+    early = {j for js in hoisted_vals.values() for j in js}
+    ends: dict[int, tuple[bool, Loop]] = {}
+    """A loop's condition (False) or body (True) ending at an instruction."""
+    for lp in found.values():
+        ends[lp.cond], ends[lp.body] = (False, lp), (True, lp)
     lines: list[str] = []
-    names: list[str] = []
-    kinds: list[tuple[int, int]] = []
+    names = [f"{prefix}_{k}" for k in range(len(instrs))]
+    kinds = [(i.type, i.width) for i in instrs]
     declared: dict[int, str] = {}
     """Variables declared so far, with their GLSL types."""
-    for k, ins in enumerate(block.instrs):
+    depth = 0
+
+    def emit(line: str) -> None:
+        lines.append("\t" * depth + line)
+
+    def define(k: int, expr: str) -> None:
+        if k in early:
+            emit(f"{names[k]} = {expr};")
+        else:
+            emit(f"{glsl_type(*kinds[k])} {names[k]} = {expr};")
+
+    def v(i: int) -> str:
+        return names[i]
+
+    for k, ins in enumerate(instrs):
         ops = ins.operands
-        name = f"{prefix}_{k}"
         t = glsl_type(ins.type, ins.width)
-
-        def v(i: int) -> str:
-            return names[i]
-
+        loop = found.get(k)
+        if loop is not None:
+            for var, vt in hoisted_vars.get(k, []):
+                declared[var] = vt
+                emit(f"{vt} {prefix}_var{var} = {vt}(0);")
+            for j in hoisted_vals.get(k, []):
+                jt = glsl_type(*kinds[j])
+                emit(f"{jt} {names[j]} = {jt}(0);")
+            define(loop.at, f"{glsl_type(*kinds[loop.at])}(0)")
+            cap = min(loop.cap, GLSL_INT_MAX)
+            it = f"{prefix}_it{loop.at}"
+            emit(
+                f"for (int {it} = 0; {it} < {cap}; {it}++) {{"
+                if cap
+                else "while (true) {"
+            )
+            depth += 1
+        if ins.op == WHILE:
+            continue  # declared and computed by its loop statement
         if ins.op == 0x00:
             expr = _lit(ins.type, constant(ins))
         elif ins.op == 0x01:
@@ -647,23 +839,23 @@ def to_glsl(
             expr = glob if kind == t else f"{t}({glob})"
         elif ins.op == 0x07 and variables and ops[1] in variables:  # noqa: PLR2004
             glob, kind = variables[ops[1]]
-            lines.append(f"{glob} = {kind}({v(ops[0])});")
+            emit(f"{glob} = {kind}({v(ops[0])});")
             expr = v(ops[0])
         elif ins.op == 0x04:  # noqa: PLR2004
             # A variable this block never set (one an FX-Map node's
             # ancestors set, it seems) reads as zero, as in evaluate.
             if ops[0] not in declared:
                 declared[ops[0]] = t
-                lines.append(f"{t} {prefix}_var{ops[0]} = {t}(0);")
+                emit(f"{t} {prefix}_var{ops[0]} = {t}(0);")
             expr = f"{prefix}_var{ops[0]}"
             if declared[ops[0]] != t:
                 expr = f"{t}({expr})"
         elif ins.op == 0x07:  # noqa: PLR2004
             if ops[1] in declared:
-                lines.append(f"{prefix}_var{ops[1]} = {declared[ops[1]]}({v(ops[0])});")
+                emit(f"{prefix}_var{ops[1]} = {declared[ops[1]]}({v(ops[0])});")
             else:
                 declared[ops[1]] = t
-                lines.append(f"{t} {prefix}_var{ops[1]} = {v(ops[0])};")
+                emit(f"{t} {prefix}_var{ops[1]} = {v(ops[0])};")
             expr = v(ops[0])
         elif ins.op == 0x09:  # noqa: PLR2004
             expr = f"({v(ops[0])} ? {v(ops[1])} : {v(ops[2])})"
@@ -710,7 +902,68 @@ def to_glsl(
         else:
             msg = f"cannot translate {ins.name}"
             raise FunctionError(msg)
-        lines.append(f"{t} {name} = {expr};")
-        names.append(name)
-        kinds.append((ins.type, ins.width))
+        define(k, expr)
+        if k in ends:
+            is_body, lp = ends[k]
+            if not is_body:
+                cond = v(k) if ins.type == BOOL else f"bool({v(k)})"
+                emit(f"if ({cond}) break;")
+            else:
+                lt = glsl_type(*kinds[lp.at])
+                value = v(k) if lt == t else f"{lt}({v(k)})"
+                emit(f"{names[lp.at]} = {value};")
+                depth -= 1
+                emit("}")
     return lines, names[-1]
+
+
+def _reads(ins: Instr) -> list[int]:
+    """Return the values (SSA indices) an instruction reads."""
+    ops = ins.operands
+    if ins.op in (0x00, 0x01, 0x02, 0x04):
+        return []
+    if ins.op in (0x07, 0x10, 0x11, 0x33, 0x34):
+        return ops[:1]
+    if ins.op == WHILE:
+        return list(while_operands(ins)[:3])
+    return [o for o in ops if o != NO_VALUE]
+
+
+def _hoisted(
+    block: Block, found: dict[int, Loop], shared: Mapping[int, tuple[str, str]]
+) -> tuple[dict[int, list[tuple[int, str]]], dict[int, list[int]]]:
+    """Return what to_glsl declares before each outermost loop (by its start).
+
+    Variables first used inside a loop, (id, GLSL type), as its first use
+    has them; and values computed inside a loop that something outside
+    their innermost loop reads (a while reading its own ranges is the loop
+    statement, inside them).
+    """
+    outer, inner = _enclosing(block, found)
+    variables: dict[int, list[tuple[int, str]]] = {}
+    seen: set[int] = set()
+    for k, ins in enumerate(block.instrs):
+        if ins.op not in (0x04, 0x07):
+            continue
+        var = ins.operands[0] if ins.op == 0x04 else ins.operands[1]  # noqa: PLR2004
+        if var in shared or var in seen:
+            continue
+        seen.add(var)
+        lp = outer[k]
+        if lp is not None:
+            entry = (var, glsl_type(ins.type, ins.width))
+            variables.setdefault(lp.start, []).append(entry)
+    early: set[int] = set()
+    for r, ins in enumerate(block.instrs):
+        if ins.op == WHILE:
+            continue
+        for j in _reads(ins):
+            lp = inner[j] if 0 <= j < len(inner) else None
+            if lp is not None and not lp.start <= r <= lp.body:
+                early.add(j)
+    values: dict[int, list[int]] = {}
+    for j in sorted(early):
+        lp = outer[j]
+        if lp is not None:
+            values.setdefault(lp.start, []).append(j)
+    return variables, values
