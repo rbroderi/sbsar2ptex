@@ -27,6 +27,7 @@ import math
 import re
 import struct
 from collections.abc import Iterable
+from collections.abc import MutableMapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
@@ -55,6 +56,7 @@ from sbsar2ptex.fxrng import PARAM_LCG
 from sbsar2ptex.rng import RNG_GLSL
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
+from sbsar2ptex.sbsasm import IMAGE_COUNT
 from sbsar2ptex.sbsasm import SEED_CODE
 from sbsar2ptex.sbsasm import SEED_INLINE
 from sbsar2ptex.sbsasm import SEED_NONE
@@ -62,6 +64,14 @@ from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.sbsasm import UnsupportedError
 from sbsar2ptex.sbsasm import fixed_size
 from sbsar2ptex.sbsasm import signed32
+from sbsar2ptex.sbsasm import value_width
+from sbsar2ptex.slots import Aliased
+from sbsar2ptex.slots import SlotStore
+from sbsar2ptex.slots import Writers
+from sbsar2ptex.slots import builtins as slot_builtins
+from sbsar2ptex.slots import slot_bounds
+from sbsar2ptex.slots import writer
+from sbsar2ptex.slots import writers
 from sbsar2ptex.valuerng import VALUE_RNG_GLSL
 from sbsar2ptex.valuerng import ValueRng
 
@@ -126,6 +136,15 @@ class _Context:
     fx_variables: dict[int, tuple[str, str]] | None = None
     """The FX-Map being translated's shared variables: GLSL global, type."""
     """Where precomputed FX-Map textures go (none: FX-Maps stay live)."""
+    slot_writers: Writers = field(default_factory=dict)
+    """The graph's Value Processors by the slot they write (sbsar2ptex.slots)."""
+    slot_alias: dict[int, int] | None = None
+    """While a library node's template is translated: its slots' graph slots
+    (slots.template_slots); its other slots cannot be read."""
+    graph_size: int = 11
+    """The graph's output size (log2): a Value Processor's $size."""
+    reader: int | None = None
+    """The node (index) being translated: it reads only earlier slots."""
 
 
 _CTX = _Context()
@@ -419,6 +438,81 @@ def _seed_glsl() -> str:
     return "0"
 
 
+def _slot_store(values: dict[int, list]) -> MutableMapping[int, list]:
+    """Return a slot store for evaluating the current node's functions here.
+
+    Its slots are the graph's Value Processors' values, run with ``values``
+    (graph input values by uid; sbsar2ptex.slots.SlotStore); a library
+    template's, through its slot map (slots.Aliased).
+    """
+    store = SlotStore(_CTX.slot_writers, values, _CTX.graph_size, _CTX.reader)
+    return store if _CTX.slot_alias is None else Aliased(store, _CTX.slot_alias)
+
+
+def _graph_slot(slot: int) -> int:
+    """Return the graph slot a get slot of the node being translated reads.
+
+    Its own, or for a library template the one its writer was matched to
+    (docs/function-ops.md 2.6); a template slot matched to none is refused.
+    """
+    if _CTX.slot_alias is None:
+        return slot
+    if slot not in _CTX.slot_alias:
+        msg = f"template slot {slot}: matched to no writer of this graph"
+        raise UnsupportedError(msg)
+    return _CTX.slot_alias[slot]
+
+
+def _slot_glsl(slot: int, kind: int, width: int) -> str:
+    """Return GLSL for a get slot of the node being translated (_graph_slot)."""
+    return _writer_glsl(_graph_slot(slot), kind, width)
+
+
+def _writer_glsl(slot: int, kind: int, width: int) -> str:
+    """Return GLSL for graph slot ``slot``: its writer's value, live.
+
+    The writer's block becomes a helper of the next shader, a function of
+    the graph inputs (their parameters), shared by the shader's reads of
+    the slot (docs/function-ops.md 2.6); its own get slots call their
+    writers' helpers, defined before it. A Value Processor runs once per
+    graph: its trig is the cooker's CPU one, its built-ins slots.builtins.
+    """
+    try:
+        w = writer(_CTX.slot_writers, slot, kind, width, _CTX.reader)
+    except FunctionError as e:
+        raise UnsupportedError(str(e)) from e
+    t = glsl_type(kind, width)
+    fn = f"sbs_slot{slot}_$(name)"
+    call = f"{fn}(vec2(0.0))"
+    if any(h.startswith(f"{t} {fn}(") for h in _CTX.helpers):
+        return call
+    glsl = {
+        ident: num(v[0]) if len(v) == 1 else f"vec{len(v)}({', '.join(map(num, v))})"
+        for ident, v in slot_builtins(_CTX.graph_size).items()
+    }
+
+    def builtins(ident: int, _width: int) -> str:
+        if ident not in glsl:
+            msg = f"Value Processor reads built-in {ident}"
+            raise UnsupportedError(msg)
+        return glsl[ident]
+
+    reader, _CTX.reader = _CTX.reader, w.node
+    alias, _CTX.slot_alias = _CTX.slot_alias, None  # the writer is the graph's
+    try:
+        lines, result = to_glsl(
+            w.block, f"s{slot}", lambda uid, *_: _param_for(uid), builtins,
+            engine_trig=_engine_trig(w.block), slots=_writer_glsl,
+        )  # fmt: skip
+    except FunctionError as e:
+        raise UnsupportedError(str(e)) from e
+    finally:
+        _CTX.reader, _CTX.slot_alias = reader, alias
+    body = "\n\t".join(lines)
+    _CTX.helpers.append(f"{t} {fn}(vec2 uv) {{\n\t{body}\n\treturn {result};\n}}\n")
+    return call
+
+
 def dynamic(
     node: Node, offset: int, before: Sequence[int] = (), *, cast: bool = True
 ) -> GLExpr:
@@ -466,7 +560,7 @@ def dynamic(
             pre_lines, _ = to_glsl(
                 pre, f"f{_CTX.count}", param, builtins, None,
                 lambda a, _k: f"sbs_value_rng_next(rng, float({a}))", shared,
-                engine_trig=_engine_trig(pre),
+                engine_trig=_engine_trig(pre), slots=_slot_glsl,
             )  # fmt: skip
             if any(i.op == RAND for i in pre.instrs):
                 pre_lines.insert(0, f"uint rng = uint({_CTX.value_seed});")
@@ -477,6 +571,7 @@ def dynamic(
         lines, result = to_glsl(
             block, prefix, param, builtins, _sample, _rand, shared or None,
             engine_trig=_CTX.sampled is None and _engine_trig(block),
+            slots=_slot_glsl,
         )  # fmt: skip
         values = {
             uid: [float(x) for x in gi.default] or [0.0]
@@ -485,7 +580,7 @@ def dynamic(
     except FunctionError as e:
         raise UnsupportedError(str(e)) from e
     try:
-        value = evaluate(block, values, builtin_vals)
+        value = evaluate(block, values, builtin_vals, slots=_slot_store(values))
     except (FunctionError, KeyError):  # per-pixel: no single value
         value = [0.0] * block.instrs[-1].width
     last = block.instrs[-1]
@@ -3118,7 +3213,9 @@ def emboss_scale(node: Node) -> list[float]:
     block = decode(node.at(at, (node.end - at) // 4))
     n = float(1 << _CTX.size)
     try:
-        v = evaluate(block, {}, {1: [n, n], 3: [float(_CTX.size)] * 2})
+        v = evaluate(
+            block, {}, {1: [n, n], 3: [float(_CTX.size)] * 2}, slots=_slot_store({})
+        )
     except (FunctionError, KeyError) as e:
         msg = "an emboss's pixel size reads more than the size"
         raise UnsupportedError(msg) from e
@@ -3193,8 +3290,12 @@ def _pixelprocessor(node: Node, name: str, *, color: bool, size: int) -> Sub:
     $pos is the pixel (uv); samples read the inputs, buffered. Its own
     seed (node_seed_glsl: 0, a constant, or a function of $randomseed)
     seeds the per-pixel generators (check_filters pp_rand_nodeseed).
+    A Value Processor (sbsasm.value_width) has no image to translate.
     """
-    count = node.fields[0] & 0xFFFF
+    if node.fields[0] & ~IMAGE_COUNT:
+        msg = f"node {node.index}: a Value Processor has no image"
+        raise UnsupportedError(msg)
+    count = node.fields[0] & IMAGE_COUNT
     names = [f"input{n or ''}" for n in range(count)]
     params = node.code[:-1]
     _CTX.value_seed = _CTX.pixel_seed = node_seed_glsl(node)
@@ -3371,6 +3472,7 @@ def _fx_function(node: Node, offset: int, parameter: str = "frameoffset") -> str
             rand,
             _CTX.fx_variables,
             engine_trig=_engine_trig(block),
+            slots=_slot_glsl,
         )
     except FunctionError as e:
         raise UnsupportedError(str(e)) from e
@@ -3414,6 +3516,19 @@ def _fx_reach(node: Node, tree: fxmap.Tree | None, size: int) -> dict[int, Reach
     inf = float("inf")
     memo: dict[tuple, Reach | None] = {}
 
+    def unbounded(_uid: int, width: int) -> list:
+        return [(-inf, inf)] * width
+
+    graph_bound = slot_bounds(
+        _CTX.slot_writers, unbounded, _CTX.graph_size, _CTX.reader
+    )
+    alias = _CTX.slot_alias
+
+    def slot(s: int, kind: int, width: int) -> list:
+        if alias is not None and s not in alias:
+            return [(-inf, inf)] * width
+        return graph_bound(s if alias is None else alias[s], kind, width)
+
     def span(param: Any, default: list[float], fixed: dict[int, list]) -> list:
         if param is None:
             return [(v, v) for v in default]
@@ -3421,7 +3536,7 @@ def _fx_reach(node: Node, tree: fxmap.Tree | None, size: int) -> dict[int, Reach
             vals = param.value * len(default) if len(param.value) == 1 else param.value
             return [(v, v) for v in vals]
         block = decode(node.at(param.code, (node.end - param.code) // 4))
-        got = bounds(block, lambda _uid, width: [(-inf, inf)] * width, fixed)
+        got = bounds(block, unbounded, fixed, slots=slot)
         return got * len(default) if len(got) == 1 else got
 
     def length(iv: list) -> float:
@@ -3522,7 +3637,12 @@ def _fx_draw_bound(node: Node, tree: fxmap.Tree | None) -> int | None:
             n = t.count
             if isinstance(n, fxmap.Param):
                 block = decode(node.at(n.code, (node.end - n.code) // 4))
-                n = int(evaluate(block, defaults, builtins, lambda a: a / 2, {})[0])
+                n = int(
+                    evaluate(
+                        block, defaults, builtins, lambda a: a / 2, {},
+                        slots=_slot_store(defaults),
+                    )[0]
+                )  # fmt: skip
             return count(t.first) + max(n, 0) * count(t.repeated)
         return max(count(t.if_false), count(t.if_true))
 
@@ -3556,7 +3676,10 @@ def _fx_splats(
     }
     color, size = layout.color, layout.size
     try:
-        spl = fxsplat.splats(node, tree, st, defaults, color=color, size=size)
+        spl = fxsplat.splats(
+            node, tree, st, defaults, color=color, size=size,
+            slots=_slot_store(defaults),
+        )  # fmt: skip
     except Exception as e:
         if fxsplat.evaluable(e):
             return None
@@ -3611,7 +3734,10 @@ def _fx_raster(
         uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
     }
     try:
-        spl = fxsplat.splats(node, tree, st, defaults, color=False, size=layout.size)
+        spl = fxsplat.splats(
+            node, tree, st, defaults, color=False, size=layout.size,
+            slots=_slot_store(defaults),
+        )  # fmt: skip
     except Exception as e:
         if fxsplat.evaluable(e):
             return None
@@ -3704,7 +3830,9 @@ def _fxmaps(node: Node, name: str, *, color: bool, size: int) -> Sub:
             for uid, gi in _CTX.inputs.items()
         }
         try:
-            render, tiling = fxsplat.regions(node, st, defaults, size)
+            render, tiling = fxsplat.regions(
+                node, st, defaults, size, slots=_slot_store(defaults)
+            )
         except Exception as e:
             if fxsplat.evaluable(e):
                 msg = "an FX-Map's regions, not evaluable here"
@@ -4464,7 +4592,7 @@ def node_seed(
     if state == SEED_CODE and node.seed_code is not None:
         block = _seed_block(node, node.seed_code)
         try:
-            value = evaluate(block, inputs, builtins or {})
+            value = evaluate(block, inputs, builtins or {}, slots=_slot_store(inputs))
         except (FunctionError, KeyError) as e:
             raise UnsupportedError(str(e)) from e
         return signed32(int(value[0]))
@@ -4535,7 +4663,9 @@ def _output_size(node: Node, size: int) -> int:
             rand = None  # its rand values the node's value generator's
             if any(i.op == RAND for i in block.instrs):
                 rand = ValueRng(node_seed(node, defaults, builtins)).rand
-            v = evaluate(block, defaults, builtins, rand, {})
+            v = evaluate(
+                block, defaults, builtins, rand, {}, slots=_slot_store(defaults)
+            )
         except (FunctionError, KeyError, IndexError, UnsupportedError):
             return size
         if len(v) == 2 and v[0] == v[1] and float(v[0]).is_integer():  # noqa: PLR2004
@@ -4696,6 +4826,7 @@ def translate_graph(
     loops: dict[int, Loop] | None = None,
     fold: Fold | None = None,
     plugins: Plugins | None = None,
+    template_slots: dict[int, dict[int, int]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -4714,7 +4845,9 @@ def translate_graph(
     place of all theirs, which must be library ones. ``fold`` is a last
     pass over the finished translation (loops.Chains). ``plugins`` makes
     nodes sbs plugin nodes where it can (sbsar2ptex.plugin), the others
-    translated as they are without it.
+    translated as they are without it. ``template_slots`` gives a library
+    node's template its slot map (slots.template_slots: template slot ->
+    this graph's); a template slot it leaves out cannot be read.
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
     if fold is not None and origins is None:
@@ -4724,6 +4857,8 @@ def translate_graph(
         inputs=dict(inputs or {}),
         data_dir=data_dir,
         raster=plugins is not None,
+        slot_writers=writers(nodes),
+        graph_size=size,
     )
     # Functions reading $outputsize see the size the graph renders at, not
     # the archive's default for it.
@@ -4743,7 +4878,15 @@ def translate_graph(
     # A node's own output size: a smaller one is rendered into a buffer that
     # size, which larger nodes read through a cubic B-spline (Substance's
     # enlargement; bilinear leaves its texels' corners).
-    sizes = {k: _output_size(nodes[k], size) for k in need}
+    # Value Processors (slots) have no image: nothing reads them as one.
+    for k in need:
+        if value_width(nodes[k]):
+            msg = f"node {k}: a Value Processor's image is read"
+            raise UnsupportedError(msg)
+    sizes = {}
+    for k in sorted(need):
+        _CTX.reader = k
+        sizes[k] = _output_size(nodes[k], size)
     # a loop's nodes all one size, or it stays unrolled
     loops = {
         k: loop
@@ -4831,6 +4974,7 @@ def translate_graph(
             continue
         own = sizes[k]
         _CTX.size = own
+        _CTX.reader = k
         loop = loops.get(k)
         sources = loop.inputs if loop is not None else node.inputs
         _CTX.input_bits = {p: input_bits(nodes[m]) for p, m in sources.items()}
@@ -4848,6 +4992,8 @@ def translate_graph(
                 uid: by_id.get(gi.identifier, gi) if gi.identifier[:1] == "$" else gi
                 for uid, gi in knobs.items()
             }
+            # the template's slots are its own cook's: read through its map
+            _CTX.slot_alias = (template_slots or {}).get(k, {})
             try:
                 if loop is not None:
                     made = loop.make(name, nodes, own)
@@ -4856,6 +5002,7 @@ def translate_graph(
                     made = made or node_shader(node, name, own, template)
             finally:
                 _CTX.inputs = graph_wide
+                _CTX.slot_alias = None
         else:
             made = plugins and plugins(node, name, own, None)
             made = made or node_shader(node, name, own)

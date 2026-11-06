@@ -23,6 +23,7 @@ the index list (splat numbers, as uints).
 
 import math
 from collections.abc import Callable
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -81,11 +82,13 @@ def splats(
     *,
     color: bool,
     size: int,
+    slots: MutableMapping[int, list] | None = None,
 ) -> list[Splat]:
     """Return the patterns the FX-Map ``node`` draws, in drawing order.
 
     In pattern space (the render region maps it to the image). ``inputs``
-    are the graph inputs' values by uid (defaults). Raises FunctionError for
+    are the graph inputs' values by uid (defaults); ``slots`` the graph's
+    slot store, which get slots read. Raises FunctionError for
     what cannot be evaluated here (sampling an input) and TooBig past
     MAX_SPLATS.
     """
@@ -102,7 +105,9 @@ def splats(
         block = blocks.get(code)
         if block is None:
             block = blocks[code] = decode(node.at(code, (node.end - code) // 4))
-        return evaluate(block, inputs, ctx, FxRng(state, lane).rand, variables)
+        return evaluate(
+            block, inputs, ctx, FxRng(state, lane).rand, variables, slots=slots
+        )
 
     def param(
         p: fxmap.Param | None,
@@ -267,15 +272,24 @@ def _regions(
 
 
 def regions(
-    node: Node, settings: fxmap.Settings, inputs: dict[int, list[float]], size: int
+    node: Node,
+    settings: fxmap.Settings,
+    inputs: dict[int, list[float]],
+    size: int,
+    *,
+    slots: MutableMapping[int, list] | None = None,
 ) -> tuple[list[float], list[float]]:
-    """Return ``_regions`` for the FX-Map ``node``, its setup run first."""
+    """Return ``_regions`` for the FX-Map ``node``, its setup run first.
+
+    ``slots`` is the graph's slot store, which get slots read.
+    """
     variables: dict[int, list] = {}
     n = float(1 << size)
 
     def run(code: int, ctx: dict[int, list[float]]) -> list:
         block = decode(node.at(code, (node.end - code) // 4))
-        return evaluate(block, inputs, ctx, FxRng(0, "frameoffset").rand, variables)
+        rand = FxRng(0, "frameoffset").rand
+        return evaluate(block, inputs, ctx, rand, variables, slots=slots)
 
     if settings.setup_code is not None:
         run(settings.setup_code, {1: [n, n], 3: [float(size)] * 2})
