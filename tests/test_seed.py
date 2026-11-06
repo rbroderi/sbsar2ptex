@@ -20,6 +20,7 @@ from sbsar2ptex.translate import _gradient_keys
 from sbsar2ptex.translate import node_seed
 from sbsar2ptex.translate import node_seed_glsl
 from sbsar2ptex.translate import node_shader
+from sbsar2ptex.valuerng import ValueRng
 
 AT = 0x100
 """The node's offset (from BASE)."""
@@ -44,8 +45,8 @@ def f32w(v: float) -> int:
     return struct.unpack("<I", struct.pack("<f", v))[0]
 
 
-def cook(words: list[int], *, seed: int = 0, size: int = 6) -> Node:
-    """Parse an SBAM file whose one node, at offset AT, is ``words``.
+def cook(words: list[int], *, seed: int = 0, size: int = 6, version: int = 9) -> Node:
+    """Parse an SBAM file (cook ``version``) whose one node, at AT, is ``words``.
 
     Its graph inputs: $randomseed (an int, ``seed``) and $outputsize (an
     int2, ``size`` twice); the node table and output map lie before it.
@@ -56,7 +57,7 @@ def cook(words: list[int], *, seed: int = 0, size: int = 6) -> Node:
     end = uids + 4 + 4 + 16
     data = bytearray(end + 16)
     data[:4] = b"SBAM"
-    struct.pack_into("<H", data, 6, 9)
+    struct.pack_into("<H", data, 6, version)
     struct.pack_into("<I", data, 0x40, AT)  # the node table
     struct.pack_into("<II", data, 0x44, 0xC0, 0)  # the outputs
     struct.pack_into(f"<{len(words)}I", data, node_at, *words)
@@ -66,6 +67,30 @@ def cook(words: list[int], *, seed: int = 0, size: int = 6) -> Node:
     struct.pack_into("<4I", data, end, 1, 0x40 - BASE, 0x44 - BASE, defaults - BASE)
     (node,) = Asm(bytes(data)).nodes()
     return node
+
+
+def cook_at(words: list[int], at: int, *, before: int = 0) -> list[Node]:
+    """Parse a cook without graph inputs: ``words`` the node at offset ``at``.
+
+    ``before`` uniform nodes come first, at file 0x40 on; the node table,
+    output map and uid table follow the last node. Returns every node.
+    """
+    starts = [0x40 + 4 * k for k in range(before)] + [at + BASE]
+    table = at + BASE + 4 * len(words)
+    outputs = table + 4 * len(starts)
+    uids = outputs + 8
+    end = uids + 8
+    data = bytearray(end + 16)
+    data[:4] = b"SBAM"
+    struct.pack_into("<H", data, 6, 9)
+    for s in starts[:-1]:
+        struct.pack_into("<I", data, s, 12)  # a uniform
+    struct.pack_into(f"<{len(words)}I", data, at + BASE, *words)
+    struct.pack_into(f"<{len(starts)}I", data, table, *(s - BASE for s in starts))
+    struct.pack_into("<II", data, outputs, 0xC0, len(starts) - 1)
+    struct.pack_into("<HHI", data, uids, 1, 0, 0x1234)
+    struct.pack_into("<4I", data, end, len(starts), table - BASE, outputs - BASE, 0)
+    return Asm(bytes(data)).nodes()
 
 
 def assemble(head: list[int | str], blocks: list[tuple[str, list[int]]]) -> list[int]:
@@ -213,7 +238,6 @@ def test_9_a_gradient_with_a_seed_block_and_a_size_function(ctx: None) -> None:
 
 
 def test_10_curve_state_2() -> None:
-    # Op 44 is 0x2C (the spec's node word 0x00998844 has op byte 0x44, 68).
     head = [0x0099882C, 3, 0, "points", "seed", "size"]
     node = cook(assemble(head, [("points", [0, 0]), ("size", SZ), ("seed", SB0)]))
     assert node.inputs == {"input": 3}
@@ -322,12 +346,82 @@ def test_a_seed_block_of_two_components_is_unsupported() -> None:
         seed_at(node, 0)
 
 
-def test_an_fxmap_without_a_slot_or_setup_is_unsupported() -> None:
-    # State 0, flag bit 0 clear: patterns and inline values can't be told.
-    node = fxmap([0x00188808, 0, "tree", 0x1FF8, f32w(0.5)])
+def test_an_fxmap_header_with_words_that_are_not_nodes_is_unsupported() -> None:
+    # Section 8: state 0, bit 0 clear, the tree bounding the header, and a
+    # word before it (an f32) that is no node index: inline values, maybe.
+    node = fxmap([0x00188808, 0, "tree", 0, f32w(0.5)])
     assert node.unsupported is not None
     with pytest.raises(UnsupportedError):
         read_settings(node, color=False)
+
+
+def test_17_a_fixed_size_fxmap_in_state_1() -> None:
+    words = [0x03488408, 0x800, 0x58, 1, 0, 5, 0x04000088, 0x60, 0x64]
+    *_, node = cook_at(words, 0x40, before=2)
+    assert node.unsupported is None
+    assert node.inputs == {"pattern0": 1, "pattern1": 0}
+    assert node.seed == 5
+    assert node.size_code is None
+    st = read_settings(node, color=False)
+    assert (st.patterns, st.seed, st.setup_code) == ([1, 0], 5, None)
+    assert fixed_size(node) == (4, 8)  # 16 wide, 256 high
+
+
+def test_18_a_fixed_size_fxmap_in_state_0_without_patterns() -> None:
+    (node,) = cook_at([0x03088408, 0, 0x1C, 0x04000148, 0x24], 0x10)
+    assert node.unsupported is None
+    assert node.inputs == {}
+    assert seed_at(node, 3) == 0
+    st = read_settings(node, color=False)
+    assert (st.patterns, st.seed, st.seed_code, st.setup_code) == ([], None, None, None)
+
+
+def test_19_a_version_2_warp_in_state_1() -> None:
+    tail = [5, f32w(1.0), f32w(0.00390625)]
+    node = cook([0x4748840E, 3, 1, *tail], version=2)
+    assert node.inputs == {"input": 3, "gradient": 1}
+    assert node.seed == 5  # rest[2], no flag word: not "not an offset"
+    assert node.inline == tail[1:]
+    v9 = cook([0x4748840E, 0x05, 3, 1, *tail], version=9)
+    assert v9.inputs == {"input": 3, "gradient": 1}
+    assert v9.seed == 5  # rest[3], after the flag word
+    assert v9.inline == tail[1:]
+
+
+def test_a_curve_without_a_size_function_has_a_fixed_size(ctx: None) -> None:
+    # Section 2.4: the node word's second byte, as for any op; its points'
+    # offset still in rest[2].
+    node = cook(assemble([0x0008552C, 3, 0, "points"], [("points", [0, 0])]))
+    assert node.code == [node.words[3] + BASE]
+    assert fixed_size(node) == (5, 5)
+    assert translate._output_size(node, 11) == 5
+
+
+def test_a_warp_of_an_unknown_cook_version_is_unsupported() -> None:
+    node = cook([0x4748840E, 3, 1, 5, f32w(1.0)], version=7)
+    assert node.unsupported is not None
+
+
+def test_20_a_malformed_state_2_slot(ctx: None) -> None:
+    head = [0x00998802, 0x05, 3, 4, 0x00000005, "size"]
+    node = cook(assemble(head, [("size", SZ), ("seed", SB0)]))
+    assert node.unsupported is not None
+    with pytest.raises(UnsupportedError):
+        seed_at(node, 0)
+    with pytest.raises(UnsupportedError):
+        node_shader(node, "n0")
+    short = cook([0x00998802, 0x05, 3, 4])  # the node ends before its slot
+    assert short.unsupported is not None
+    with pytest.raises(UnsupportedError):
+        seed_at(short, 0)
+
+
+def test_21_signedness(ctx: None) -> None:
+    node = cook([0x0249880D, 0xFFFFFFFF, 0x114, f32w(0.5), f32w(0.25), *SZ])
+    assert seed_at(node, 0) == -1
+    assert seed_at(node, 0) & 0xFFFFFFFF == 4294967295
+    assert ValueRng(-1).rand(1.0) == ValueRng(4294967295).rand(1.0)
+    assert node_seed_glsl(node) == "-1"  # uint(-1): the same 32 bits
 
 
 # docs/gradient-map.md section 5, layout tests

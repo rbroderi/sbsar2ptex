@@ -60,6 +60,7 @@ from sbsar2ptex.sbsasm import SEED_INLINE
 from sbsar2ptex.sbsasm import SEED_NONE
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.sbsasm import UnsupportedError
+from sbsar2ptex.sbsasm import fixed_size
 from sbsar2ptex.sbsasm import signed32
 from sbsar2ptex.valuerng import VALUE_RNG_GLSL
 from sbsar2ptex.valuerng import ValueRng
@@ -4502,7 +4503,7 @@ def _output_size(node: Node, size: int) -> int:
 
     A node without a size function (node word flag bit 0 clear) has a fixed
     size: the node word's second byte, log2 width (low nibble) and height
-    (high nibble), whatever the graph's size (curves excepted). The size
+    (high nibble), whatever the graph's size, for every op. The size
     function is the block at Node.size_code (after the seed slot: a
     gradient's after its keys' offset and its seed's, Biomech's n3904, 32
     pixels); an FX-Map's is the block that also sets its variables
@@ -4512,9 +4513,11 @@ def _output_size(node: Node, size: int) -> int:
     """
     if node.op in (32, 33):
         return size
-    if node.op not in (44, 45) and not node.flags & 1 and node.words:
-        fixed = node.words[0] >> 8 & 0xFF
-        return fixed & 15 if fixed & 15 == fixed >> 4 else size
+    fixed = fixed_size(node)
+    if fixed is not None:
+        # Material Maker's buffers are square: a non-square fixed size
+        # (docs/node-seed.md 2.4) falls back to the graph's.
+        return fixed[0] if fixed[0] == fixed[1] else size
     offsets = [node.size_code] if node.size_code is not None else []
     if node.op in (8, 9):
         try:

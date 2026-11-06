@@ -199,43 +199,55 @@ def signed32(w: int) -> int:
     return w - (1 << 32) if w >> 31 else w
 
 
-def fxmap_layout(rest: list[int], is_offset, flags: int) -> tuple[list[int], int]:
-    """Return an FX-Map's pattern inputs and where its seed slot (or setup) is.
+def fxmap_layout(
+    rest: list[int], is_offset, flags: int, start: int, count: int | None = None
+) -> tuple[list[int], int]:
+    """Return an FX-Map's pattern inputs and where its header ends.
 
-    ``rest`` is the node's words after its node word: the parameter states,
-    the tree root's offset, the patterns, then the seed slot (state 1 or 2),
-    then the setup / size function's offset (flag bit 0). The non-offset
-    words after the root count up to the next offset word: in state 1 the
-    last of them is the seed (docs/node-seed.md section 2.3). The index
-    returned is the seed slot's in ``rest`` (state 1 or 2), else the setup
-    function's.
+    ``rest`` is the node's words after its node word (the node at file
+    offset ``start``): the parameter states, the tree root's offset, the
+    patterns, the seed slot (state 1 or 2), the setup / size function's
+    offset (flag bit 0). The header ends at E, the first offset word at or
+    after rest[2] or the word the tree root points at, whichever is first;
+    the words from rest[2] to E are the patterns, then in state 1 the seed,
+    the last of them (docs/node-seed.md section 2.3). Returns the patterns
+    and the index in ``rest`` of the seed slot (state 1 or 2), else of the
+    setup offset or what follows the header.
 
-    Raises UnsupportedError for state 3, and where no offset ends the
-    count: states 0 and 1 need a setup function, or the patterns could not
-    be told from the inline values after them.
+    Raises UnsupportedError for state 3; for state 2 without an offset at
+    E, or state 1 without a word for its seed; and, ``count`` (the node
+    count) given, when the tree bounds the header and a pattern word is not
+    a node index (below ``count``, or NO_NODE): inline values could then sit
+    among them (section 8).
     """
     state = seed_state(flags)
     if state == 3:  # noqa: PLR2004
         msg = "FX-Map with seed state 3"
         raise UnsupportedError(msg)
-    k = 2
-    while k < len(rest) and not is_offset(rest[k]):
-        k += 1
-    run = rest[2:k]
-    if k >= len(rest):
-        msg = "FX-Map: no offset after its pattern inputs"
-        raise UnsupportedError(msg)
+    end = 2
+    while end < len(rest) and not is_offset(rest[end]):
+        end += 1
+    tree = len(rest)
+    if len(rest) > 1 and is_offset(rest[1]):
+        tree = (rest[1] + BASE - start) // 4 - 1
+    by_tree = tree < end
+    end = max(min(end, tree), 2)
+    run = rest[2:end]
     if state == SEED_CODE:
-        return run, k
-    if not flags & 1:
-        msg = f"FX-Map with seed state {state} and no setup function: layout unknown"
-        raise UnsupportedError(msg)
+        if end >= len(rest) or not is_offset(rest[end]):
+            msg = "FX-Map: its seed slot is not an offset"
+            raise UnsupportedError(msg)
+        return run, end
     if state == SEED_INLINE:
         if not run:
             msg = "FX-Map with an inline seed but no word for it"
             raise UnsupportedError(msg)
-        return run[:-1], k - 1
-    return run, k
+        run, end = run[:-1], end - 1
+    unbounded = by_tree and count is not None
+    if unbounded and any(w != NO_NODE and w >= count for w in run):
+        msg = "FX-Map: header words that are not node indices before its tree"
+        raise UnsupportedError(msg)
+    return run, end
 
 
 def fixed_size(node: "Node") -> tuple[int, int] | None:
@@ -254,39 +266,20 @@ TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
 """Bytes a graph input of each type takes in the defaults block."""
 
 
-WARP_FLAG_WORD = {5: False, 6: False, 9: True}
-"""Whether a warp has a leading flag word, by cook version (docs/warp-layout.md
-section 3: versions 7 and 8 not seen)."""
+WARP_FLAG_WORD = {2: False, 5: False, 6: False, 9: True}
+"""Whether a warp has a leading flag word, by cook version (docs/node-seed.md
+section 2.2, warp note); other versions not seen."""
 NO_NODE = 0xFFFFFFFF
 """An input no node feeds."""
 
 
-def warp_flag_word(
-    flags: int, rest: list[int], is_offset, count: int, version: int | None = None
-) -> bool:
-    """Return whether a warp's words start with a flag word (warp-layout.md 3).
+def warp_flag_word(version: int | None) -> bool | None:
+    """Return whether a warp's words start with a flag word; None if unknown.
 
-    With code (node flag bit 0), rest[2] is a code offset exactly when there
-    is none (the seed block's or the size function's). Without code, the
-    cook version decides where known; else there is one when rest[2] reads
-    as a node index (below ``count``, or NO_NODE), as the gradient does
-    after a flag word, and an intensity f32 does not. An inline seed (seed
-    state 1) can look like anything: the version decides where known, else
-    with bit 0 the size function's offset is rest[3] when there is none.
+    The cook version decides (WARP_FLAG_WORD), never the look of rest[2]:
+    a state-1 seed there is no offset either (docs/node-seed.md 2.2).
     """
-    if len(rest) < 3:  # noqa: PLR2004 - input and gradient alone
-        return False
-    known = WARP_FLAG_WORD.get(version) if version is not None else None
-    if seed_state(flags) == SEED_INLINE:
-        if known is not None:
-            return known
-        if flags & 1 and len(rest) > 3:  # noqa: PLR2004
-            return not is_offset(rest[3])
-    if flags & 1:
-        return not is_offset(rest[2])
-    if known is not None:
-        return known
-    return rest[2] == NO_NODE or rest[2] < count
+    return WARP_FLAG_WORD.get(version) if version is not None else None
 
 
 def field_count(
@@ -302,10 +295,12 @@ def field_count(
 
     ``rest`` is the node's words after its node word. Fields can hold values
     that look like code offsets (a flag word of 0x40), so where the layout
-    is known it decides, not the look of the words. ``flags`` (the node
-    word's), the node ``count`` and the cook ``version`` place a warp's
-    optional flag word (warp_flag_word).
+    is known it decides, not the look of the words. The cook ``version``
+    places a warp's optional flag word (warp_flag_word; an unknown version
+    reads as none: Asm marks such a warp unsupported). ``flags`` and
+    ``count`` are no longer used.
     """
+    del flags, count
     if op in (40, 41):  # a count word (its low 16 bits), then that many inputs
         return min(1 + (rest[0] & 0xFFFF), len(rest)) if rest else 0
     if op not in LAYOUTS:
@@ -313,7 +308,7 @@ def field_count(
     n = len(LAYOUTS[op])
     if op in (42, 43) and rest and not rest[0] & 1:
         n -= 1  # distance without a source
-    if op in (14, 15) and warp_flag_word(flags, rest, is_offset, count, version):
+    if op in (14, 15) and warp_flag_word(version):
         n += 1  # a warp's leading flag word: three fields
     return min(n, len(rest))
 
@@ -525,6 +520,11 @@ class Asm:
             while k < len(rest) and not is_offset(rest[k]):
                 k += 1
         node.fields = rest[:k]
+        if node.op in (14, 15) and warp_flag_word(self.version) is None:
+            node.unsupported = (
+                f"node {node.index}: a warp in cook version {self.version},"
+                " whose leading flag word is unknown"
+            )
         if known and node.op in DATA_OPS and k < len(rest) and is_offset(rest[k]):
             node.code.append(rest[k] + BASE)
             k += 1
@@ -577,7 +577,9 @@ class Asm:
         if len(rest) > 1 and is_offset(rest[1]):
             node.code.append(rest[1] + BASE)
         try:
-            patterns, k = fxmap_layout(rest, is_offset, node.flags)
+            patterns, k = fxmap_layout(
+                rest, is_offset, node.flags, node.start, self.count
+            )
         except UnsupportedError as e:
             node.unsupported = f"node {node.index}: {e}"
             # Inputs as well as can be told: node indices before the next offset.

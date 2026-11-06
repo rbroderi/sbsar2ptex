@@ -95,14 +95,15 @@ def warp_file(flags: int, rest: list[int], *, version: int = 0, count: int = 100
 @pytest.mark.parametrize(
     ("flags", "rest", "version", "gradient", "intensity"),
     [
-        (0x2319, [7, 8, OFF, OFF, HALF], 0, 8, 0.5),  # 1: v5/v6, code
-        (0x2B19, [0, 7, 8, OFF, OFF, HALF], 0, 8, 0.5),  # 2: v9, code
-        (0x2318, [7, 8, HALF], 0, 8, 0.5),  # 3: no code (persian)
-        (0x2318, [0, 7, 8, HALF], 0, 8, 0.5),  # 4: v9, no code
-        (0x0318, [7, 8], 0, 8, 1.0),  # 5: no code, default intensity
-        (0x2318, [7, NO_NODE, HALF], 0, NO_NODE, 0.5),  # 6: gradient unwired
-        (0x2318, [7, 8, HALF], 6, 8, 0.5),  # 3 by its version
-        (0x2318, [0, 7, 8, HALF], 9, 8, 0.5),  # 4 by its version
+        # The cook version decides the flag word, never the look of rest[2]
+        # (docs/node-seed.md section 2.2, warp note).
+        (0x2319, [7, 8, OFF, OFF, HALF], 5, 8, 0.5),  # 1: v5/v6, code
+        (0x2B19, [0, 7, 8, OFF, OFF, HALF], 9, 8, 0.5),  # 2: v9, code
+        (0x2318, [7, 8, HALF], 6, 8, 0.5),  # 3: no code (persian)
+        (0x2318, [0, 7, 8, HALF], 9, 8, 0.5),  # 4: v9, no code
+        (0x0318, [7, 8], 5, 8, 1.0),  # 5: no code, default intensity
+        (0x2318, [7, NO_NODE, HALF], 5, NO_NODE, 0.5),  # 6: gradient unwired
+        (0x2318, [7, 8, HALF], 2, 8, 0.5),  # 3 in a version 2 cook (probes)
         (0x2318, [7, 8, 0], 5, 8, 0.0),  # +0.0 reads as a node: the version decides
     ],
 )

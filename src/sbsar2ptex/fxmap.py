@@ -262,11 +262,13 @@ def read_settings(node: Node, *, color: bool) -> Settings:
     def is_offset(w: int) -> bool:
         return node.start < w + BASE <= node.end and w % 4 == 0
 
+    if node.unsupported is not None:
+        raise UnsupportedError(node.unsupported)
     # docs/node-seed.md section 2.3: the patterns, the seed slot (seed state
     # 1: the seed; 2: its block's offset; 0: no slot), the setup function's
     # offset (flag bit 0). k indexes ``words`` (the node word first).
     flags = words[0] >> 16
-    out.patterns, k = fxmap_layout(words[1:], is_offset, flags)
+    out.patterns, k = fxmap_layout(words[1:], is_offset, flags, node.start)
     k += 1
     state = seed_state(flags)
     if state == SEED_INLINE:
