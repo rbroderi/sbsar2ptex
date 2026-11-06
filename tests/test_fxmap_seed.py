@@ -407,7 +407,7 @@ def test_t14_the_seed_blocks_generator_is_private(
         variables: dict = {}
         assert seed_of(with_rand, variables, incoming=incoming) == 0
         first = (incoming * 0x7FF8A3ED + 0x2AA01D31) & 0xFFFFFFFF
-        assert variables[1] == [(first & 0xFFFFFF) / (1 << 24)]
+        assert variables[1, FLOAT, 1] == [(first & 0xFFFFFF) / (1 << 24)]
     # a second run starts afresh
     variables = {}
     seed_of(with_rand, variables)

@@ -42,8 +42,10 @@ from sbsar2ptex.function import NO_VALUE
 from sbsar2ptex.function import Block
 from sbsar2ptex.function import FunctionError
 from sbsar2ptex.function import Instr
+from sbsar2ptex.function import VarKey
 from sbsar2ptex.function import constant
 from sbsar2ptex.function import f32
+from sbsar2ptex.function import var_key
 from sbsar2ptex.valuerng import VALUE_LCG_C
 from sbsar2ptex.valuerng import VALUE_LCG_M
 
@@ -154,7 +156,7 @@ class Seeds:
         block: Block,
         inputs: Mapping[int, list],
         builtins: dict[int, list[float]],
-        variables: dict[int, list],
+        variables: dict[VarKey, list],
         *,
         incoming: int = 0,
         slots: MutableMapping[int, list] | None = None,
@@ -185,7 +187,7 @@ class _Patterns:
         block: Block,
         inputs: Mapping[int, list],
         builtins: dict[int, list[float]],
-        variables: Mapping[int, list],
+        variables: Mapping[VarKey, list],
         incoming: int,
         slots: Mapping[int, list] | None,
     ) -> None:
@@ -193,7 +195,8 @@ class _Patterns:
         self.variables, self.slots = variables, slots
         self.state = incoming & MASK
         self.pats: list[list[int]] = []
-        self.stored: dict[int, tuple[int, list[int]]] = {}
+        self.stored: dict[VarKey, tuple[int, list[int]]] = {}
+        """Variables set in this run (by var_key): their type and pattern."""
 
     def run(self) -> list[int]:
         """Return the block's value: its last instruction's pattern."""
@@ -242,14 +245,14 @@ class _Patterns:
         if op in LEAVES:
             return _to_pattern(kind, self.leaf(ins))[:width]
         if op == GETVAR:
-            name = ops[0]
-            if name in self.stored:
-                return self.stored[name][1]
-            value = self.variables.get(name)
+            key = var_key(ins)  # (docs/fxmap-variables.md: id, type, width)
+            if key in self.stored:
+                return self.stored[key][1]
+            value = self.variables.get(key)
             return [0] * width if value is None else _to_pattern(kind, value)
         if op == SETVAR:
             p = self.of(ops[0], width)
-            self.stored[ops[1]] = (kind, p)
+            self.stored[var_key(ins)] = (kind, p)
             return p
         if op == SELECT:
             c = ops[0]
