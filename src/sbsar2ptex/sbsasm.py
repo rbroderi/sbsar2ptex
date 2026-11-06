@@ -36,6 +36,15 @@ blocks (each pointing further into the node), then inline
 data (constants; some ops keep an optional input index here), then the code.
 Ops pair up, even for a grayscale image, odd for color.
 
+The node's own random seed (docs/node-seed.md): flag bits 6-7 are its
+state, 0 none (seed 0), 1 an inline i32, 2 the offset of a block returning
+one integer. Its word, the seed slot, sits at a fixed place: after the
+fields (and a gradient's keys' or a curve's points' offset), before the
+output-size function's offset (flag bit 0: "has a size function", not "has
+code"). Node.seed, Node.seed_code and Node.size_code hold what is found
+there; the slot is left out of Node.code and Node.inline, which read as
+for a node without a seed.
+
 Code blocks: function bytecode, a u16 stream in SSA form. An opcode is
 ``type << 8 | (width - 1) << 6 | op``: type 0x09 float, 0x0a int, others
 unknown; op 0x02 loads a graph input by its uid (u32), so ``0a42 xxxx
@@ -150,31 +159,95 @@ the background input) and blend's optional opacity input (BLEND_OPACITY).
 Warps have a leading flag word in version 9 cooks (three fields, not two:
 see warp_flag_word); distance
 has its source input only when its flag word's bit 0 is set. A node whose
-node-word flags lack bit 0 has no code, its constants following its fields.
-Gradient maps are 0 (grayscale out) and 1 (color out), both from either.
+node-word flags lack bit 0 has no size function; its other code offsets
+(if any) are read with its inline words. Gradient maps are 0 (grayscale
+out) and 1 (color out), both from either.
 """
 CODE_COUNT = {
-    **dict.fromkeys((0, 2, 3, 4, 5, 6, 7, 12, 13, 29, 30, 31, 32, 33, 38, 39), 1),
-    **dict.fromkeys(
-        (1, 14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 27, 37, 42, 43, 44, 45), 2
-    ),
+    **dict.fromkeys((2, 3, 4, 5, 6, 7, 12, 13, 29, 30, 31, 32, 33, 38, 39), 1),
+    **dict.fromkeys((14, 15, 16, 17, 20, 21, 22, 23, 24, 25, 26, 27, 37, 42, 43), 2),
 }
-"""Code offsets each op's node has (when it has code: node flag bit 0).
+"""Code offsets each op's node has after its seed slot, with node flag bit 0.
 
-The first is the output size's block, or for curves their data;
-neighborhood filters have a second. Not here: FX-Maps and pixel
-processors, whose layouts differ, and gradient maps (gradient_code_count).
+The first is the output-size function's block; neighborhood filters have a
+second. Without bit 0 none are read as code. Not here: FX-Maps and pixel
+processors, whose layouts differ, and gradient maps and curves (DATA_OPS).
 """
+DATA_OPS = frozenset({0, 1, 44, 45})
+"""Gradient maps and curves: their data's offset (keys, points) comes
+right after their fields, always, then the seed slot, then (bit 0) the size
+function's offset (docs/node-seed.md section 2.1)."""
+UNSEEDED_OPS = frozenset({32, 33})
+"""Graph-input nodes: never a seed slot."""
+SEED_NONE, SEED_INLINE, SEED_CODE = 0, 1, 2
+"""Node flag bits 6-7, the seed state (docs/node-seed.md section 1)."""
+UINT32 = 0xFFFFFFFF
 
 
-def gradient_code_count(flags: int) -> int:
-    """Return how many block offsets a gradient map (ops 0, 1) has.
+class UnsupportedError(Exception):
+    """A node (op or parameter) the translator cannot express yet."""
 
-    Its keys' always (with or without flag bit 0), then its size
-    function's with bit 0, then its seed block's with bits 6-7 = 2
-    (docs/gradient-map.md).
+
+def seed_state(flags: int) -> int:
+    """Return node ``flags``' seed state, bits 6-7: 0, 1, 2 (or 3, unknown)."""
+    return flags >> 6 & 3
+
+
+def signed32(w: int) -> int:
+    """Return ``w`` modulo 2^32 as a signed 32-bit integer."""
+    w &= UINT32
+    return w - (1 << 32) if w >> 31 else w
+
+
+def fxmap_layout(rest: list[int], is_offset, flags: int) -> tuple[list[int], int]:
+    """Return an FX-Map's pattern inputs and where its seed slot (or setup) is.
+
+    ``rest`` is the node's words after its node word: the parameter states,
+    the tree root's offset, the patterns, then the seed slot (state 1 or 2),
+    then the setup / size function's offset (flag bit 0). The non-offset
+    words after the root count up to the next offset word: in state 1 the
+    last of them is the seed (docs/node-seed.md section 2.3). The index
+    returned is the seed slot's in ``rest`` (state 1 or 2), else the setup
+    function's.
+
+    Raises UnsupportedError for state 3, and where no offset ends the
+    count: states 0 and 1 need a setup function, or the patterns could not
+    be told from the inline values after them.
     """
-    return 1 + (flags & 1) + (flags >> 6 & 3 == 2)  # noqa: PLR2004
+    state = seed_state(flags)
+    if state == 3:  # noqa: PLR2004
+        msg = "FX-Map with seed state 3"
+        raise UnsupportedError(msg)
+    k = 2
+    while k < len(rest) and not is_offset(rest[k]):
+        k += 1
+    run = rest[2:k]
+    if k >= len(rest):
+        msg = "FX-Map: no offset after its pattern inputs"
+        raise UnsupportedError(msg)
+    if state == SEED_CODE:
+        return run, k
+    if not flags & 1:
+        msg = f"FX-Map with seed state {state} and no setup function: layout unknown"
+        raise UnsupportedError(msg)
+    if state == SEED_INLINE:
+        if not run:
+            msg = "FX-Map with an inline seed but no word for it"
+            raise UnsupportedError(msg)
+        return run[:-1], k - 1
+    return run, k
+
+
+def fixed_size(node: "Node") -> tuple[int, int] | None:
+    """Return a node's fixed size (log2 width, log2 height); None with bit 0.
+
+    A node without an output-size function (flag bit 0 clear) packs its
+    size in its node word's second byte: log2 height << 4 | log2 width.
+    """
+    if node.flags & 1 or not node.words:
+        return None
+    x = node.words[0] >> 8 & 0xFF
+    return x & 15, x >> 4
 
 
 TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
@@ -194,15 +267,23 @@ def warp_flag_word(
     """Return whether a warp's words start with a flag word (warp-layout.md 3).
 
     With code (node flag bit 0), rest[2] is a code offset exactly when there
-    is none. Without code, the cook version decides where known; else there
-    is one when rest[2] reads as a node index (below ``count``, or NO_NODE),
-    as the gradient does after a flag word, and an intensity f32 does not.
+    is none (the seed block's or the size function's). Without code, the
+    cook version decides where known; else there is one when rest[2] reads
+    as a node index (below ``count``, or NO_NODE), as the gradient does
+    after a flag word, and an intensity f32 does not. An inline seed (seed
+    state 1) can look like anything: the version decides where known, else
+    with bit 0 the size function's offset is rest[3] when there is none.
     """
     if len(rest) < 3:  # noqa: PLR2004 - input and gradient alone
         return False
+    known = WARP_FLAG_WORD.get(version) if version is not None else None
+    if seed_state(flags) == SEED_INLINE:
+        if known is not None:
+            return known
+        if flags & 1 and len(rest) > 3:  # noqa: PLR2004
+            return not is_offset(rest[3])
     if flags & 1:
         return not is_offset(rest[2])
-    known = WARP_FLAG_WORD.get(version) if version is not None else None
     if known is not None:
         return known
     return rest[2] == NO_NODE or rest[2] < count
@@ -225,8 +306,8 @@ def field_count(
     word's), the node ``count`` and the cook ``version`` place a warp's
     optional flag word (warp_flag_word).
     """
-    if op in (40, 41):
-        return 1 + rest[0] if rest else 0
+    if op in (40, 41):  # a count word (its low 16 bits), then that many inputs
+        return min(1 + (rest[0] & 0xFFFF), len(rest)) if rest else 0
     if op not in LAYOUTS:
         return None
     n = len(LAYOUTS[op])
@@ -248,12 +329,34 @@ class Node:
     flags: int = 0
     fields: list[int] = field(default_factory=list)
     code: list[int] = field(default_factory=list)
+    """Block offsets (file) after the fields, the seed slot left out: a
+    gradient's keys or a curve's points first, then the size function's
+    (size_code) with flag bit 0, then the op's others."""
     inline: list[int] = field(default_factory=list)
     inputs: dict[str, int] = field(default_factory=dict)
     uid: int | None = None
     reads: list[int] = field(default_factory=list)
     words: list[int] = field(default_factory=list)
     """All the node's u32 words, from its node word on."""
+    seed: int = 0
+    """The node's own seed when a constant (seed state 1), a signed i32; 0
+    in state 0. In state 2 see seed_code."""
+    seed_code: int | None = None
+    """Seed state 2: the seed function's block (file offset), one integer."""
+    size_code: int | None = None
+    """Flag bit 0: the output-size function's block (file offset)."""
+    unsupported: str | None = None
+    """Why the node's layout could not be read (seed state 3...), if so."""
+
+    @property
+    def seed_state(self) -> int:
+        """The seed state, node flag bits 6-7 (docs/node-seed.md section 1)."""
+        return seed_state(self.flags)
+
+    def blocks(self) -> list[int]:
+        """Return every block offset found (code, the seed's), in file order."""
+        extra = [o for o in (self.seed_code, self.size_code) if o is not None]
+        return sorted({*self.code, *extra})
 
     def at(self, offset: int, count: int) -> list[int]:
         """Return ``count`` words at file ``offset`` (inside this node)."""
@@ -392,40 +495,108 @@ class Asm:
         def is_offset(w: int) -> bool:
             return start < w + BASE <= end and w % 4 == 0
 
+        if node.op in (8, 9):
+            k = self._fxmap_words(node, rest, is_offset)
+        else:
+            k = self._words(node, rest, is_offset)
+        blocks = node.blocks()
+        stop = (blocks[0] - start) // 4 - 1 if blocks else len(rest)
+        node.inline = rest[k:stop]
+        node.reads = [w for w in words if w in known]
+        self._inputs(node)
+        return node
+
+    def _words(self, node: Node, rest: list[int], is_offset) -> int:
+        """Read an ordinary node's fields, seed slot and code offsets.
+
+        In order (docs/node-seed.md section 2.1): the fields; a gradient's
+        or curve's data offset; the seed slot (seed state 1 or 2), read by
+        its position, never by its look; the size function's offset (flag
+        bit 0); the op's other offsets. Returns the index in ``rest`` where
+        the inline words start.
+        """
         k = field_count(
             node.op, rest, is_offset,
             flags=node.flags, count=self.count, version=self.version,
         )  # fmt: skip
+        known = k is not None
         if k is None:  # unknown layout: up to the first code offset
             k = 0
             while k < len(rest) and not is_offset(rest[k]):
                 k += 1
         node.fields = rest[:k]
+        if known and node.op in DATA_OPS and k < len(rest) and is_offset(rest[k]):
+            node.code.append(rest[k] + BASE)
+            k += 1
+        state = node.seed_state
+        if known and node.op not in UNSEEDED_OPS:
+            if state == 3:  # noqa: PLR2004
+                node.unsupported = f"node {node.index}: seed state 3"
+            elif state in (SEED_INLINE, SEED_CODE):
+                k = self._seed_slot(node, rest, k, is_offset)
+        if known and node.flags & 1 and k < len(rest) and is_offset(rest[k]):
+            node.size_code = rest[k] + BASE
+            node.code.append(node.size_code)
+            k += 1
         fixed = CODE_COUNT.get(node.op)
         if fixed is not None:
-            # A set number of code offsets (none for a node without code);
-            # offsets after them belong to parameters (function blocks).
-            count = fixed if node.flags & 1 else 0
-            if node.op in (0, 1):
-                count = gradient_code_count(node.flags)
-            for _ in range(count):
+            # Offsets after a set number of code offsets (none without bit 0)
+            # belong to parameters (function blocks): inline.
+            for _ in range(fixed - 1 if node.flags & 1 else 0):
                 if k < len(rest) and is_offset(rest[k]):
                     node.code.append(rest[k] + BASE)
                     k += 1
-        seed: list[int] = []
-        if fixed is None:
-            # A pixel processor's constant random seed (bits 6-7: 1) comes
-            # before its code offsets: kept as its first inline word.
-            if node.op in (40, 41) and node.flags >> 6 & 3 == 1:
-                seed, k = rest[k : k + 1], k + 1
+        elif node.op not in DATA_OPS:
             while k < len(rest) and is_offset(rest[k]):
                 node.code.append(rest[k] + BASE)
                 k += 1
-        stop = (min(node.code) - start) // 4 - 1 if node.code else len(rest)
-        node.inline = seed + rest[k:stop]
-        node.reads = [w for w in words if w in known]
-        self._inputs(node)
-        return node
+        return k
+
+    @staticmethod
+    def _seed_slot(node: Node, rest: list[int], k: int, is_offset) -> int:
+        """Read the seed slot at ``rest[k]`` (state 1 or 2); return the next index."""
+        if k >= len(rest):
+            node.unsupported = f"node {node.index}: no word for its seed slot"
+            return k
+        if node.seed_state == SEED_INLINE:
+            node.seed = signed32(rest[k])
+        elif is_offset(rest[k]):
+            node.seed_code = rest[k] + BASE
+        else:
+            node.unsupported = f"node {node.index}: its seed slot is not an offset"
+        return k + 1
+
+    def _fxmap_words(self, node: Node, rest: list[int], is_offset) -> int:
+        """Read an FX-Map's words (fxmap_layout); return where its inline words start.
+
+        Its fields are the parameter-states word; its code the tree root's
+        offset, then the setup / size function's. The patterns and the
+        background are its inputs (Asm._inputs).
+        """
+        node.fields = rest[:1]
+        if len(rest) > 1 and is_offset(rest[1]):
+            node.code.append(rest[1] + BASE)
+        try:
+            patterns, k = fxmap_layout(rest, is_offset, node.flags)
+        except UnsupportedError as e:
+            node.unsupported = f"node {node.index}: {e}"
+            # Inputs as well as can be told: node indices before the next offset.
+            k = 2
+            while k < len(rest) and not is_offset(rest[k]) and rest[k] < node.index:
+                node.inputs[f"pattern{k - 2}"] = rest[k]
+                k += 1
+            return len(rest)
+        for n, w in enumerate(patterns):
+            node.inputs[f"pattern{n}"] = w
+        if node.seed_state in (SEED_INLINE, SEED_CODE):
+            k = self._seed_slot(node, rest, k, is_offset)
+        if node.flags & 1 and k < len(rest) and is_offset(rest[k]):
+            node.size_code = rest[k] + BASE
+            node.code.append(node.size_code)
+            k += 1
+        if rest[0] & 3 == 3 and k < len(rest):  # noqa: PLR2004 (a background input)
+            node.inputs["background"] = rest[k]
+        return k
 
     def _inputs(self, node: Node) -> None:
         """Name the node's inputs from its op's layout."""
@@ -446,34 +617,8 @@ class Asm:
             if opacity == BLEND_OPACITY and node.inline:
                 node.inputs["opacity"] = node.inline[0]
         elif op in (40, 41) and fields:
-            for n, value in enumerate(fields[1 : 1 + fields[0]]):
+            for n, value in enumerate(fields[1 : 1 + (fields[0] & 0xFFFF)]):
                 node.inputs[f"input{n or ''}"] = value
-        elif op in (8, 9):
-            self._fxmap_inputs(node)
-
-    def _fxmap_inputs(self, node: Node) -> None:
-        """Read an FX-Map's inputs: [flags, code, patterns, code, code, background].
-
-        A background of node 0 reads the same as none, so only others are taken.
-        """
-        words = [self.u32(o) for o in range(node.start + 4, node.end, 4)]
-
-        def is_offset(w: int) -> bool:
-            return node.start < w + BASE <= node.end and w % 4 == 0
-
-        k = 1
-        while k < len(words) and not is_offset(words[k]):
-            k += 1
-        k += 1
-        n = 0
-        while k < len(words) and not is_offset(words[k]) and words[k] < node.index:
-            node.inputs[f"pattern{n}"] = words[k]
-            n += 1
-            k += 1
-        while k < len(words) and is_offset(words[k]):
-            k += 1
-        if k < len(words) and 0 < words[k] < node.index:
-            node.inputs["background"] = words[k]
 
 
 def reachable(nodes: list[Node], roots: list[int]) -> set[int]:

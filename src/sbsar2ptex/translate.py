@@ -41,6 +41,7 @@ from sbsar2ptex import fxmap
 from sbsar2ptex import fxsplat
 from sbsar2ptex.function import ENGINE_TRIG_GLSL
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
+from sbsar2ptex.function import INT as FUNC_INT
 from sbsar2ptex.function import TRIG_OPS
 from sbsar2ptex.function import Block
 from sbsar2ptex.function import FunctionError
@@ -54,13 +55,14 @@ from sbsar2ptex.fxrng import PARAM_LCG
 from sbsar2ptex.rng import RNG_GLSL
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
+from sbsar2ptex.sbsasm import SEED_CODE
+from sbsar2ptex.sbsasm import SEED_INLINE
+from sbsar2ptex.sbsasm import SEED_NONE
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.sbsasm import UnsupportedError
+from sbsar2ptex.sbsasm import signed32
 from sbsar2ptex.valuerng import VALUE_RNG_GLSL
 from sbsar2ptex.valuerng import ValueRng
-
-
-class UnsupportedError(Exception):
-    """A node (op or parameter) the translator cannot express yet."""
 
 
 def f32(w: int) -> float:
@@ -416,12 +418,15 @@ def _seed_glsl() -> str:
     return "0"
 
 
-def dynamic(node: Node, offset: int, before: Sequence[int] = ()) -> GLExpr:
+def dynamic(
+    node: Node, offset: int, before: Sequence[int] = (), *, cast: bool = True
+) -> GLExpr:
     """Return the value of the function block at file ``offset`` in ``node``.
 
     The blocks at ``before`` (a pixel processor's parameters) run first, once
     per node in Substance, with the node's value generator; the variables
-    they set are the block's to read.
+    they set are the block's to read. A non-float value is cast to float
+    unless ``cast`` is False (a seed: an int, wrapping at 32 bits).
     """
     block = decode(node.at(offset, (node.end - offset) // 4))
     _CTX.count += 1
@@ -500,7 +505,7 @@ def dynamic(node: Node, offset: int, before: Sequence[int] = ()) -> GLExpr:
         f"{t} {prefix}_$(name)(vec2 uv) {{\n\t{body}\n\treturn {result};\n}}\n"
     )
     call = f"{prefix}_$(name)(uv)"
-    if last.type != FUNC_FLOAT:
+    if last.type != FUNC_FLOAT and cast:
         call = f"float({call})" if last.width == 1 else f"vec{last.width}({call})"
     return GLExpr(call, last.width, [float(x) for x in value])
 
@@ -1533,8 +1538,9 @@ def _gradient_keys(node: Node, *, color: bool) -> list[tuple[float, list[float]]
     Color keys are a u16 position then u8 r, g, b, a; grayscale keys a u16
     position then a u16 value. With node flag 0x100 each key also has a
     trailing u16 (its midpoint slot), which Substance does not use during
-    interpolation. The keys' offset is the node's first block offset
-    (docs/gradient-map.md).
+    interpolation. The keys' offset is the node's first block offset; they
+    run to the next block (the seed's or the size function's) or the node's
+    end, exactly the keys' bytes rounded up to 4 (docs/gradient-map.md).
     """
     fmt = ("<H4B" if color else "<HH") + ("H" if node.flags & 0x100 else "")
     size = struct.calcsize(fmt)
@@ -1543,9 +1549,12 @@ def _gradient_keys(node: Node, *, color: bool) -> list[tuple[float, list[float]]
         msg = f"gradient node {node.index} has no keys"
         raise UnsupportedError(msg)
     start = node.code[0]
-    end = min([o for o in node.code[1:] if o > start] + [node.end])
+    end = min([o for o in node.blocks() if o > start] + [node.end])
     if start < node.start or start + count * size > end:
         msg = f"gradient node {node.index}: truncated keys"
+        raise UnsupportedError(msg)
+    if end - start != (count * size + 3) // 4 * 4:
+        msg = f"gradient node {node.index}: {end - start} bytes of {count} keys"
         raise UnsupportedError(msg)
     words = node.at(start, (count * size + 3) // 4)
     data = struct.pack(f"<{len(words)}I", *words)
@@ -3181,20 +3190,13 @@ def _pixelprocessor(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Pixel processor: its per-pixel function (the last code block) as GLSL.
 
     $pos is the pixel (uv); samples read the inputs, buffered. Its own
-    seed (inline, or a function: the first block) replaces the graph's
-    for the per-pixel generators (check_filters pp_rand_nodeseed).
+    seed (node_seed_glsl: 0, a constant, or a function of $randomseed)
+    seeds the per-pixel generators (check_filters pp_rand_nodeseed).
     """
-    count = node.fields[0]
+    count = node.fields[0] & 0xFFFF
     names = [f"input{n or ''}" for n in range(count)]
     params = node.code[:-1]
-    state = (node.flags >> 6) & 3
-    _CTX.pixel_seed = _seed_glsl()
-    if state == 1:
-        _CTX.value_seed = _CTX.pixel_seed = str(node.inline[0])
-    elif state == 2:  # noqa: PLR2004
-        _CTX.value_seed = "0"
-        _CTX.value_seed = _CTX.pixel_seed = num(dynamic(node, params[0]))
-        params = params[1:]
+    _CTX.value_seed = _CTX.pixel_seed = node_seed_glsl(node)
     _CTX.sampled = names
     try:
         value = dynamic(node, node.code[-1], params)
@@ -4158,10 +4160,10 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
     if FX_RNG_GLSL not in _CTX.globals:
         _CTX.globals.append(FX_RNG_GLSL)
     # The root's state: the FX-Map's random seed (a function of $randomseed,
-    # or its own value).
+    # or its own value; 0 without a seed slot).
     seed = str(st.seed or 0)
     if st.seed_code is not None:
-        seed = f"int({num(dynamic(node, st.seed_code))})"
+        seed = seed_block_glsl(node, st.seed_code)
     inputs = [(nm, "rgba") for nm in images]
     root = None
     start: list[str] = []
@@ -4429,54 +4431,97 @@ def _bspline(name: str, size: int, t: str) -> dict[str, Any]:
     return shader(name, [("input", t)], t, "\n".join(lines))
 
 
-def _static_seed(
-    node: Node, defaults: dict[int, list[float]], builtins: dict[int, list[float]]
-) -> int:
-    """Return ``node``'s value seed at the graph inputs' defaults.
+def _seed_block(node: Node, offset: int) -> Block:
+    """Return the seed block at ``offset``, checked to return one integer."""
+    block = decode(node.at(offset, (node.end - offset) // 4))
+    last = block.instrs[-1] if block.instrs else None
+    if last is None or last.type != FUNC_INT or last.width != 1:
+        msg = f"node {node.index}: its seed block does not return one integer"
+        raise UnsupportedError(msg)
+    return block
 
-    As translate resolves it (node word bits 6-7): 1 its first inline word,
-    2 its seed function's value, otherwise 0.
+
+def node_seed(
+    node: Node,
+    inputs: dict[int, list[float]],
+    builtins: dict[int, list[float]] | None = None,
+) -> int:
+    """Return ``node``'s own random seed, a signed i32, at graph ``inputs``.
+
+    docs/node-seed.md section 3.1, by the seed state (node flag bits 6-7):
+    0 the constant 0 ($randomseed unused), 1 the inline seed, 2 its seed
+    block's value (with the graph inputs by uid), modulo 2^32. State 3, or a
+    layout that could not be read, raises UnsupportedError.
     """
-    state = node.flags >> 6 & 3
-    if state == 1 and node.inline:
-        return node.inline[0]
-    if state == 2:  # noqa: PLR2004
-        off = _seed_block(node)
-        block = decode(node.at(off, (node.end - off) // 4))
-        return int(evaluate(block, defaults, builtins)[0])
-    return 0
+    if node.unsupported is not None:
+        raise UnsupportedError(node.unsupported)
+    state = node.seed_state
+    if state == SEED_NONE:
+        return 0
+    if state == SEED_INLINE:
+        return node.seed
+    if state == SEED_CODE and node.seed_code is not None:
+        block = _seed_block(node, node.seed_code)
+        try:
+            value = evaluate(block, inputs, builtins or {})
+        except (FunctionError, KeyError) as e:
+            raise UnsupportedError(str(e)) from e
+        return signed32(int(value[0]))
+    msg = f"node {node.index}: seed state {state}"
+    raise UnsupportedError(msg)
+
+
+def seed_block_glsl(node: Node, offset: int) -> str:
+    """Return GLSL for the seed block at ``offset``: an int, live in its inputs."""
+    _seed_block(node, offset)
+    _CTX.value_seed = "0"  # not the last node's, inside the seed's function
+    return dynamic(node, offset, cast=False).text
+
+
+def node_seed_glsl(node: Node) -> str:
+    """Return GLSL for ``node``'s own random seed (node_seed), an int.
+
+    State 2 keeps the seed a function of the graph's inputs ($randomseed),
+    never baked; state 1 is its constant; state 0 is 0.
+    """
+    if node.unsupported is not None:
+        raise UnsupportedError(node.unsupported)
+    state = node.seed_state
+    if state == SEED_NONE:
+        return "0"
+    if state == SEED_INLINE:
+        return str(node.seed)
+    if state == SEED_CODE and node.seed_code is not None:
+        return seed_block_glsl(node, node.seed_code)
+    msg = f"node {node.index}: seed state {state}"
+    raise UnsupportedError(msg)
 
 
 def _output_size(node: Node, size: int) -> int:
     """Return ``node``'s output size (log2), ``size`` unless the node says.
 
-    A node without a size function (node word bit 16 clear) has a fixed
+    A node without a size function (node word flag bit 0 clear) has a fixed
     size: the node word's second byte, log2 width (low nibble) and height
-    (high nibble), whatever the graph's size. The size function is the
-    node's first code block, or the block its first inline word points at
-    (node_shader drops that word); a gradient's or a curve's first block is
-    its data instead (a gradient's size function its second block, with
-    bit 16: Biomech's n3904, 32 pixels; a curve's the inline word's), an
-    FX-Map's its tree: its size function is the block
-    that also sets its variables (fxmap.Settings.setup_code; Biomech's
-    n3900, 16 pixels in a 1024 graph). Square sizes only, one pixel at
-    least. A graph input's image is its own size.
+    (high nibble), whatever the graph's size (curves excepted). The size
+    function is the block at Node.size_code (after the seed slot: a
+    gradient's after its keys' offset and its seed's, Biomech's n3904, 32
+    pixels); an FX-Map's is the block that also sets its variables
+    (fxmap.Settings.setup_code; Biomech's n3900, 16 pixels in a 1024
+    graph). Square sizes only, one pixel at least. A graph input's image is
+    its own size.
     """
     if node.op in (32, 33):
         return size
-    data = node.op in (0, 1, 44, 45)  # its first block its keys or points
-    gradient = node.op in (0, 1)
-    if (gradient or not data) and not node.flags & 1 and node.words:
+    if node.op not in (44, 45) and not node.flags & 1 and node.words:
         fixed = node.words[0] >> 8 & 0xFF
         return fixed & 15 if fixed & 15 == fixed >> 4 else size
-    offsets = [] if data else list(node.code[:1])
-    if gradient:
-        offsets = list(node.code[1:2])  # keys, then the size function
+    offsets = [node.size_code] if node.size_code is not None else []
     if node.op in (8, 9):
-        setup = fxmap.read_settings(node, color=node.op == 9).setup_code  # noqa: PLR2004
+        try:
+            setup = fxmap.read_settings(node, color=node.op == 9).setup_code  # noqa: PLR2004
+        except UnsupportedError:
+            return size
         offsets = [setup] if setup is not None else []
-    if not offsets and node.inline and node.start < node.inline[0] + BASE < node.end:
-        offsets = [node.inline[0] + BASE]
     defaults = {
         uid: [float(x) for x in gi.default] or [0.0] for uid, gi in _CTX.inputs.items()
     }
@@ -4486,7 +4531,7 @@ def _output_size(node: Node, size: int) -> int:
             block = decode(node.at(off, (node.end - off) // 4))
             rand = None  # its rand values the node's value generator's
             if any(i.op == RAND for i in block.instrs):
-                rand = ValueRng(_static_seed(node, defaults, builtins)).rand
+                rand = ValueRng(node_seed(node, defaults, builtins)).rand
             v = evaluate(block, defaults, builtins, rand, {})
         except (FunctionError, KeyError, IndexError, UnsupportedError):
             return size
@@ -4573,21 +4618,6 @@ def exact_buffers(
             target["parameters"]["f32"] = True
 
 
-def _seed_block(node: Node) -> int:
-    """Return the offset of the code block computing ``node``'s random seed.
-
-    The seed function returns one integer. A node with a dynamic output size
-    too has that function's block as well (two integers), after the seed's
-    or before it.
-    """
-    for offset in reversed(node.code):
-        last = decode(node.at(offset, (node.end - offset) // 4)).instrs[-1]
-        if last.type != FUNC_FLOAT and last.width == 1:
-            return offset
-    msg = f"no seed function in node {node.index}"
-    raise UnsupportedError(msg)
-
-
 def node_shader(
     node: Node, name: str, size: int = 11, template: Node | None = None
 ) -> Made:
@@ -4602,30 +4632,16 @@ def node_shader(
     if translate is None:
         msg = f"op {node.op}"
         raise UnsupportedError(msg)
-    # FX-Maps and pixel processors seed their own generators.
-    seed_state = 0 if node.op in (8, 9, 40, 41) else (node.flags >> 6) & 3
+    if node.unsupported is not None:
+        raise UnsupportedError(node.unsupported)
+    # The node's own seed (docs/node-seed.md); FX-Maps and pixel processors
+    # seed their own generators from it.
+    _CTX.value_seed = "0"
+    if node.op not in (8, 9, 40, 41):
+        _CTX.value_seed = node_seed_glsl(node)
     translated = node
-    if seed_state == 1:
-        _CTX.value_seed = str(node.inline[0])
-        translated = replace(node, inline=node.inline[1:])
-    elif seed_state == 2:  # noqa: PLR2004
-        _CTX.value_seed = "0"  # not the last node's, inside the seed's function
-        _CTX.value_seed = num(dynamic(node, _seed_block(node)))
-    else:
-        _CTX.value_seed = "0"
     if template is not None:
         translated = replace(template, index=node.index, inputs=node.inputs)
-        if (template.flags >> 6) & 3 == 1:  # its own seed, inline
-            translated = replace(translated, inline=template.inline[1:])
-    if translated.inline:
-        target = translated.inline[0] + BASE
-        if translated.start < target < translated.end:
-            block = decode(translated.at(target, (translated.end - target) // 4))
-            last = block.instrs[-1]
-            if (  # dynamic output size
-                last.type != FUNC_FLOAT and last.width == 2  # noqa: PLR2004
-            ):
-                translated = replace(translated, inline=translated.inline[1:])
     return translate(translated, name, color=translated.op in COLOR_OPS, size=size)
 
 

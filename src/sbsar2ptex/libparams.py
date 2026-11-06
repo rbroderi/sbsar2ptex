@@ -30,6 +30,7 @@ from sbsar2ptex.function import f32
 from sbsar2ptex.recognize import Match
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
+from sbsar2ptex.sbsasm import SEED_INLINE
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.translate import LEVELS
 from sbsar2ptex.translate import GraphInput
@@ -54,17 +55,14 @@ def _offset(node: Node, word: int) -> bool:
 
 
 def _strip(node: Node, out: dict[str, Slot]) -> list[int]:
-    """Return ``node``'s inline words after its seed and dynamic size (node_shader)."""
-    inline = list(node.inline)
-    if (node.flags >> 6) & 3 == 1:
-        out["seed"] = ("const", inline[:1], [0])
-        inline = inline[1:]
-    if inline and _offset(node, inline[0]):
-        target = inline[0] + BASE
-        last = decode(node.at(target, (node.end - target) // 4)).instrs[-1]
-        if last.type != FLOAT and last.width == 2:  # noqa: PLR2004
-            inline = inline[1:]
-    return inline
+    """Return ``node``'s inline words, noting an inline seed (Node.seed) in ``out``.
+
+    The seed slot and the size function's offset are not inline words
+    (sbsasm), so nothing is dropped.
+    """
+    if node.seed_state == SEED_INLINE:
+        out["seed"] = ("const", [node.seed & 0xFFFFFFFF], [0])
+    return list(node.inline)
 
 
 def _flag(

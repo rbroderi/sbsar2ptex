@@ -173,8 +173,9 @@ def one_node(words: list[int]) -> Node:
 )
 def test_gradient_block_offsets(flags: int, blocks: int) -> None:
     # docs/gradient-map.md: after the input and the key count, the keys'
-    # offset (with or without flag bit 0), the size function's (bit 0), the
-    # seed block's (bits 6-7 = 2); then the keys, 6 bytes each with 0x100.
+    # offset (with or without flag bit 0), the seed block's (bits 6-7 = 2),
+    # the size function's (bit 0); then the keys, 6 bytes each with 0x100.
+    # The seed's offset is Node.seed_code, not one of Node.code.
     at = 0x40 + 4 * (3 + blocks)
     keys = [0, 0x80000000, 0xFFFFFFFF] if flags & 0x100 else [0, 0xFFFFFFFF]
     offsets = [at - BASE] + [at + 4 * (len(keys) + i) - BASE for i in range(blocks - 1)]
@@ -182,7 +183,11 @@ def test_gradient_block_offsets(flags: int, blocks: int) -> None:
     assert node.op == 0
     assert node.inputs == {"input": 7}
     assert node.fields == [7, 2]
-    assert node.code == [o + BASE for o in offsets]
+    seeded = flags >> 6 & 3 == 2
+    assert node.seed_code == (offsets[1] + BASE if seeded else None)
+    kept = [o for i, o in enumerate(offsets) if not seeded or i != 1]
+    assert node.code == [o + BASE for o in kept]
+    assert node.size_code == (offsets[-1] + BASE if flags & 1 else None)
     assert node.inline == []
 
 

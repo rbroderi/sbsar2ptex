@@ -35,7 +35,6 @@ from typing import Any
 
 from sbsar2ptex import fxglsl
 from sbsar2ptex import translate
-from sbsar2ptex.function import FLOAT as FUNC_FLOAT
 from sbsar2ptex.function import decode
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import COLOR_OPS
@@ -1295,24 +1294,13 @@ OPS: dict[int, _Op] = {
 def prepared(node: Node, template: Node | None) -> Node:
     """Return the node whose settings are read, as translate.node_shader finds it.
 
-    Without its seed's inline word (no plugin node uses a seed), from its
-    library ``template`` if any, without a dynamic output size's word.
+    From its library ``template`` if any. The seed slot and the output size
+    function's offset are not among its inline words (sbsasm), and no plugin
+    node uses a seed.
     """
-    translated = node
-    if (node.flags >> 6) & 3 == 1 and node.op not in (8, 9, 40, 41):
-        translated = replace(node, inline=node.inline[1:])
-    if template is not None:
-        translated = replace(template, index=node.index, inputs=node.inputs)
-        if (template.flags >> 6) & 3 == 1:
-            translated = replace(translated, inline=template.inline[1:])
-    if translated.inline:
-        target = translated.inline[0] + BASE
-        if translated.start < target < translated.end:
-            block = decode(translated.at(target, (translated.end - target) // 4))
-            last = block.instrs[-1]
-            if last.type != FUNC_FLOAT and last.width == 2:  # noqa: PLR2004 (output size)
-                translated = replace(translated, inline=translated.inline[1:])
-    return translated
+    if template is None:
+        return node
+    return replace(template, index=node.index, inputs=node.inputs)
 
 
 @dataclass

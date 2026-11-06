@@ -34,8 +34,10 @@ function): the seed, the function's code, then output0 and output1.
 The FX-Map node itself: its node word (bits 24-25 tiling, horizontal and
 vertical), a word of parameter states (2 bits each: background, hurst, global
 opacity, render and tiling regions...; 3 for the background, an input
-image), code[0], the pattern inputs' node indices, two more code offsets (the
-random seed's and the output size's), then the inline values in state order.
+image), the tree root's offset, the pattern inputs' node indices, the seed
+slot (node flag bits 6-7: 1 the seed inline, 2 its block's offset, 0 no
+slot), the setup / output size function's offset (flag bit 0), then the
+inline values in state order (docs/node-seed.md section 2.3).
 
 Where it draws (fitted to sbsrender): a Quadrant's cell is pattern space
 at the root and each child's a quarter of its parent's (output0 top left, 1
@@ -55,7 +57,13 @@ from dataclasses import dataclass
 from dataclasses import field
 
 from sbsar2ptex.sbsasm import BASE
+from sbsar2ptex.sbsasm import SEED_CODE
+from sbsar2ptex.sbsasm import SEED_INLINE
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.sbsasm import UnsupportedError
+from sbsar2ptex.sbsasm import fxmap_layout
+from sbsar2ptex.sbsasm import seed_state
+from sbsar2ptex.sbsasm import signed32
 
 PATTERNS = {
     0: "square", 1: "disc", 2: "paraboloid", 3: "bell", 4: "gaussian",
@@ -254,17 +262,24 @@ def read_settings(node: Node, *, color: bool) -> Settings:
     def is_offset(w: int) -> bool:
         return node.start < w + BASE <= node.end and w % 4 == 0
 
-    k = 3  # after the states and code[0]
-    while k < len(words) and not is_offset(words[k]):
-        out.patterns.append(words[k])
+    # docs/node-seed.md section 2.3: the patterns, the seed slot (seed state
+    # 1: the seed; 2: its block's offset; 0: no slot), the setup function's
+    # offset (flag bit 0). k indexes ``words`` (the node word first).
+    flags = words[0] >> 16
+    out.patterns, k = fxmap_layout(words[1:], is_offset, flags)
+    k += 1
+    state = seed_state(flags)
+    if state == SEED_INLINE:
+        out.seed = signed32(words[k])
         k += 1
-    if words[0] >> 22 & 3 == INLINE and out.patterns:  # the seed, inline
-        out.seed = out.patterns.pop()
-    else:
-        out.seed_code = words[k] + BASE if k < len(words) else None
+    elif state == SEED_CODE:
+        out.seed_code = words[k] + BASE
         k += 1
-    if words[0] >> 16 & 3:  # a setup function; without one its slot is absent
-        out.setup_code = words[k] + BASE if k < len(words) else None
+    if flags & 1:  # a setup function; without one its slot is absent
+        if k >= len(words) or not is_offset(words[k]):
+            msg = "FX-Map: no setup function's offset after its seed slot"
+            raise UnsupportedError(msg)
+        out.setup_code = words[k] + BASE
         k += 1
     sizes = (
         ("background", 4 if color else 1),
