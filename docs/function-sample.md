@@ -341,10 +341,13 @@ Processor samples (each sample returning a constant), the graphs give:
 | l_floodfill_to_index | converts |
 | l_quantize_color | converts |
 | l_rt_irradiance | converts |
-| l_mask_to_paths_2 | fails next with `OverflowError: float too large to pack with f format` (function.py `_flt`), a separate gap |
+| l_mask_to_paths_2 | fails next with `OverflowError: float too large to pack with f format` (function.py `_flt`), a separate gap: `docs/function-float-range.md` |
 
 So implementing section 4 removes the sample failure from all 7 graphs,
-and 6 of them then convert. Whether their renders match the truth was
+and 6 of them then convert. l_path_to_spline, which failed in `_flt`
+before it reached its samples, has the same shape: a Value Processor
+sample read through a slot by an FX-Map function. It needs both this
+document and `docs/function-float-range.md`. Whether their renders match the truth was
 not checked: that needs the real sample, not the stand-in.
 
 ## 6. Acceptance tests
