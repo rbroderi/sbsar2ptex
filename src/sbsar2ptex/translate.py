@@ -592,16 +592,19 @@ def dynamic(
     shared: dict[VarKey, tuple[str, str]] = {}
     first: list[str] = []
     try:
-        for at in before:
-            pre = decode(node.at(at, (node.end - at) // 4))
+        pres = [decode(node.at(at, (node.end - at) // 4)) for at in before]
+        # A global per variable (var_key): an id set as two types gets two,
+        # named apart by type and width.
+        keys = {var_key(i) for pre in pres for i in pre.instrs if i.op == SETVAR}
+        for pre in pres:
             sets = [i for i in pre.instrs if i.op == SETVAR]
             if not sets:
                 continue
             for i in sets:
-                shared.setdefault(
-                    var_key(i),
-                    (f"{prefix}_pv{i.operands[1]}", glsl_type(i.type, i.width)),
-                )
+                var, kind, width = var_key(i)
+                alone = sum(k[0] == var for k in keys) == 1
+                glob = f"{prefix}_pv{var}" + ("" if alone else f"t{kind}w{width}")
+                shared.setdefault(var_key(i), (glob, glsl_type(i.type, i.width)))
             _CTX.count += 1
             pre_lines, _ = to_glsl(
                 pre, f"f{_CTX.count}", param, builtins, None,
