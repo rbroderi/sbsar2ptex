@@ -167,6 +167,23 @@ processors, whose layouts differ, and gradient maps (gradient_code_count).
 """
 
 
+IMAGE_COUNT = 0xFFFF
+"""A pixel processor's first field, low 16 bits: its image-input count. A
+Value Processor (docs/function-ops.md 2.4) is op 40 with its value's width
+in the high 16 bits (value_width)."""
+
+
+def value_width(node: "Node") -> int:
+    """Return a Value Processor's value width; 0 for any other node.
+
+    It has no image of its own: its function (its last code block) sets a
+    value slot that later nodes' functions read.
+    """
+    if node.op != 40 or not node.fields:  # noqa: PLR2004
+        return 0
+    return node.fields[0] >> 16
+
+
 def gradient_code_count(flags: int) -> int:
     """Return how many block offsets a gradient map (ops 0, 1) has.
 
@@ -226,7 +243,7 @@ def field_count(
     optional flag word (warp_flag_word).
     """
     if op in (40, 41):
-        return 1 + rest[0] if rest else 0
+        return 1 + (rest[0] & IMAGE_COUNT) if rest else 0
     if op not in LAYOUTS:
         return None
     n = len(LAYOUTS[op])
@@ -446,7 +463,7 @@ class Asm:
             if opacity == BLEND_OPACITY and node.inline:
                 node.inputs["opacity"] = node.inline[0]
         elif op in (40, 41) and fields:
-            for n, value in enumerate(fields[1 : 1 + fields[0]]):
+            for n, value in enumerate(fields[1 : 1 + (fields[0] & IMAGE_COUNT)]):
                 node.inputs[f"input{n or ''}"] = value
         elif op in (8, 9):
             self._fxmap_inputs(node)

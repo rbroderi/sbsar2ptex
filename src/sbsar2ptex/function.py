@@ -17,6 +17,7 @@ needed (it is counted).
 Ops, from function graphs cooked by sbscooker (see sbsasm-probe):
 
     0x00 constant       0x01 built-in (id)   0x02 graph input (uid)
+    0x03 get slot (slot)  0x06 set slot (value, slot): see GETSLOT
     0x04 get variable   0x07 set variable    0x09 if/else (c, a, b)
     0x0b while (init, cond, body, u32 cap: see Loop)
     0x0c sequence       0x0d-0x0f vector of 2-4 parts   0x10 swizzle
@@ -35,16 +36,27 @@ import math
 import struct
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 
 FLOAT, INT, BOOL = 1, 2, 0
 NO_VALUE = 0xFFFF
-"""An operand naming no value: a sequence whose result the cooker dropped."""
+"""An operand naming no value: a sequence whose result the cooker dropped,
+or an arithmetic operand that reads as its type's zero (ZERO_OPERAND)."""
+ZERO_OPERAND = (0x12, 0x13, 0x14, 0x15, 0x16)
+"""Arithmetic ops (add, sub, mul, div, mod) whose NO_VALUE operand reads as
+the type's zero (docs/function-ops.md 2.5: seen in add only)."""
+GETSLOT, SETSLOT = 0x03, 0x06
+"""Value slots (docs/function-ops.md section 2): a graph-wide store of
+values, by word offset. A Value Processor's block ends by setting one (set
+slot: the value's SSA index, then the slot; its value the value stored);
+later nodes' blocks read it (get slot: the slot)."""
 
 OP_NAMES = {
-    0x00: "const", 0x01: "builtin", 0x02: "input", 0x04: "getvar", 0x07: "setvar",
+    0x00: "const", 0x01: "builtin", 0x02: "input", 0x03: "getslot", 0x04: "getvar",
+    0x06: "setslot", 0x07: "setvar",
     0x09: "ifelse", 0x0B: "while", 0x0C: "sequence", 0x0D: "concat", 0x0E: "concat3",
     0x0F: "concat4", 0x10: "swizzle",
     0x11: "convert", 0x12: "add", 0x13: "sub", 0x14: "mul", 0x15: "div",
@@ -376,21 +388,60 @@ def _dropped(ins: Instr, first: list) -> list:
     return first
 
 
+def _check_no_value(block: Block) -> None:
+    """Raise FunctionError for a NO_VALUE operand where no value is known.
+
+    A sequence's second operand may name no value (its first part's, then),
+    and so may an arithmetic operand (ZERO_OPERAND: the type's zero).
+    """
+    for k, ins in enumerate(block.instrs):
+        if ins.op in (0x0C, *ZERO_OPERAND):
+            continue
+        if NO_VALUE in _operands(ins):
+            msg = f"#{k}: {ins.name} reads no value (0xFFFF)"
+            raise FunctionError(msg)
+
+
+def _get_slot(slots: Mapping[int, list] | None, ins: Instr) -> list:
+    """Return a get slot's value from the slot store ``slots``.
+
+    A slot never written (never so in cooked files) reads as the type's zero
+    (docs/function-ops.md 2.6). A store's value of another width raises
+    FunctionError (2.3: the cooker refuses a mismatch).
+    """
+    if slots is None:
+        msg = "cannot evaluate getslot (op 0x03) without a slot store"
+        raise FunctionError(msg)
+    try:
+        v = slots[ins.operands[0]]
+    except KeyError:
+        return [0] * ins.width
+    if len(v) != ins.width:
+        msg = f"getslot [{ins.operands[0]}] of width {ins.width} holds {len(v)}"
+        raise FunctionError(msg)
+    return v
+
+
 def evaluate(
     block: Block,
     inputs: dict[int, list],
     builtins: dict[int, list[float]] | None = None,
     rand: Callable[[float], float] | None = None,
     variables: dict[int, list] | None = None,
+    *,
+    slots: MutableMapping[int, list] | None = None,
 ) -> list:
     """Return the block's value with graph ``inputs`` (by uid) and ``builtins``.
 
     ``rand(a)``, when given, is the generator rand instructions call, in
     instruction order. ``variables``, when given, is the variable store,
     read and written in place: blocks that share one (an FX-Map's) see each
-    other's variables. Samples, and what ``builtins`` and ``rand`` leave
-    out, raise FunctionError, as does a while loop still running after
-    MAX_ITERATIONS.
+    other's variables. ``slots``, when given, is the graph's slot store
+    (docs/function-ops.md section 2), read by get slots and written by set
+    slots in place: run the graph's blocks in node order with one store.
+    Samples, get slots without a store, and what ``builtins`` and ``rand``
+    leave out, raise FunctionError, as does a while loop still running
+    after MAX_ITERATIONS.
 
     Instructions run in the order the block's while loops run them (each
     loop's condition and body ranges again per iteration), so each value is
@@ -400,6 +451,11 @@ def evaluate(
     vals: list[list] = [[] for _ in instrs]
     var: dict[int, list] = {} if variables is None else variables
     starts = loops(block)
+    _check_no_value(block)
+
+    def operand(o: int, ins: Instr) -> list:
+        """Return the value ``o`` names; NO_VALUE, the type's zero (2.5)."""
+        return vals[o] if o != NO_VALUE else [0] * ins.width
 
     def run(lo: int, hi: int, own: Loop | None = None) -> None:
         """Run instructions lo to hi, both included, and the loops among them."""
@@ -440,6 +496,12 @@ def evaluate(
             v = builtins[ops[0]]
         elif op == 0x02:  # noqa: PLR2004
             v = inputs[ins.u32s()[0]]
+        elif op == GETSLOT:
+            v = _get_slot(slots, ins)
+        elif op == SETSLOT:
+            v = vals[ops[0]]
+            if slots is not None:
+                slots[ops[1]] = v
         elif op == 0x04:  # noqa: PLR2004
             v = var.get(ops[0], [0.0] * ins.width)
         elif op == 0x07:  # noqa: PLR2004
@@ -473,7 +535,7 @@ def evaluate(
         elif op == 0x32 and rand is not None:  # noqa: PLR2004
             v = [rand(vals[ops[0]][0])]
         elif op in _BINARY or op in (0x15, 0x16):
-            a, b = _spread(vals[ops[0]], vals[ops[1]])
+            a, b = _spread(operand(ops[0], ins), operand(ops[1], ins))
             if op == 0x15:  # noqa: PLR2004
                 v = [_div(p, q, ins.type) for p, q in zip(a, b, strict=True)]
             elif op == 0x16:  # noqa: PLR2004
@@ -541,11 +603,15 @@ def bounds(
     block: Block,
     inputs: Callable[[int, int], list[Interval]],
     builtins: dict[int, list[Interval]],
+    *,
+    slots: Callable[[int, int, int], list[Interval]] | None = None,
 ) -> list[Interval]:
     """Return bounds on the block's value, each component's (low, high).
 
     ``inputs(uid, width)`` and ``builtins`` bound the graph inputs and built-ins;
-    rand(a) is within [0, a]. Ops without a simple bound give (-inf, inf).
+    ``slots(slot, type, width)`` get slots (the writer's value's bound;
+    unbounded without it); rand(a) is within [0, a]. Ops without a simple
+    bound give (-inf, inf).
 
     One pass, in order, even over while loops: a variable a loop sets is
     unbounded from the loop's start on, and so is the loop's value. Loops
@@ -555,6 +621,7 @@ def bounds(
     var: dict[int, list[Interval]] = {}
     try:
         starts = loops(block)
+        _check_no_value(block)
     except FunctionError:
         return [_ALL] * block.instrs[-1].width
     loose: set[int] = set()
@@ -568,8 +635,8 @@ def bounds(
                     loose.add(i.operands[1])
                     var[i.operands[1]] = [_ALL] * i.width
 
-        def arg(k: int, ops: list[int] = ops) -> list[Interval]:
-            return vals[ops[k]]
+        def arg(k: int, ops: list[int] = ops, width: int = ins.width) -> list[Interval]:
+            return vals[ops[k]] if ops[k] != NO_VALUE else [(0.0, 0.0)] * width
 
         if ins.op == 0x00:
             v = [(float(x), float(x)) for x in constant(ins)]
@@ -577,6 +644,10 @@ def bounds(
             v = builtins.get(ops[0], [_ALL] * ins.width)
         elif ins.op == 0x02:  # noqa: PLR2004
             v = inputs(ins.u32s()[0], ins.width)
+        elif ins.op == GETSLOT:
+            v = slots(ops[0], ins.type, ins.width) if slots else [_ALL] * ins.width
+        elif ins.op == SETSLOT:
+            v = arg(0)
         elif ins.op == 0x04:  # noqa: PLR2004
             v = var.get(ops[0], [_ALL] * ins.width)
         elif ins.op == 0x07:  # noqa: PLR2004
@@ -755,6 +826,7 @@ def to_glsl(
     variables: Mapping[int, tuple[str, str]] | None = None,
     *,
     engine_trig: bool = False,
+    slots: Callable[[int, int, int], str] | None = None,
 ) -> tuple[list[str], str]:
     """Return GLSL statements computing ``block`` and the name of its value.
 
@@ -768,6 +840,9 @@ def to_glsl(
     its type, which the block reads and writes instead of locals.
     ``engine_trig`` computes cos, sin and cartesian with ENGINE_TRIG_GLSL's
     functions (the caller adds them), as the cooker's CPU evaluator does.
+    ``slots(slot, type, width)`` gives a get slot's value: the expression
+    its writer's set slot stores (docs/function-ops.md 2.6); without it a
+    get slot cannot be translated. A set slot is the value it stores.
 
     A while loop becomes one loop statement (docs/function-ops.md 1.7): its
     result declared before it, zero; ``cap`` iterations, or ``while (true)``
@@ -779,6 +854,7 @@ def to_glsl(
     cos, sin = ("sbs_cos", "sbs_sin") if engine_trig else ("cos", "sin")
     instrs = block.instrs
     found = loops(block)
+    _check_no_value(block)
     hoisted_vars, hoisted_vals = _hoisted(block, found, variables or {})
     early = {j for js in hoisted_vals.values() for j in js}
     ends: dict[int, tuple[bool, Loop]] = {}
@@ -803,6 +879,10 @@ def to_glsl(
 
     def v(i: int) -> str:
         return names[i]
+
+    def operand(i: int, t: str) -> str:
+        """Return value ``i``; NO_VALUE, the type's zero (2.5)."""
+        return names[i] if i != NO_VALUE else f"{t}(0)"
 
     for k, ins in enumerate(instrs):
         ops = ins.operands
@@ -834,6 +914,13 @@ def to_glsl(
             expr = inputs(ins.u32s()[0], ins.type, ins.width)
             if ins.type == BOOL:  # a bool input is a number parameter
                 expr = f"bool({expr})"
+        elif ins.op == GETSLOT:
+            if slots is None:
+                msg = f"cannot translate getslot (op 0x03) [{ops[0]}]: no slot resolver"
+                raise FunctionError(msg)
+            expr = slots(ops[0], ins.type, ins.width)
+        elif ins.op == SETSLOT:
+            expr = v(ops[0])
         elif ins.op == 0x04 and variables and ops[0] in variables:  # noqa: PLR2004
             glob, kind = variables[ops[0]]
             expr = glob if kind == t else f"{t}({glob})"
@@ -894,9 +981,10 @@ def to_glsl(
             filtering = ops[2] if len(ops) > 2 else 0  # noqa: PLR2004
             expr = samples(kind, ops[1], v(ops[0]), filtering)
         elif ins.op == 0x16 and ins.type == INT:  # noqa: PLR2004 (GLSL's mod is float)
-            expr = f"({v(ops[0])} % {v(ops[1])})"
+            expr = f"({operand(ops[0], t)} % {operand(ops[1], t)})"
         elif ins.op in _GLSL_BINARY:
-            expr = _GLSL_BINARY[ins.op].format(a=v(ops[0]), b=v(ops[1]))
+            a, b = operand(ops[0], t), operand(ops[1], t)
+            expr = _GLSL_BINARY[ins.op].format(a=a, b=b)
         elif ins.op in _GLSL_UNARY:
             expr = _GLSL_UNARY[ins.op].format(a=v(ops[0]))
         else:
@@ -917,16 +1005,21 @@ def to_glsl(
     return lines, names[-1]
 
 
-def _reads(ins: Instr) -> list[int]:
-    """Return the values (SSA indices) an instruction reads."""
+def _operands(ins: Instr) -> list[int]:
+    """Return an instruction's operands that are SSA indices (or NO_VALUE)."""
     ops = ins.operands
-    if ins.op in (0x00, 0x01, 0x02, 0x04):
+    if ins.op in (0x00, 0x01, 0x02, GETSLOT, 0x04):
         return []
-    if ins.op in (0x07, 0x10, 0x11, 0x33, 0x34):
+    if ins.op in (SETSLOT, 0x07, 0x10, 0x11, 0x33, 0x34):
         return ops[:1]
     if ins.op == WHILE:
         return list(while_operands(ins)[:3])
-    return [o for o in ops if o != NO_VALUE]
+    return ops
+
+
+def _reads(ins: Instr) -> list[int]:
+    """Return the values (SSA indices) an instruction reads."""
+    return [o for o in _operands(ins) if o != NO_VALUE]
 
 
 def _hoisted(
