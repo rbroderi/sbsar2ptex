@@ -1296,6 +1296,19 @@ OPS: dict[int, _Op] = {
     **dict.fromkeys((42, 43), _Op("distance", _read_distance, ("source",))),
 }
 """The ops that are plugin nodes (translate.TRANSLATORS's op numbers)."""
+PIXEL_SIZED = frozenset(
+    (
+        "warp",
+        "blur",
+        "dirmotionblur",
+        "directionalwarp",
+        "sharpen",
+        "normal",
+        "distance",
+    )
+)
+"""Plugin nodes without a pixel-size knob: one whose vector is not (1, 1) stays
+inline (the emboss has the knob)."""
 
 
 def prepared(node: Node, template: Node | None) -> Node:
@@ -1344,6 +1357,11 @@ class Maker:
             self._skip(f"{op.base}: in a loop (its buffers)")
             return None
         knobs = _Knobs(prepared(node, template))
+        if op.base in PIXEL_SIZED and not translate.pixel_size_unit(knobs.node):
+            # its x and y geometry times the vector, kept live inline
+            # (docs/node-params.md section 7): no knob of it here
+            self._skip(f"{op.base}: its pixel size is not (1, 1)")
+            return None
         try:
             op.read(knobs.node, knobs, color=color)
         except (_Unpluggable, UnsupportedError):
