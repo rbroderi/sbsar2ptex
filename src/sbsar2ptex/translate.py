@@ -27,6 +27,7 @@ import math
 import re
 import struct
 from collections.abc import Iterable
+from collections.abc import MutableMapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
@@ -57,8 +58,10 @@ from sbsar2ptex.sbsasm import COLOR_OPS
 from sbsar2ptex.sbsasm import IMAGE_COUNT
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.sbsasm import value_width
+from sbsar2ptex.slots import Aliased
 from sbsar2ptex.slots import SlotStore
 from sbsar2ptex.slots import Writers
+from sbsar2ptex.slots import builtins as slot_builtins
 from sbsar2ptex.slots import slot_bounds
 from sbsar2ptex.slots import writer
 from sbsar2ptex.slots import writers
@@ -130,10 +133,11 @@ class _Context:
     fx_variables: dict[int, tuple[str, str]] | None = None
     """The FX-Map being translated's shared variables: GLSL global, type."""
     """Where precomputed FX-Map textures go (none: FX-Maps stay live)."""
-    slot_writers: Writers | None = field(default_factory=dict)
-    """The graph's Value Processors by the slot they write (sbsar2ptex.slots);
-    None where slots cannot be read (a library node's template, cooked in
-    another graph)."""
+    slot_writers: Writers = field(default_factory=dict)
+    """The graph's Value Processors by the slot they write (sbsar2ptex.slots)."""
+    slot_alias: dict[int, int] | None = None
+    """While a library node's template is translated: its slots' graph slots
+    (slots.template_slots); its other slots cannot be read."""
     graph_size: int = 11
     """The graph's output size (log2): a Value Processor's $size."""
     reader: int | None = None
@@ -431,30 +435,45 @@ def _seed_glsl() -> str:
     return "0"
 
 
-def _slot_store(values: dict[int, list]) -> SlotStore | None:
+def _slot_store(values: dict[int, list]) -> MutableMapping[int, list]:
     """Return a slot store for evaluating the current node's functions here.
 
     Its slots are the graph's Value Processors' values, run with ``values``
-    (graph input values by uid; sbsar2ptex.slots.SlotStore). None where
-    slots cannot be read: a get slot then raises FunctionError.
+    (graph input values by uid; sbsar2ptex.slots.SlotStore); a library
+    template's, through its slot map (slots.Aliased).
     """
-    if _CTX.slot_writers is None:
-        return None
-    return SlotStore(_CTX.slot_writers, values, _CTX.graph_size, _CTX.reader)
+    store = SlotStore(_CTX.slot_writers, values, _CTX.graph_size, _CTX.reader)
+    return store if _CTX.slot_alias is None else Aliased(store, _CTX.slot_alias)
+
+
+def _graph_slot(slot: int) -> int:
+    """Return the graph slot a get slot of the node being translated reads.
+
+    Its own, or for a library template the one its writer was matched to
+    (docs/function-ops.md 2.6); a template slot matched to none is refused.
+    """
+    if _CTX.slot_alias is None:
+        return slot
+    if slot not in _CTX.slot_alias:
+        msg = f"template slot {slot}: matched to no writer of this graph"
+        raise UnsupportedError(msg)
+    return _CTX.slot_alias[slot]
 
 
 def _slot_glsl(slot: int, kind: int, width: int) -> str:
-    """Return GLSL for a get slot: its writer's value, live.
+    """Return GLSL for a get slot of the node being translated (_graph_slot)."""
+    return _writer_glsl(_graph_slot(slot), kind, width)
+
+
+def _writer_glsl(slot: int, kind: int, width: int) -> str:
+    """Return GLSL for graph slot ``slot``: its writer's value, live.
 
     The writer's block becomes a helper of the next shader, a function of
     the graph inputs (their parameters), shared by the shader's reads of
     the slot (docs/function-ops.md 2.6); its own get slots call their
     writers' helpers, defined before it. A Value Processor runs once per
-    graph, so its trig is the cooker's CPU one, and its $pos (0, 0).
+    graph: its trig is the cooker's CPU one, its built-ins slots.builtins.
     """
-    if _CTX.slot_writers is None:
-        msg = f"slot {slot} read by a library node's template"
-        raise UnsupportedError(msg)
     try:
         w = writer(_CTX.slot_writers, slot, kind, width, _CTX.reader)
     except FunctionError as e:
@@ -464,8 +483,10 @@ def _slot_glsl(slot: int, kind: int, width: int) -> str:
     call = f"{fn}(vec2(0.0))"
     if any(h.startswith(f"{t} {fn}(") for h in _CTX.helpers):
         return call
-    n = float(1 << _CTX.graph_size)
-    glsl = {1: f"vec2({num(n)})", 8: "vec2(0.0)"}
+    glsl = {
+        ident: num(v[0]) if len(v) == 1 else f"vec{len(v)}({', '.join(map(num, v))})"
+        for ident, v in slot_builtins(_CTX.graph_size).items()
+    }
 
     def builtins(ident: int, _width: int) -> str:
         if ident not in glsl:
@@ -474,15 +495,16 @@ def _slot_glsl(slot: int, kind: int, width: int) -> str:
         return glsl[ident]
 
     reader, _CTX.reader = _CTX.reader, w.node
+    alias, _CTX.slot_alias = _CTX.slot_alias, None  # the writer is the graph's
     try:
         lines, result = to_glsl(
             w.block, f"s{slot}", lambda uid, *_: _param_for(uid), builtins,
-            engine_trig=_engine_trig(w.block), slots=_slot_glsl,
+            engine_trig=_engine_trig(w.block), slots=_writer_glsl,
         )  # fmt: skip
     except FunctionError as e:
         raise UnsupportedError(str(e)) from e
     finally:
-        _CTX.reader = reader
+        _CTX.reader, _CTX.slot_alias = reader, alias
     body = "\n\t".join(lines)
     _CTX.helpers.append(f"{t} {fn}(vec2 uv) {{\n\t{body}\n\treturn {result};\n}}\n")
     return call
@@ -3494,11 +3516,15 @@ def _fx_reach(node: Node, tree: fxmap.Tree | None, size: int) -> dict[int, Reach
     def unbounded(_uid: int, width: int) -> list:
         return [(-inf, inf)] * width
 
-    slot = (
-        slot_bounds(_CTX.slot_writers, unbounded, _CTX.graph_size, _CTX.reader)
-        if _CTX.slot_writers is not None
-        else None
+    graph_bound = slot_bounds(
+        _CTX.slot_writers, unbounded, _CTX.graph_size, _CTX.reader
     )
+    alias = _CTX.slot_alias
+
+    def slot(s: int, kind: int, width: int) -> list:
+        if alias is not None and s not in alias:
+            return [(-inf, inf)] * width
+        return graph_bound(s if alias is None else alias[s], kind, width)
 
     def span(param: Any, default: list[float], fixed: dict[int, list]) -> list:
         if param is None:
@@ -4781,6 +4807,7 @@ def translate_graph(
     loops: dict[int, Loop] | None = None,
     fold: Fold | None = None,
     plugins: Plugins | None = None,
+    template_slots: dict[int, dict[int, int]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, int]]]:
     """Return (MM nodes, connections, output name -> (MM node, port)).
 
@@ -4799,7 +4826,9 @@ def translate_graph(
     place of all theirs, which must be library ones. ``fold`` is a last
     pass over the finished translation (loops.Chains). ``plugins`` makes
     nodes sbs plugin nodes where it can (sbsar2ptex.plugin), the others
-    translated as they are without it.
+    translated as they are without it. ``template_slots`` gives a library
+    node's template its slot map (slots.template_slots: template slot ->
+    this graph's); a template slot it leaves out cannot be read.
     """
     global _CTX  # noqa: PLW0603 (one graph at a time)
     if fold is not None and origins is None:
@@ -4944,8 +4973,8 @@ def translate_graph(
                 uid: by_id.get(gi.identifier, gi) if gi.identifier[:1] == "$" else gi
                 for uid, gi in knobs.items()
             }
-            # the template's slots are its own graph's, not this one's
-            graph_slots, _CTX.slot_writers = _CTX.slot_writers, None
+            # the template's slots are its own cook's: read through its map
+            _CTX.slot_alias = (template_slots or {}).get(k, {})
             try:
                 if loop is not None:
                     made = loop.make(name, nodes, own)
@@ -4954,7 +4983,7 @@ def translate_graph(
                     made = made or node_shader(node, name, own, template)
             finally:
                 _CTX.inputs = graph_wide
-                _CTX.slot_writers = graph_slots
+                _CTX.slot_alias = None
         else:
             made = plugins and plugins(node, name, own, None)
             made = made or node_shader(node, name, own)

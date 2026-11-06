@@ -31,9 +31,12 @@ from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.sbsasm import field_count
 from sbsar2ptex.sbsasm import value_width
+from sbsar2ptex.slots import Aliased
 from sbsar2ptex.slots import SlotStore
 from sbsar2ptex.slots import Writer
+from sbsar2ptex.slots import builtins as slot_builtins
 from sbsar2ptex.slots import slot_bounds
+from sbsar2ptex.slots import template_slots
 from sbsar2ptex.slots import writers
 from sbsar2ptex.translate import GraphInput
 from sbsar2ptex.translate import UnsupportedError
@@ -452,16 +455,138 @@ def test_a_no_value_operand_glsl_and_bounds(tmp_path: Path) -> None:
     assert bounds(r, no_input, {}) == [(-math.inf, math.inf)]
 
 
-def test_no_value_elsewhere_is_refused() -> None:
-    # 2.10: only add was seen taking it; a comparison's or a vector's
-    # operand naming no value has no known value.
-    for bad in (ins(LT, 0, NO_VALUE, kind=BOOL), ins(VEC2, 0, NO_VALUE, width=2)):
-        r = blk(fconst(1.0), bad)
-        with pytest.raises(FunctionError, match="no value"):
-            evaluate(r, {})
-        with pytest.raises(FunctionError, match="no value"):
-            to_glsl(r, "f", no_input, no_input)
-        assert bounds(r, no_input, {})[0] == (-math.inf, math.inf)
+V = 0x5A3B1E02
+"""S14's second float input (y)."""
+N = NO_VALUE
+NEG, MOD, MIN, MAX, DOT, LERP, POW, SIN, COS = (
+    0x17, 0x16, 0x30, 0x31, 0x18, 0x2F, 0x36, 0x27, 0x26,
+)  # fmt: skip
+
+S14 = [
+    ([ins(ADD, N, 0)], [3.0]),
+    ([ins(0x13, N, 0)], [-3.0]),
+    ([ins(0x13, 0, N)], [3.0]),
+    ([ins(MUL, N, 0)], [0.0]),
+    ([ins(DIV, N, 0)], [0.0]),
+    ([ins(DIV, 0, N)], [math.inf]),
+    ([ins(MOD, N, 0)], [0.0]),
+    ([ins(MIN, N, 0)], [0.0]),
+    ([ins(NEG, 0), ins(MAX, N, 2)], [0.0]),
+    ([ins(NEG, 0), ins(GT, N, 2, kind=BOOL)], [True]),
+    ([ins(EQ, N, 1, kind=BOOL)], [False]),
+    ([ins(LERP, N, 0, 1)], [1.5]),
+    ([ins(POW, 0, N)], [1.0]),
+    ([ins(GT, 0, 1, kind=BOOL), ins(IFELSE, 2, N, 0)], [0.0]),
+    ([ins(VEC2, N, 0, width=2)], [3.0, 0.0]),
+    ([ins(VEC2, 0, N, width=2)], [3.0, 0.0]),
+    ([ins(VEC2, 0, N, width=2), ins(VEC3, 2, 0, width=3)], [3.0, 0.0, 3.0]),
+    ([ins(VEC2, 0, 1, width=2), ins(DOT, N, 2)], [0.0]),
+    ([ins(CONVERT, 0, kind=INT), ins(ADD, N, 2, kind=INT)], [3]),
+]
+"""Section 2.8's S14: (instructions after input U and input V, value)."""
+
+
+def s14_block(tail: list[Ins]) -> Block:
+    return blk(load(U), load(V), *tail)
+
+
+def two_inputs(uid: int, *_: int) -> str:
+    return {U: "p", V: "q"}[uid]
+
+
+@pytest.mark.parametrize(("tail", "want"), S14)
+def test_s14_no_value_operands(tail: list[Ins], want: list, tmp_path: Path) -> None:
+    b = s14_block(tail)
+    got = evaluate(b, {U: [3.0], V: [0.5]})
+    assert got == want
+    assert all(type(g) is type(w) for g, w in zip(got, want, strict=True))
+    lines, result = to_glsl(b, "f", two_inputs, no_input)
+    last = b.instrs[-1]
+    t = translate.glsl_type(last.type, last.width)
+    body = "\n\t".join(lines)
+    x = ".x" if last.width > 1 else ""
+    compiles(
+        "#version 450\n"
+        f"{t} f(float p, float q) {{\n\t{body}\n\treturn {result};\n}}\n"
+        "layout(location = 0) out vec4 color;\n"
+        f"void main() {{ color = vec4(float(f(3.0, 0.5){x})); }}\n",
+        tmp_path,
+    )
+    # bounds at the inputs' values hold the value
+    fixed = {U: [(3.0, 3.0)], V: [(0.5, 0.5)]}
+    got_bounds = bounds(b, lambda uid, _w: fixed[uid], {})
+    for (lo, hi), w in zip(got_bounds, want, strict=True):
+        assert lo <= float(w) <= hi
+
+
+def test_s14_vector_glsl_pads_with_zeros() -> None:
+    lines, _ = to_glsl(s14_block(S14[14][0]), "f", two_inputs, no_input)
+    assert lines[-1] == "vec2 f_2 = vec2(f_0, float(0));"
+    lines, _ = to_glsl(s14_block(S14[17][0]), "f", two_inputs, no_input)
+    assert lines[-1] == "float f_3 = dot(vec2(0), f_2);"  # the other's type
+    b = s14_block([ins(VEC2, N, 0, width=2)])
+    assert bounds(b, lambda _u, _w: [(1.0, 2.0)], {}) == [(1.0, 2.0), (0.0, 0.0)]
+
+
+def test_unlisted_ops_read_no_value_as_zero() -> None:
+    # 2.5: [inferred] for an op not listed: a unary op, a swizzle, a
+    # convert, a set variable and a set slot
+    for tail, want in (
+        ([ins(SIN, N)], [0.0]),
+        ([ins(SWIZZLE, N, 0b0100, width=2)], [0.0, 0.0]),
+        ([ins(CONVERT, N, kind=INT)], [0]),
+        ([ins(SETVAR, N, 0)], [0.0]),
+        ([setslot(N, 0)], [0.0]),
+    ):
+        assert evaluate(s14_block(tail), {U: [3.0], V: [0.5]}, slots={}) == want
+        to_glsl(s14_block(tail), "f", two_inputs, no_input)  # no IndexError
+
+
+# S15, S16: a Value Processor's built-ins and trig (2.4).
+
+
+@pytest.mark.parametrize(
+    ("builtin", "selector", "want"),
+    [(1, 0, 8.0), (1, 1, 2.0), (3, 0, 3.0), (3, 1, 1.0), (8, 0, 0.0), (8, 1, 0.0)],
+)
+def test_s15_value_processor_builtins(builtin: int, selector: int, want: float) -> None:
+    w = blk(ins(0x01, builtin, width=2), ins(SWIZZLE, 0, selector), setslot(1, 0))
+    store: dict[int, list] = {}
+    evaluate(w, {}, slot_builtins((3, 1)), slots=store)  # $outputsize (3, 1)
+    assert store == {0: [want]}
+
+
+def test_s15_time_number_and_depth_read_zero() -> None:
+    for ident in (0, 10, 12):
+        w = blk(ins(0x01, ident), fconst(1.0), ins(ADD, 0, 1), setslot(2, 0))
+        table = {0: [Writer(0, w, FLOAT, 1)]}
+        assert SlotStore(table, {}, 5, reader=1)[0] == [1.0]
+    assert slot_builtins(4)[1] == [16.0, 16.0]
+    assert slot_builtins(4)[3] == [4.0, 4.0]
+
+
+@pytest.mark.parametrize(
+    ("op", "x", "bits", "true_bits"),
+    [(SIN, 1.382, 0x3F7B7469, 0x3F7B737B), (COS, 0.6, 0x3F53496A, 0x3F534932)],
+)
+def test_s16_cpu_trig_in_a_value_processor(
+    op: int, x: float, bits: int, true_bits: int
+) -> None:
+    w = blk(load(), ins(op, 0), setslot(1, 0))
+    store = SlotStore({0: [Writer(0, w, FLOAT, 1)]}, {U: [x]}, 11, reader=1)
+    (got,) = store[0]
+    assert struct.unpack("<I", struct.pack("<f", got))[0] == bits
+    assert bits != true_bits
+
+
+def test_s16_a_value_processors_glsl_uses_the_cpu_trig() -> None:
+    vp = make_node(0, 40, vp_fields(1), code(load(), ins(SIN, 0), setslot(1, 0)))
+    pp = make_node(1, 40, [0], code(getslot(0)))
+    mm, _, _ = translate_graph([vp, pp], {"out": 1}, {}, size=10, inputs=amount())
+    (n1,) = (n for n in mm if n["name"] == "n1")
+    slot_fn = n1["shader_model"]["instance"].split("sbs_slot0_$(name)(vec2 uv)")[1]
+    assert "sbs_sin(" in slot_fn.split("return")[0]
+    assert "float sbs_sin(float x)" in n1["shader_model"]["global"]
 
 
 def test_get_slot_edge_cases() -> None:
@@ -650,8 +775,8 @@ def test_a_value_processors_built_ins() -> None:
     mm, _, _ = translate_graph([vp, pp], {"out": 1}, {}, size=10)
     code_ = instances(mm)["n1"]
     slot_fn = code_.split("sbs_slot0_$(name)(vec2 uv) {")[1].split("}")[0]
-    assert "vec2(1024.0)" in slot_fn
-    assert "vec2(0.0)" in slot_fn
+    assert "vec2(1024.0, 1024.0)" in slot_fn
+    assert "vec2(0.0, 0.0)" in slot_fn
     store = SlotStore(writers([vp, pp]), {}, 10, reader=1)
     assert store[0] == [1024.0, 1024.0]
 
@@ -678,12 +803,78 @@ def test_an_fx_map_function_reads_a_slot(monkeypatch) -> None:
     assert evaluate(decode(fx.words[3:]), {}, {12: [2.0]}, slots=store) == [2.5]
 
 
-def test_a_library_template_cannot_read_this_graphs_slots(monkeypatch) -> None:
-    ctx = translate._Context(size=10, slot_writers=None)
-    monkeypatch.setattr(translate, "_CTX", ctx)
-    assert translate._slot_store({}) is None
-    with pytest.raises(UnsupportedError, match="template"):
-        translate._slot_glsl(0, FLOAT, 1)
+# S17: a library template's slots (2.6).
+
+K = 0x0000AB01
+"""The template graph's input k."""
+
+
+def s17_template() -> list[Node]:
+    """Return graph sub: T (k + 1 into slot 0), then R reading slot 0."""
+    w = code(load(K), fconst(1.0), ins(ADD, 0, 1), setslot(2, 0))
+    t = make_node(0, 40, vp_fields(1), w)
+    r = make_node(1, 40, [0], code(getslot(0)))
+    return [t, r]
+
+
+def s17_graph() -> list[Node]:
+    """Return graph main and two instances of sub.
+
+    Main's own writer sets 20 into slot 3; the instances, k = 3 and k = 5,
+    have their writers folded (4 into slot 2, 6 into slot 1).
+    """
+    return [
+        make_node(0, 40, vp_fields(1), code(fconst(20.0), setslot(0, 3))),
+        make_node(1, 40, vp_fields(1), code(fconst(4.0), setslot(0, 2))),
+        make_node(2, 40, [0], code(getslot(2))),
+        make_node(3, 40, vp_fields(1), code(fconst(6.0), setslot(0, 1))),
+        make_node(4, 40, [0], code(getslot(1))),
+    ]
+
+
+def test_s17_template_slots_map_by_writer_node() -> None:
+    template, graph = s17_template(), s17_graph()
+    assert template_slots({1: 2}, template, graph) == {0: 2}
+    assert template_slots({1: 4}, template, graph) == {0: 1}
+    # the template reader evaluated as each instance: 4 and 6
+    r = writers(template)  # (the template's own slot table: unused here)
+    assert set(r) == {0}
+    for gk, alias, want in ((2, {0: 2}, 4.0), (4, {0: 1}, 6.0)):
+        store = Aliased(SlotStore(writers(graph), {}, 10, reader=gk), alias)
+        assert evaluate(blk(getslot(0)), {}, slots=store) == [want]
+    # an unmatched template slot is refused
+    with pytest.raises(FunctionError, match="matched to no writer"):
+        evaluate(blk(getslot(0)), {}, slots=Aliased(SlotStore({}, {}, 10), {}))
+
+
+def test_s17_template_slots_that_do_not_line_up_map_nothing() -> None:
+    template, graph = s17_template(), s17_graph()
+    graph[2] = make_node(2, 40, [0], code(getslot(2), getslot(2), ins(ADD, 0, 1)))
+    assert template_slots({1: 2}, template, graph) == {}  # two reads, one
+    graph[2] = make_node(2, 40, [0], code(getslot(2, INT)))
+    assert template_slots({1: 2}, template, graph) == {}  # another type
+
+
+def test_s17_template_readers_translate_to_their_instances_writers(
+    tmp_path: Path,
+) -> None:
+    template, graph = s17_template(), s17_graph()
+    library = {2: (template[1], {}), 4: (template[1], {})}
+    maps = {2: template_slots({1: 2}, template, graph),
+            4: template_slots({1: 4}, template, graph)}  # fmt: skip
+    mm, _, _ = translate_graph(
+        graph, {"a": 2, "b": 4}, {}, size=10, library=library, template_slots=maps
+    )
+    code_ = instances(mm)
+    assert "float sbs_slot2_$(name)(vec2 uv)" in code_["n2"]
+    assert "4.0" in code_["n2"].split("sbs_slot2_$(name)(vec2 uv)")[1]
+    assert "float sbs_slot1_$(name)(vec2 uv)" in code_["n4"]
+    assert "6.0" in code_["n4"].split("sbs_slot1_$(name)(vec2 uv)")[1]
+    assert "sbs_slot0" not in code_["n2"] + code_["n4"]  # not the template's 0
+    compiles(glsl_of(code_["n2"], "n2"), tmp_path)
+    # without a map, the template's reads are refused
+    with pytest.raises(UnsupportedError, match="matched to no writer"):
+        translate_graph(graph, {"a": 2}, {}, size=10, library=library)
 
 
 def test_slot_reads_stay_live_in_static_values(monkeypatch) -> None:

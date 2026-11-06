@@ -40,6 +40,7 @@ from sbsar2ptex.recognize import resembler
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.slots import template_slots
 from sbsar2ptex.structure import nest
 from sbsar2ptex.translate import GraphInput
 from sbsar2ptex.translate import graph_inputs
@@ -151,6 +152,23 @@ def library_nodes(
     return out
 
 
+def library_slots(
+    found: list[Match], nodes: list[Node], lib: dict[int, Any]
+) -> dict[int, dict[int, int]]:
+    """Return translate_graph's ``template_slots``: each library node's slot map.
+
+    An instance's template slots map to its own writers', matched by node
+    (slots.template_slots, docs/function-ops.md 2.6).
+    """
+    out: dict[int, dict[int, int]] = {}
+    for m in found:
+        if not any(gk in lib for gk in m.members.values()):
+            continue
+        alias = template_slots(m.members, m.template.nodes, nodes)
+        out.update((gk, alias) for gk in m.members.values() if gk in lib)
+    return out
+
+
 def build(
     files: dict[str, bytes],
     graph: Graph,
@@ -217,6 +235,7 @@ def build(
         loops=slopes,
         fold=folded,
         plugins=maker,
+        template_slots=library_slots(found, nodes, lib),
     )
     if maker is not None and stats is not None:
         stats["plugin nodes"] = dict(sorted(maker.made.items()))

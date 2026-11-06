@@ -23,6 +23,7 @@ from collections.abc import MutableMapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from sbsar2ptex.function import GETSLOT
 from sbsar2ptex.function import SETSLOT
 from sbsar2ptex.function import Block
 from sbsar2ptex.function import FunctionError
@@ -30,6 +31,7 @@ from sbsar2ptex.function import Interval
 from sbsar2ptex.function import bounds
 from sbsar2ptex.function import decode
 from sbsar2ptex.function import evaluate
+from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.sbsasm import value_width
 
@@ -102,14 +104,26 @@ def writer(
     return w
 
 
-def builtins(size: int) -> dict[int, list[float]]:
-    """Return a Value Processor's built-ins: $size the graph's, $pos (0, 0).
+Size = int | tuple[int, int]
+"""A graph's output size, log2: square, or (width, height)."""
 
-    2.4: $size (1) was the graph's output size; $pos (8) is (0, 0). Others
-    were not probed: reading them raises FunctionError (evaluate's).
+
+def builtins(size: Size) -> dict[int, list[float]]:
+    """Return a Value Processor's built-ins at the graph's output ``size``.
+
+    2.4: $size (1) is the graph's size in pixels and $sizelog2 (3) its log2,
+    even with an image input; $pos (8) is (0, 0); $time (0), $number (10)
+    and $depth (12) are 0. Others raise FunctionError (evaluate's).
     """
-    n = float(1 << size)
-    return {1: [n, n], 8: [0.0, 0.0]}
+    w, h = (size, size) if isinstance(size, int) else size
+    return {
+        0: [0.0],
+        1: [float(1 << w), float(1 << h)],
+        3: [float(w), float(h)],
+        8: [0.0, 0.0],
+        10: [0.0],
+        12: [0.0],
+    }
 
 
 class SlotStore(MutableMapping[int, list]):
@@ -125,7 +139,7 @@ class SlotStore(MutableMapping[int, list]):
         self,
         table: Writers,
         inputs: dict[int, list],
-        size: int,
+        size: Size,
         reader: int | None = None,
     ) -> None:
         """Make an empty store over the graph's writers ``table``."""
@@ -165,7 +179,7 @@ class SlotStore(MutableMapping[int, list]):
 def slot_bounds(
     table: Writers,
     inputs: Callable[[int, int], list[Interval]],
-    size: int,
+    size: Size,
     reader: int | None = None,
 ) -> Callable[[int, int, int], list[Interval]]:
     """Return a get slot's bound for function.bounds: its writer's value's.
@@ -188,3 +202,119 @@ def slot_bounds(
         return bounds(w.block, inputs, fixed, slots=inner)
 
     return bound
+
+
+# Library templates (2.6): a template's slots are its own cook's. Its
+# writers are matched to the instance's by node, through the readers the
+# recognizer matched, never by slot number.
+
+
+class Aliased(MutableMapping[int, list]):
+    """A template's view of the graph's slot ``store``.
+
+    Its slot s is the graph's ``alias[s]`` (template_slots). A slot not
+    mapped, or a write, raises FunctionError.
+    """
+
+    def __init__(self, store: MutableMapping[int, list], alias: dict[int, int]) -> None:
+        """Wrap ``store`` for a template whose slots ``alias`` maps."""
+        self.store, self.alias = store, alias
+
+    def _graph(self, slot: int) -> int:
+        if slot not in self.alias:
+            msg = f"template slot {slot}: matched to no writer of this graph"
+            raise FunctionError(msg)
+        return self.alias[slot]
+
+    def __getitem__(self, slot: int) -> list:
+        """Return the value of the graph slot ``slot`` maps to."""
+        return self.store[self._graph(slot)]
+
+    def __setitem__(self, slot: int, value: list) -> None:
+        """Refuse: a template's reader writes no slot."""
+        msg = f"template slot {slot}: written by a reader"
+        raise FunctionError(msg)
+
+    def __delitem__(self, slot: int) -> None:
+        """Refuse, as a write."""
+        self[slot] = []
+
+    def __iter__(self) -> Iterator[int]:
+        """Iterate over the mapped slots."""
+        return iter(self.alias)
+
+    def __len__(self) -> int:
+        """Return how many slots are mapped."""
+        return len(self.alias)
+
+
+def _blocks(node: Node) -> list[int]:
+    """Return the file offsets of ``node``'s code blocks, in file order.
+
+    Its code offsets, and its fields' and inline words that point into it
+    (parameter functions); a template node and its instance's lay them out
+    alike, so their blocks pair in this order.
+    """
+    found = set(node.code)
+    for w in (*node.fields, *node.inline):
+        at = w + BASE
+        if node.start < at < node.end and w % 4 == 0:
+            found.add(at)
+    return sorted(found)
+
+
+def reads(node: Node) -> list[tuple[int, int, int]]:
+    """Return the get slots of ``node``'s blocks, (slot, type, width), in order.
+
+    Blocks that do not decode are skipped.
+    """
+    out: list[tuple[int, int, int]] = []
+    for at in _blocks(node):
+        try:
+            block = decode(node.at(at, (node.end - at) // 4))
+        except (IndexError, ValueError):
+            continue
+        out += [
+            (i.operands[0], i.type, i.width) for i in block.instrs if i.op == GETSLOT
+        ]
+    return out
+
+
+def template_slots(
+    members: dict[int, int], template: Sequence[Node], nodes: Sequence[Node]
+) -> dict[int, int]:
+    """Return a template instance's slot map: template slot -> graph slot.
+
+    ``members`` maps the template's nodes to the instance's (recognize's
+    Match). Each matched node's get slots pair, in order, with its
+    template node's when both read as many, of the same types and widths;
+    each pair matches the template slot's writer node to the graph slot's.
+    A template writer matched to two graph writers, or the reverse, is
+    left out, as is any pairing that does not line up: its template reads
+    are then refused (Aliased).
+    """
+    t_table, g_table = writers(template), writers(nodes)
+    pairs: dict[int, set[int]] = {}
+    back: dict[int, set[int]] = {}
+    for tk, gk in members.items():
+        if not (0 <= tk < len(template) and 0 <= gk < len(nodes)):
+            continue
+        t_reads, g_reads = reads(template[tk]), reads(nodes[gk])
+        if len(t_reads) != len(g_reads):
+            continue
+        if any(t[1:] != g[1:] for t, g in zip(t_reads, g_reads, strict=True)):
+            continue
+        for (ts, _, _), (gs, _, _) in zip(t_reads, g_reads, strict=True):
+            tw, gw = t_table.get(ts, []), g_table.get(gs, [])
+            if len(tw) == 1 and len(gw) == 1:
+                pairs.setdefault(tw[0].node, set()).add(gw[0].node)
+                back.setdefault(gw[0].node, set()).add(tw[0].node)
+    slot_of = {w[0].node: s for s, w in t_table.items() if len(w) == 1}
+    g_slot_of = {w[0].node: s for s, w in g_table.items() if len(w) == 1}
+    out: dict[int, int] = {}
+    for tw, gws in pairs.items():
+        if len(gws) == 1:
+            (gw,) = gws
+            if len(back[gw]) == 1:
+                out[slot_of[tw]] = g_slot_of[gw]
+    return out

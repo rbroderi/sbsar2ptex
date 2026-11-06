@@ -43,11 +43,10 @@ from typing import Any
 
 FLOAT, INT, BOOL = 1, 2, 0
 NO_VALUE = 0xFFFF
-"""An operand naming no value: a sequence whose result the cooker dropped,
-or an arithmetic operand that reads as its type's zero (ZERO_OPERAND)."""
-ZERO_OPERAND = (0x12, 0x13, 0x14, 0x15, 0x16)
-"""Arithmetic ops (add, sub, mul, div, mod) whose NO_VALUE operand reads as
-the type's zero (docs/function-ops.md 2.5: seen in add only)."""
+"""An operand naming no value (docs/function-ops.md 2.5): a sequence's
+dropped result; a variable never set, read by any other op as the type's
+zero (broadcast to the other operand's width), adding no components to a
+vector (zeros pad it)."""
 GETSLOT, SETSLOT = 0x03, 0x06
 """Value slots (docs/function-ops.md section 2): a graph-wide store of
 values, by word offset. A Value Processor's block ends by setting one (set
@@ -388,20 +387,6 @@ def _dropped(ins: Instr, first: list) -> list:
     return first
 
 
-def _check_no_value(block: Block) -> None:
-    """Raise FunctionError for a NO_VALUE operand where no value is known.
-
-    A sequence's second operand may name no value (its first part's, then),
-    and so may an arithmetic operand (ZERO_OPERAND: the type's zero).
-    """
-    for k, ins in enumerate(block.instrs):
-        if ins.op in (0x0C, *ZERO_OPERAND):
-            continue
-        if NO_VALUE in _operands(ins):
-            msg = f"#{k}: {ins.name} reads no value (0xFFFF)"
-            raise FunctionError(msg)
-
-
 def _get_slot(slots: Mapping[int, list] | None, ins: Instr) -> list:
     """Return a get slot's value from the slot store ``slots``.
 
@@ -451,11 +436,10 @@ def evaluate(
     vals: list[list] = [[] for _ in instrs]
     var: dict[int, list] = {} if variables is None else variables
     starts = loops(block)
-    _check_no_value(block)
 
-    def operand(o: int, ins: Instr) -> list:
-        """Return the value ``o`` names; NO_VALUE, the type's zero (2.5)."""
-        return vals[o] if o != NO_VALUE else [0] * ins.width
+    def arg(o: int, width: int = 1, kind: int = FLOAT) -> list:
+        """Return the value ``o`` names; NO_VALUE, ``width`` zeros (2.5)."""
+        return vals[o] if o != NO_VALUE else _as(kind, [0] * width)
 
     def run(lo: int, hi: int, own: Loop | None = None) -> None:
         """Run instructions lo to hi, both included, and the loops among them."""
@@ -499,43 +483,49 @@ def evaluate(
         elif op == GETSLOT:
             v = _get_slot(slots, ins)
         elif op == SETSLOT:
-            v = vals[ops[0]]
+            v = arg(ops[0], ins.width)
             if slots is not None:
                 slots[ops[1]] = v
         elif op == 0x04:  # noqa: PLR2004
             v = var.get(ops[0], [0.0] * ins.width)
         elif op == 0x07:  # noqa: PLR2004
-            var[ops[1]] = v = vals[ops[0]]
+            var[ops[1]] = v = arg(ops[0], ins.width, ins.type)
         elif op == 0x09:  # noqa: PLR2004
-            v = vals[ops[1]] if vals[ops[0]][0] else vals[ops[2]]
+            v = arg(ops[1] if arg(ops[0])[0] else ops[2], ins.width, ins.type)
         elif op == 0x0C:  # noqa: PLR2004
-            v = vals[ops[1]] if ops[1] != NO_VALUE else _dropped(ins, vals[ops[0]])
+            if ops[1] != NO_VALUE:
+                v = vals[ops[1]]
+            else:
+                v = _dropped(ins, arg(ops[0], ins.width, ins.type))
         elif op in (0x0D, 0x0E, 0x0F):
-            v = [x for o in ops for x in vals[o]]
+            # NO_VALUE parts add no components; zeros pad the rest (2.5)
+            v = [x for o in ops if o != NO_VALUE for x in vals[o]]
+            v += [0] * (ins.width - len(v))
         elif op == 0x10:  # noqa: PLR2004
-            src, sel = vals[ops[0]], ops[1]
+            src, sel = arg(ops[0], 4), ops[1]
             v = [src[sel >> (2 * k) & 3] for k in range(ins.width)]
         elif op == 0x11:  # noqa: PLR2004 (converted below, by its type)
-            v = vals[ops[0]]
+            v = arg(ops[0], ins.width)
         elif op == 0x18:  # noqa: PLR2004
             acc = 0.0
-            for x, y in zip(vals[ops[0]], vals[ops[1]], strict=True):
+            for x, y in zip(*_spread(arg(ops[0]), arg(ops[1])), strict=True):
                 acc = f32(acc + f32(x * y))
             v = [acc]
         elif op == 0x2D:  # noqa: PLR2004
-            x, y = vals[ops[0]][:2]
+            x, y = arg(ops[0], 2)[:2]
             v = [math.atan2(y, x)]
         elif op == 0x2E:  # noqa: PLR2004
-            rho, theta = vals[ops[0]][0], vals[ops[1]][0]
+            rho, theta = arg(ops[0])[0], arg(ops[1])[0]
             v = [f32(rho * engine_cos(theta)), f32(rho * engine_sin(theta))]
         elif op == 0x2F:  # noqa: PLR2004
-            a, b = _spread(vals[ops[0]], vals[ops[1]])
-            t = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
+            a, b = _spread(arg(ops[0]), arg(ops[1]))
+            w = arg(ops[2])
+            t = w * (len(a) if len(w) == 1 else 1)
             v = [f32(p + f32(f32(q - p) * s)) for p, q, s in zip(a, b, t, strict=True)]
         elif op == 0x32 and rand is not None:  # noqa: PLR2004
-            v = [rand(vals[ops[0]][0])]
+            v = [rand(arg(ops[0])[0])]
         elif op in _BINARY or op in (0x15, 0x16):
-            a, b = _spread(operand(ops[0], ins), operand(ops[1], ins))
+            a, b = _spread(arg(ops[0]), arg(ops[1]))
             if op == 0x15:  # noqa: PLR2004
                 v = [_div(p, q, ins.type) for p, q in zip(a, b, strict=True)]
             elif op == 0x16:  # noqa: PLR2004
@@ -543,7 +533,7 @@ def evaluate(
             else:
                 v = [_BINARY[op](p, q) for p, q in zip(a, b, strict=True)]
         elif op in _UNARY:
-            v = [_UNARY[op](p) for p in vals[ops[0]]]
+            v = [_UNARY[op](p) for p in arg(ops[0], ins.width)]
         else:
             msg = f"cannot evaluate {ins.name}"
             raise FunctionError(msg)
@@ -621,7 +611,6 @@ def bounds(
     var: dict[int, list[Interval]] = {}
     try:
         starts = loops(block)
-        _check_no_value(block)
     except FunctionError:
         return [_ALL] * block.instrs[-1].width
     loose: set[int] = set()
@@ -669,9 +658,10 @@ def bounds(
             else:
                 v = arg(0)
         elif ins.op in (0x0D, 0x0E, 0x0F):
-            v = [x for o in ops for x in vals[o]]
+            v = [x for o in ops if o != NO_VALUE for x in vals[o]]
+            v += [(0.0, 0.0)] * (ins.width - len(v))  # as evaluate (2.5)
         elif ins.op == 0x10:  # noqa: PLR2004
-            src, sel = arg(0), ops[1]
+            src, sel = arg(0, width=4), ops[1]
             v = [src[sel >> (2 * k) & 3] for k in range(ins.width)]
         elif ins.op == 0x11:  # noqa: PLR2004
             v = [_iunary(0x24, x) if ins.type != FLOAT else x for x in arg(0)]
@@ -706,7 +696,8 @@ def bounds(
         elif ins.op in (0x1A, 0x1B, 0x1C) or 0x1D <= ins.op <= 0x22:  # noqa: PLR2004
             v = [(0.0, 1.0)] * ins.width
         elif ins.op == 0x18:  # noqa: PLR2004
-            terms = [_imul(p, q) for p, q in zip(arg(0), arg(1), strict=True)]
+            pairs = zip(*_spread(arg(0, width=1), arg(1, width=1)), strict=True)
+            terms = [_imul(p, q) for p, q in pairs]
             v = [(sum(t[0] for t in terms), sum(t[1] for t in terms))]
         elif ins.op == 0x2D:  # noqa: PLR2004
             v = [(-math.pi, math.pi)]
@@ -854,7 +845,6 @@ def to_glsl(
     cos, sin = ("sbs_cos", "sbs_sin") if engine_trig else ("cos", "sin")
     instrs = block.instrs
     found = loops(block)
-    _check_no_value(block)
     hoisted_vars, hoisted_vals = _hoisted(block, found, variables or {})
     early = {j for js in hoisted_vals.values() for j in js}
     ends: dict[int, tuple[bool, Loop]] = {}
@@ -877,12 +867,15 @@ def to_glsl(
         else:
             emit(f"{glsl_type(*kinds[k])} {names[k]} = {expr};")
 
-    def v(i: int) -> str:
-        return names[i]
+    def v(i: int, like: str = "float") -> str:
+        """Return value ``i``; NO_VALUE, a zero of GLSL type ``like`` (2.5)."""
+        return names[i] if i != NO_VALUE else f"{like}(0)"
 
-    def operand(i: int, t: str) -> str:
-        """Return value ``i``; NO_VALUE, the type's zero (2.5)."""
-        return names[i] if i != NO_VALUE else f"{t}(0)"
+    def pair(a: int, b: int, t: str) -> tuple[str, str]:
+        """Return two operands; one naming no value, the other's type's zero."""
+        ta = glsl_type(*kinds[a]) if a != NO_VALUE else t
+        tb = glsl_type(*kinds[b]) if b != NO_VALUE else t
+        return v(a, tb), v(b, ta)
 
     for k, ins in enumerate(instrs):
         ops = ins.operands
@@ -920,14 +913,14 @@ def to_glsl(
                 raise FunctionError(msg)
             expr = slots(ops[0], ins.type, ins.width)
         elif ins.op == SETSLOT:
-            expr = v(ops[0])
+            expr = v(ops[0], t)
         elif ins.op == 0x04 and variables and ops[0] in variables:  # noqa: PLR2004
             glob, kind = variables[ops[0]]
             expr = glob if kind == t else f"{t}({glob})"
         elif ins.op == 0x07 and variables and ops[1] in variables:  # noqa: PLR2004
             glob, kind = variables[ops[1]]
-            emit(f"{glob} = {kind}({v(ops[0])});")
-            expr = v(ops[0])
+            emit(f"{glob} = {kind}({v(ops[0], t)});")
+            expr = v(ops[0], t)
         elif ins.op == 0x04:  # noqa: PLR2004
             # A variable this block never set (one an FX-Map node's
             # ancestors set, it seems) reads as zero, as in evaluate.
@@ -938,55 +931,63 @@ def to_glsl(
             if declared[ops[0]] != t:
                 expr = f"{t}({expr})"
         elif ins.op == 0x07:  # noqa: PLR2004
+            src = v(ops[0], t)
             if ops[1] in declared:
-                emit(f"{prefix}_var{ops[1]} = {declared[ops[1]]}({v(ops[0])});")
+                emit(f"{prefix}_var{ops[1]} = {declared[ops[1]]}({src});")
             else:
                 declared[ops[1]] = t
-                emit(f"{t} {prefix}_var{ops[1]} = {v(ops[0])};")
-            expr = v(ops[0])
+                emit(f"{t} {prefix}_var{ops[1]} = {src};")
+            expr = src
         elif ins.op == 0x09:  # noqa: PLR2004
-            expr = f"({v(ops[0])} ? {v(ops[1])} : {v(ops[2])})"
+            c = v(ops[0], "bool")
+            expr = f"({c} ? {v(ops[1], t)} : {v(ops[2], t)})"
         elif ins.op == 0x0C:  # noqa: PLR2004
             if ops[1] != NO_VALUE:
                 expr = v(ops[1])
-            elif kinds[ops[0]][1] != ins.width:  # as _dropped
+            elif ops[0] == NO_VALUE or kinds[ops[0]][1] != ins.width:  # as _dropped
                 expr = f"{t}(0)"
             elif ins.type == INT and kinds[ops[0]][0] == FLOAT:
                 expr = f"{t}(round({v(ops[0])}))"
             else:
                 expr = f"{t}({v(ops[0])})"
         elif ins.op in (0x0D, 0x0E, 0x0F):
-            expr = f"{t}({', '.join(v(o) for o in ops)})"
+            # NO_VALUE parts add no components; zeros pad the rest (2.5)
+            parts = [v(o) for o in ops if o != NO_VALUE]
+            have = sum(kinds[o][1] for o in ops if o != NO_VALUE)
+            parts += [f"{glsl_type(ins.type, 1)}(0)"] * (ins.width - have)
+            expr = f"{t}({', '.join(parts)})"
         elif ins.op == 0x10:  # noqa: PLR2004
             sel = "".join("xyzw"[ops[1] >> (2 * c) & 3] for c in range(ins.width))
-            expr = f"{v(ops[0])}.{sel}"
+            expr = f"{v(ops[0])}.{sel}" if ops[0] != NO_VALUE else f"{t}(0)"
         elif ins.op == 0x11:  # noqa: PLR2004
-            expr = f"{t}({v(ops[0])})"
+            expr = f"{t}({v(ops[0], t)})"
         elif ins.op == 0x18:  # noqa: PLR2004
-            expr = f"dot({v(ops[0])}, {v(ops[1])})"
+            expr = "dot({}, {})".format(*pair(ops[0], ops[1], t))
         elif ins.op == 0x2D:  # noqa: PLR2004
-            expr = f"atan({v(ops[0])}.y, {v(ops[0])}.x)"
+            p = v(ops[0], "vec2")
+            expr = f"atan({p}.y, {p}.x)"
         elif ins.op == 0x2E:  # noqa: PLR2004
             r, th = v(ops[0]), v(ops[1])
             expr = f"vec2({r} * {cos}({th}), {r} * {sin}({th}))"
         elif ins.op in (0x26, 0x27):
-            expr = f"{cos if ins.op == 0x26 else sin}({v(ops[0])})"  # noqa: PLR2004
+            expr = f"{cos if ins.op == 0x26 else sin}({v(ops[0], t)})"  # noqa: PLR2004
         elif ins.op == 0x2F:  # noqa: PLR2004
-            expr = f"mix({v(ops[0])}, {v(ops[1])}, {v(ops[2])})"
+            a, b = pair(ops[0], ops[1], t)
+            expr = f"mix({a}, {b}, {v(ops[2])})"
         elif ins.op == 0x32 and rand is not None:  # noqa: PLR2004
             expr = rand(v(ops[0]), k)
         elif ins.op in (0x33, 0x34) and samples is not None:
             kind = "lum" if ins.op == 0x33 else "col"  # noqa: PLR2004
             # 0 nearest (the cooker leaves it out), 1 bilinear
             filtering = ops[2] if len(ops) > 2 else 0  # noqa: PLR2004
-            expr = samples(kind, ops[1], v(ops[0]), filtering)
+            expr = samples(kind, ops[1], v(ops[0], "vec2"), filtering)
         elif ins.op == 0x16 and ins.type == INT:  # noqa: PLR2004 (GLSL's mod is float)
-            expr = f"({operand(ops[0], t)} % {operand(ops[1], t)})"
+            expr = "({} % {})".format(*pair(ops[0], ops[1], t))
         elif ins.op in _GLSL_BINARY:
-            a, b = operand(ops[0], t), operand(ops[1], t)
+            a, b = pair(ops[0], ops[1], t)
             expr = _GLSL_BINARY[ins.op].format(a=a, b=b)
         elif ins.op in _GLSL_UNARY:
-            expr = _GLSL_UNARY[ins.op].format(a=v(ops[0]))
+            expr = _GLSL_UNARY[ins.op].format(a=v(ops[0], t))
         else:
             msg = f"cannot translate {ins.name}"
             raise FunctionError(msg)
