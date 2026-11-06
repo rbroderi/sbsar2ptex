@@ -102,6 +102,7 @@ class Block:
     _loops: "dict[int, Loop] | None" = field(
         default=None, init=False, repr=False, compare=False
     )
+    _steps: list | None = field(default=None, init=False, repr=False, compare=False)
 
     def uids(self) -> set[int]:
         """Return the graph inputs (uids) the block reads."""
@@ -112,6 +113,12 @@ class Block:
         if self._loops is None:
             self._loops = loops(self)
         return self._loops
+
+    def steps(self) -> list:
+        """Return the instructions compiled (_compile), once."""
+        if self._steps is None:
+            self._steps = [_compile(ins) for ins in self.instrs]
+        return self._steps
 
 
 def u16s(words: list[int]) -> list[int]:
@@ -403,12 +410,12 @@ class _Scalars:
         return values
 
     @staticmethod
-    def binary(op: int, a: Any, b: Any, kind: int) -> Any:  # noqa: ARG004
-        return _BINARY[op](a, b)
+    def binary(op: int, kind: int) -> Callable[[Any, Any], Any]:  # noqa: ARG004
+        return _BINARY[op]
 
     @staticmethod
-    def unary(op: int, a: Any, kind: int) -> Any:  # noqa: ARG004
-        return _UNARY[op](a)
+    def unary(op: int, kind: int) -> Callable[[Any], Any]:  # noqa: ARG004
+        return _UNARY[op]
 
     @staticmethod
     def atan2(y: Any, x: Any, kind: int) -> Any:  # noqa: ARG004
@@ -454,6 +461,28 @@ def evaluate(
     return _run(block, inputs, builtins, rand, var, _SCALARS)
 
 
+class _Env:
+    """What a block's instructions read besides earlier values: _run's arguments."""
+
+    __slots__ = ("builtins", "inputs", "num", "rand", "var")
+
+    def __init__(
+        self,
+        inputs: Mapping[int, list],
+        builtins: Mapping[int, list] | None,
+        rand: Callable[[Any], Any] | None,
+        var: dict[int, list],
+        num: Any,
+    ) -> None:
+        self.inputs, self.builtins, self.rand, self.var, self.num = (
+            inputs, builtins, rand, var, num,
+        )  # fmt: skip
+
+
+Step = Callable[[list, _Env], list]
+"""One instruction, compiled: its value from the values so far and the _Env."""
+
+
 def _run(
     block: Block,
     inputs: Mapping[int, list],
@@ -462,10 +491,12 @@ def _run(
     var: dict[int, list],
     num: Any,
 ) -> list:
-    """Run ``block`` with ``num``'s arithmetic (_Scalars, or lanes.Lanes)."""
+    """Run ``block`` with ``num``'s arithmetic (_Scalars, or Lanes)."""
     instrs = block.instrs
+    steps = block.steps()
     vals: list[list] = [[] for _ in instrs]
     starts = block.loops()
+    env = _Env(inputs, builtins, rand, var, num)
 
     def run(lo: int, hi: int, own: Loop | None = None) -> None:
         """Run instructions lo to hi, both included, and the loops among them."""
@@ -479,7 +510,7 @@ def _run(
                 run_loop(loop)
                 k = loop.at + 1
             else:
-                vals[k] = step(instrs[k])
+                vals[k] = steps[k](vals, env)
                 k += 1
 
     def run_loop(loop: Loop) -> None:
@@ -498,73 +529,170 @@ def _run(
         zero = num.as_kind(ins.type, num.lift([0] * ins.width))
         vals[loop.at] = vals[loop.body] if n else zero
 
-    def step(ins: Instr) -> list:
-        """Return one instruction's value (a while is run_loop's)."""
-        ops, op = ins.operands, ins.op
-        if op == 0x00:
-            v = num.lift(constant(ins))
-        elif op == 0x01 and builtins is not None:
-            v = num.lift(builtins[ops[0]])
-        elif op == 0x02:  # noqa: PLR2004
-            v = num.lift(inputs[ins.u32s()[0]])
-        elif op == 0x04:  # noqa: PLR2004
-            v = var.get(ops[0])
-            if v is None:
-                v = num.lift([0.0] * ins.width)
-        elif op == 0x07:  # noqa: PLR2004
-            var[ops[1]] = v = vals[ops[0]]
-        elif op == 0x09:  # noqa: PLR2004
-            v = num.select(vals[ops[0]][0], vals[ops[1]], vals[ops[2]])
-        elif op == 0x0C:  # noqa: PLR2004
-            v = vals[ops[1]] if ops[1] != NO_VALUE else num.dropped(ins, vals[ops[0]])
-        elif op in (0x0D, 0x0E, 0x0F):
-            v = [x for o in ops for x in vals[o]]
-        elif op == 0x10:  # noqa: PLR2004
-            src, sel = vals[ops[0]], ops[1]
-            v = [src[sel >> (2 * k) & 3] for k in range(ins.width)]
-        elif op == 0x11:  # noqa: PLR2004 (converted below, by its type)
-            v = vals[ops[0]]
-        elif op == 0x18:  # noqa: PLR2004
-            acc = 0.0
-            for x, y in zip(vals[ops[0]], vals[ops[1]], strict=True):
-                acc = num.f32(acc + num.f32(x * y))
-            v = [acc]
-        elif op == 0x2D:  # noqa: PLR2004
-            x, y = vals[ops[0]][:2]
-            v = [num.atan2(y, x, ins.type)]
-        elif op == 0x2E:  # noqa: PLR2004
-            rho, theta = vals[ops[0]][0], vals[ops[1]][0]
-            v = [num.f32(rho * num.cos(theta)), num.f32(rho * num.sin(theta))]
-        elif op == 0x2F:  # noqa: PLR2004
-            a, b = _spread(vals[ops[0]], vals[ops[1]])
-            t = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
-            f = num.f32
-            v = [f(p + f(f(q - p) * s)) for p, q, s in zip(a, b, t, strict=True)]
-        elif op == 0x32 and rand is not None:  # noqa: PLR2004
-            v = [rand(vals[ops[0]][0])]
-        elif op in _BINARY or op in (0x15, 0x16):
-            a, b = _spread(vals[ops[0]], vals[ops[1]])
-            kind = ins.type
-            if op == 0x15:  # noqa: PLR2004
-                v = [num.div(p, q, kind) for p, q in zip(a, b, strict=True)]
-            elif op == 0x16:  # noqa: PLR2004
-                v = [num.mod(p, q, kind) for p, q in zip(a, b, strict=True)]
-            else:
-                v = [num.binary(op, p, q, kind) for p, q in zip(a, b, strict=True)]
-        elif op in _UNARY:
-            v = [num.unary(op, p, ins.type) for p in vals[ops[0]]]
-        else:
-            msg = f"cannot evaluate {ins.name}"
-            raise FunctionError(msg)
-        if op not in (0x07, 0x09, 0x0C):
-            if ins.type in (FLOAT, INT, BOOL):
-                v = num.as_kind(ins.type, v)
-            else:
-                num.unconverted(ins)
+    if starts:
+        run(0, len(instrs) - 1)
+    else:  # (straight code: each instruction once, in order)
+        for k, step in enumerate(steps):
+            vals[k] = step(vals, env)
+    return vals[-1]
+
+
+def _compile(ins: Instr) -> Step:
+    """Return one instruction as a Step: its op chosen once, not each run.
+
+    Its value is converted to its type (floats rounded to float32, ints
+    wrapped...) but for set, if/else and sequence, which pass a value on.
+    """
+    body = _body(ins)
+    kind = ins.type
+    if ins.op in (0x07, 0x09, 0x0C):
+        return body
+    if kind in (FLOAT, INT, BOOL):
+
+        def converted(vals: list, env: _Env) -> list:
+            return env.num.as_kind(kind, body(vals, env))
+
+        return converted
+
+    def unconverted(vals: list, env: _Env) -> list:
+        v = body(vals, env)
+        env.num.unconverted(ins)
         return v
 
-    run(0, len(instrs) - 1)
-    return vals[-1]
+    return unconverted
+
+
+def _body(ins: Instr) -> Step:  # noqa: PLR0911
+    """Return an instruction's Step before its conversion."""
+    ops, op, kind, width = ins.operands, ins.op, ins.type, ins.width
+
+    def cannot(vals: list, env: _Env) -> list:
+        msg = f"cannot evaluate {ins.name}"
+        raise FunctionError(msg)
+
+    if op == 0x00:
+        known: list = []
+
+        def const(vals: list, env: _Env) -> list:
+            if not known:
+                known.append(constant(ins))
+            return env.num.lift(known[0])
+
+        return const
+    if op == 0x01:
+
+        def builtin(vals: list, env: _Env) -> list:
+            if env.builtins is None:
+                return cannot(vals, env)
+            return env.num.lift(env.builtins[ops[0]])
+
+        return builtin
+    if op == 0x02:  # noqa: PLR2004
+        uids = ins.u32s()
+        return lambda _vals, env: env.num.lift(env.inputs[uids[0]])
+    if op == 0x04:  # noqa: PLR2004
+
+        def getvar(vals: list, env: _Env) -> list:
+            v = env.var.get(ops[0])
+            return env.num.lift([0.0] * width) if v is None else v
+
+        return getvar
+    if op == 0x07:  # noqa: PLR2004
+
+        def setvar(vals: list, env: _Env) -> list:
+            env.var[ops[1]] = v = vals[ops[0]]
+            return v
+
+        return setvar
+    if op == 0x09:  # noqa: PLR2004
+        return lambda vals, env: env.num.select(
+            vals[ops[0]][0], vals[ops[1]], vals[ops[2]]
+        )
+    if op == 0x0C:  # noqa: PLR2004
+
+        def sequence(vals: list, env: _Env) -> list:
+            if ops[1] != NO_VALUE:
+                return vals[ops[1]]
+            return env.num.dropped(ins, vals[ops[0]])
+
+        return sequence
+    if op in (0x0D, 0x0E, 0x0F):
+        return lambda vals, _env: [x for o in ops for x in vals[o]]
+    if op == 0x10:  # noqa: PLR2004
+
+        def swizzle(vals: list, env: _Env) -> list:
+            src, sel = vals[ops[0]], ops[1]
+            return [src[sel >> (2 * k) & 3] for k in range(width)]
+
+        return swizzle
+    if op == 0x11:  # noqa: PLR2004 (converted by _compile, by its type)
+        return lambda vals, _env: vals[ops[0]]
+    if op == 0x18:  # noqa: PLR2004
+
+        def dot(vals: list, env: _Env) -> list:
+            f = env.num.f32
+            acc = 0.0
+            for x, y in zip(vals[ops[0]], vals[ops[1]], strict=True):
+                acc = f(acc + f(x * y))
+            return [acc]
+
+        return dot
+    if op == 0x2D:  # noqa: PLR2004
+
+        def atan2(vals: list, env: _Env) -> list:
+            x, y = vals[ops[0]][:2]
+            return [env.num.atan2(y, x, kind)]
+
+        return atan2
+    if op == 0x2E:  # noqa: PLR2004
+
+        def cartesian(vals: list, env: _Env) -> list:
+            rho, theta = vals[ops[0]][0], vals[ops[1]][0]
+            num = env.num
+            return [num.f32(rho * num.cos(theta)), num.f32(rho * num.sin(theta))]
+
+        return cartesian
+    if op == 0x2F:  # noqa: PLR2004
+
+        def lerp(vals: list, env: _Env) -> list:
+            a, b = _spread(vals[ops[0]], vals[ops[1]])
+            t = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
+            f = env.num.f32
+            return [f(p + f(f(q - p) * s)) for p, q, s in zip(a, b, t, strict=True)]
+
+        return lerp
+    if op == 0x32:  # noqa: PLR2004
+
+        def rand(vals: list, env: _Env) -> list:
+            if env.rand is None:
+                return cannot(vals, env)
+            return [env.rand(vals[ops[0]][0])]
+
+        return rand
+    if op in (0x15, 0x16):
+
+        def divide(vals: list, env: _Env) -> list:
+            a, b = _spread(vals[ops[0]], vals[ops[1]])
+            fn = env.num.div if op == 0x15 else env.num.mod  # noqa: PLR2004
+            return [fn(p, q, kind) for p, q in zip(a, b, strict=True)]
+
+        return divide
+    if op in _BINARY:
+
+        def binary(vals: list, env: _Env) -> list:
+            a, b = _spread(vals[ops[0]], vals[ops[1]])
+            fn = env.num.binary(op, kind)
+            return [fn(p, q) for p, q in zip(a, b, strict=True)]
+
+        return binary
+    if op in _UNARY:
+
+        def unary(vals: list, env: _Env) -> list:
+            fn = env.num.unary(op, kind)
+            return [fn(p) for p in vals[ops[0]]]
+
+        return unary
+    return cannot
 
 
 # Lanes: one block evaluated for many inputs at once (an FX-Map's tree
@@ -667,7 +795,15 @@ class Lanes:
             r = self.f32(a - self.f32(bs * fl))
         return np.where(zero, 0.0, r)
 
-    def binary(  # noqa: PLR0911
+    def binary(self, op: int, kind: int) -> Callable[[Any, Any], np.ndarray]:
+        """Return _BINARY[op] over lanes."""
+        return lambda a, b: self.binary_lanes(op, a, b, kind)
+
+    def unary(self, op: int, kind: int) -> Callable[[Any], np.ndarray]:
+        """Return _UNARY[op] over lanes."""
+        return lambda a: self.unary_lanes(op, a, kind)
+
+    def binary_lanes(  # noqa: PLR0911
         self, op: int, a: np.ndarray, b: np.ndarray, kind: int
     ) -> np.ndarray:
         """Return _BINARY[op] of each lane."""
@@ -690,7 +826,7 @@ class Lanes:
             return np.where(b > a, b, a)
         return self.lanewise(kind, _BINARY[op], a, b)
 
-    def unary(self, op: int, a: np.ndarray, kind: int) -> np.ndarray:  # noqa: PLR0911
+    def unary_lanes(self, op: int, a: np.ndarray, kind: int) -> np.ndarray:  # noqa: PLR0911
         """Return _UNARY[op] of each lane."""
         if op == 0x17:  # noqa: PLR2004
             return -a
