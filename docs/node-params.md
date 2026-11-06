@@ -20,6 +20,10 @@ It was recovered from:
 - A survey of every node of these ops in 35 cooked archives (30 material
   archives and 5 community archives; cook versions 5, 6 and 9): 38,105
   nodes.
+- For section 7, renders with `sbsrender` (vk engine, 16 bits, 256 × 256
+  unless stated) of one-filter probe graphs, each with an absolute Pixel
+  Size, compared pixel by pixel. The engine's decompiled per-pixel
+  shaders were read too, as section 7 says.
 
 Each statement is tagged:
 
@@ -77,8 +81,8 @@ node state 2 by default, with a block computing, from `$sizelog2`
 Setting the node's Pixel Size to (2, 3), absolute or relative, multiplies
 that by the constant (2, 3) in the same block. A Pixel Size function
 appends its own instructions to the block. Pixel ratio 1 changed
-nothing. **[inferred]** State 0 means the vector (1, 1). How the engine
-uses the vector when rendering is not established (section 6).
+nothing. **[inferred]** State 0 means the vector (1, 1). Section 7 gives
+how the engine uses the vector when rendering.
 
 ### 1.2 The op's own parameters
 
@@ -259,12 +263,164 @@ f32 bit patterns: 7.25 is 0x40E80000, 1.25 is 0x3FA00000.
 - **State 3** of any parameter: never seen.
 - **Warp P bit 4**, **emboss F bit 0** and **directional warp F bit 0**:
   never set, in probes or survey. Their meaning is unknown.
-- **The pixel-size vector's effect on rendering.** Its value is
-  established (section 1.1), not how the engine uses it. Every probe
-  image was square, where the default is (1, 1). **[inferred]** For a
-  square image with Pixel Size left at its default, ignoring it changes
-  nothing.
+- **The pixel-size vector's effect on rendering**: now section 7. What
+  is still open is listed in 7.4.
 - **The distance's colour switch**: not found in the node's words.
 - **Parameter defaults** (state 0) of each op: out of scope here.
 - **Other ops' P.** HSL, levels and others use P with their own layouts;
   this document covers only the ops above.
+
+## 7. How the pixel-size vector renders
+
+### 7.1 The rule
+
+Write `v = (v.x, v.y)` for the node's pixel-size vector: the inline pair
+(state 1), its block's value (state 2, evaluated once per node like any
+parameter function), or (1, 1) (state 0, [inferred]).
+
+**[measured]** Every one of these filters has a geometry with a part
+along x and a part along y: a sample offset, a blur length, a slope, a
+reach. The engine multiplies the x part by `v.x` and the y part by
+`v.y`. Nothing else changes. The vector is not a resampling of the
+image, and it does not scale the filter's output.
+
+Two consequences, both measured pixel-exact:
+
+- **Isotropic vector.** With `v = (p, p)`, the node renders exactly as
+  the same node with `v = (1, 1)` and its intensity (or distance) times
+  `p`. This held for every op at `p` = 2 and 0.5, and for all but the
+  blur at 0.0444 (intensity 38 against 1.6872; the blur was tried at 4
+  instead): 0 levels of difference. Intensity 3 at `p` = 0.3 against
+  intensity 0.9 differed by up to 64 levels at 4 pixels (warp), 1 level
+  (emboss, sharpen) and 0 (directional motion blur, directional warp,
+  normal, distance; the blur was not tried). So the product is taken in
+  float32: `f32(3 × f32(0.3))` is not `f32(0.9)`.
+- **Axis independence.** With `v = (2, 1)`, an image that varies only
+  along x renders as with `v = (2, 2)`, and one that varies only along y
+  renders as with `v = (1, 1)`. The same with x and y exchanged. This held
+  pixel-exact for warp, emboss, blur, directional motion blur at 0 and
+  0.25 turns, directional warp at 0 and 0.25 turns, sharpen, and normal.
+
+The engine's per-pixel shaders (decompiled from `substance_vk_blend.dll`)
+read only uniforms the engine computed before the pass: a scale, a
+step, a shear. None reads the vector or the intensity on its own. So
+the vector is folded into the per-axis geometry before the pass runs,
+and the shaders alone do not show the rule. The rule above comes from
+renders.
+
+### 7.2 Per op
+
+`k` is the op's intensity (distance: its distance `D`). `N` is the
+image's size in texels along the axis in question. The formulas with
+`v = (1, 1)` are the ones sbsar2ptex already renders. Each gains the
+factors shown.
+
+| op | with the pixel-size vector | measured |
+|---|---|---|
+| 14 / 15 warp | the sample offset, per axis: `o.x = k v.x (N_x / 256) Δh_x`, `o.y = k v.y (N_y / 256) Δh_y`, where `Δh` is the backward difference of the gradient's levels over one texel along that axis (UV units) | isotropic exact; axes exact; non-square (7.3) |
+| 16 / 17 emboss | the slope, per axis, before its dot with the light direction: `g = (v.x Δh_x, v.y Δh_y)` | isotropic within 1 level; x axis exact; `v = (2, 1)` is the sum of the axis parts within 1 level |
+| 20 / 21 blur | the x pass is a directional motion blur at 0 turns of intensity `k v.x`; the y pass is one at 0.25 turns of intensity `k v.y` | isotropic exact; impulse responses per axis exact |
+| 22 / 23 directional motion blur | at 0 or 0.5 turns, intensity `k v.x`; at 0.25 or 0.75 turns, `k v.y`. Isotropic: `k p` (measured at 0.1 turns). For an unequal vector at other angles, see 7.4 | as stated |
+| 24 / 25 directional warp | the offset: `(k / 256) m (v.x C, v.y S)`, with `m` the intensity image at the pixel and `(C, S)` the direction | isotropic exact; axes exact; at 0.1 turns with `v = (2, 1)`, within 5 levels of `v = (1, 1)` with the vector's own length and angle (7.5, test R8) |
+| 26 / 27 sharpen | `out = c + k v.x (2c - left - right) + k v.y (2c - up - down)`; with `v = (1, 1)` this is `c + k (4c - the four neighbours)` | isotropic exact; axes exact; on noise, `out(2, 1) = out(1, 1) + out(2, 2) - out(1, 2)` at all 4,735 unclamped pixels, 0 levels off |
+| 37 normal | the slopes: `normalize(-k v.x dx, -k v.y dy, 1)` | isotropic exact; axes exact |
+| 42 / 43 distance | the reach along each axis is `D v.x` and `D v.y` (in 256ths of the image). The falloff is `1 - |(dx / v.x, dy / v.y)| / (D N / 256)`, with `(dx, dy)` the texel offset to the mask pixel | isotropic exact. With `v = (2, 1)`, a single mask dot's field at `(2j, i)` equals the `v = (1, 1)` field at `(j, i)` within 4 levels, for `|i|, |j| <= 10` |
+
+In practice:
+
+- **fractal_sum_base**: blur, intensity 1, pixel size `2^k` on both axes:
+  it renders as a blur of intensity `2^k`.
+- **Bathroom_Marble n639**: warp, intensity 38, pixel size (0.0444,
+  0.0444): it renders as a warp of intensity 1.6872. A probe with exactly
+  these values matched pixel for pixel.
+
+A translator that keeps the vector live multiplies each axis's term by
+the vector's component, as the emboss translation already does. One
+whose knob is a single intensity can use `k p` when the vector is `(p,
+p)`. With an unequal vector it must split the axes, as in the table.
+
+### 7.3 Non-square images
+
+**[measured]** The default vector at 256 × 128 (width × height) is (0.5, 1)
+for these ops and (0.25, 1) for the warp (section 1.1). In both shapes
+(256 × 128 and 128 × 256), with Pixel Size left at its default:
+
+- A blur of intensity 2 spread a single dot over exactly 3 texels along
+  each axis (weights 1/4, 1/2, 1/4), as intensity 1 does on a 256 × 256
+  image. That is `k v_a N_a / 256` = 1 texel on each axis.
+- A warp of intensity 0.5 moved the sample by `F k Δh` in UV, with `F`
+  = 0.25 along the 256-texel axis and 0.5 along the 128-texel axis. That
+  is `v_a N_a / 256`, with the warp's vector (0.25, 1) and `N_a` that
+  axis's size: (0.25 × 256 / 256, 1 × 128 / 256). The fit was over all
+  pixels with a non-zero slope (median; the 10th to 90th percentiles
+  are within 0.5% of it).
+
+So in every formula of 7.2, `N` is the size of the axis the term is on.
+Sharpen, normal, emboss, directional blur and warp, and distance were
+not rendered at non-square sizes. **[inferred]** They follow the same
+rule.
+
+### 7.4 Unknown
+
+- **Directional motion blur with an unequal vector at an oblique
+  angle.** At 0.1 turns, intensity 16, `v = (2, 1)`: the blur's line is
+  close to that of the vector `(k v.x cos, k v.y sin)` (`v = (1, 1)`,
+  intensity 27.543829, angle 0.0554573 turns). The line's angle was 19.70
+  against 19.98 degrees, with the same extent (x from -26 to 26 texels,
+  y from -10 to 10). It is not pixel-exact: the line's cross-section is
+  wider (0.58 against 0.45 texels standard deviation), and a dot's
+  response differed by up to 553 levels. The engine's sheared-frame
+  geometry for this case was not recovered. An implementation may use
+  the vector form and report it as approximate.
+- **Distance: which mask pixel is nearest** under an unequal vector
+  (one dot cannot tell). **[inferred]** The pixel nearest in the scaled
+  metric `|(dx / v.x, dy / v.y)|`.
+- **State 0** of the vector: **[inferred]** (1, 1). No probe could cook
+  it.
+- Non-square sizes for the ops 7.3 lists as not rendered.
+
+### 7.5 Acceptance tests
+
+Each test is a pair of one-filter probe graphs, rendered by sbsrender
+(16 bits, 256 × 256, same inputs), and their translations. The two
+renders must match as stated, and so must the two translations' renders.
+"v" is the node's Pixel Size, absolute, so it is the vector itself on a
+square image. A unit test that does not render can instead check that
+the translation's effective per-axis values equal those given.
+
+- **R1. Blur, isotropic.** Op 20, intensity 1, `v = (2, 2)` ≡ intensity
+  2, `v = (1, 1)`: 0 levels. The translation's x and y passes both have
+  intensity 2.
+- **R2. Blur, per axis.** Intensity 1, `v = (2, 1)` on one bright texel:
+  along x the weights of intensity 2's kernel, along y those of
+  intensity 1's (`k v.x` = 2 on the x pass, `k v.y` = 1 on the y pass).
+- **R3. Warp, the Bathroom_Marble case.** Op 14, intensity 38, `v =
+  (0.0444, 0.0444)` ≡ intensity 1.6872, `v = (1, 1)`: 0 levels.
+- **R4. Warp, per axis.** Intensity 1, a gradient varying only along x:
+  `v = (2, 1)` ≡ `v = (2, 2)`. A gradient varying only along y: `v = (2,
+  1)` ≡ `v = (1, 1)`. 0 levels.
+- **R5. Emboss.** Intensity 1 at `v = (2, 2)` ≡ intensity 2 at `v = (1,
+  1)` (light angle 0.1): 0 levels.
+- **R6. Directional motion blur.** Intensity 4: at 0 turns, `v = (2, 1)`
+  ≡ `v = (2, 2)`; at 0.25 turns, `v = (2, 1)` ≡ `v = (1, 1)`. 0 levels.
+- **R7. Directional motion blur, isotropic.** Intensity 3 at `v = (0.3,
+  0.3)` ≡ intensity 0.9 at `v = (1, 1)`, angle 0.1: 0 levels.
+- **R8. Directional warp, oblique.** Intensity 4, angle 0.1, `v = (2, 1)`
+  against intensity 6.885957, angle 0.0554573, `v = (1, 1)`: at most 5
+  levels, at fewer than 0.1% of pixels.
+- **R9. Sharpen.** On noise, intensity 1:
+  `out(2, 1) = out(1, 1) + out(2, 2) - out(1, 2)`, exactly, wherever none
+  of the four is clamped.
+- **R10. Normal.** Intensity 1, a height varying only along x: `v = (2,
+  1)` ≡ `v = (2, 2)`. Along y: ≡ `v = (1, 1)`. 0 levels.
+- **R11. Distance.** One mask texel per region: distance 1 at `v = (2,
+  2)` ≡ distance 2 at `v = (1, 1)`, 0 levels. Distance 8, the mask texel
+  at (64, 64): with `v = (2, 1)` the field at offset (2j, i) is within 4
+  levels of the `v = (1, 1)` field at (j, i), for `|i|, |j| <= 10`.
+- **R12. A pixel-size function** [inferred, not rendered]. Any of the
+  above with the vector given as a function (state 2) of the same value
+  renders as the constant. Example: the cooker's default block (section
+  1.1) times (2, 2), on a square image, is (2, 2).
+- **R13. Non-square blur.** Intensity 2, Pixel Size at its default, at
+  256 × 128 and at 128 × 256: a single bright texel spreads over 3 texels
+  along each axis, weights 1/4, 1/2, 1/4.
