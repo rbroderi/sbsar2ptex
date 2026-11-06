@@ -309,8 +309,14 @@ def order(instances: Sequence) -> list[int]:
     max, then the tree's own order.
     """
     n = len(instances)
-    group = np.fromiter((s.pattern for s in instances), dtype=np.int64, count=n)
+    pattern = np.fromiter((s.pattern for s in instances), dtype=np.int64, count=n)
     blend = np.fromiter((bool(s.blend_max) for s in instances), dtype=bool, count=n)
+    return order_of(pattern, blend).tolist()
+
+
+def order_of(pattern: np.ndarray, blend: np.ndarray) -> np.ndarray:
+    """Return ``order`` of instances given as their patterns and blendings."""
+    group = np.array(pattern, dtype=np.int64)
     images = group < 0
     if images.any():
         index = (-1 - group[images]) % fxmap.IMAGE_STRIDE  # (image_parts' input)
@@ -319,7 +325,7 @@ def order(instances: Sequence) -> list[int]:
         first[np.argsort(at)] = np.arange(len(inputs))
         group[images] = 1000 + len(inputs) - first[np.searchsorted(inputs, index)]
     # (a stable sort: ties stay in the tree's order)
-    return np.lexsort((blend, group)).tolist()
+    return np.lexsort((np.asarray(blend, dtype=bool), group))
 
 
 def box(s: object) -> tuple[float, float]:

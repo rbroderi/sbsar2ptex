@@ -24,6 +24,8 @@ the index list (splat numbers, as uints).
 import contextlib
 import math
 from collections.abc import Callable
+from collections.abc import Iterator
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -88,7 +90,7 @@ def splats(
     *,
     color: bool,
     size: int,
-) -> list[Splat]:
+) -> Sequence[Splat]:
     """Return the patterns the FX-Map ``node`` draws, in drawing order.
 
     In pattern space (the render region maps it to the image). ``inputs``
@@ -130,7 +132,7 @@ def _walk(
     color: bool,
     size: int,
     defer: bool,
-) -> list[Splat]:
+) -> Sequence[Splat]:
     """Return ``splats``, ``_deferrable`` subtrees left for ``_lanes`` if ``defer``."""
     n = float(1 << size)
     weights = depth_weights(settings.hurst, fxmap.max_depth(tree))
@@ -267,23 +269,28 @@ def _walk(
             enter(t.if_true if value else t.if_false, e, pos, cell, depth, number)
 
     enter(tree, root & UINT32_MASK, (0.5, 0.5), 1.0, 0, 0.0)
-    if defer:
-        drawn = _lanes(
-            [d for d in out if isinstance(d, _Deferred)],
-            block_at,
-            inputs,
-            weights,
-            settings,
-            color=color,
-            size=size,
-        )
-        out = [
-            s for d in out for s in (drawn[id(d)] if isinstance(d, _Deferred) else [d])
-        ]
-        if len(out) > MAX_SPLATS:
-            raise TooBig
-    done = [s for s in out if isinstance(s, Splat)]
-    return [done[k] for k in fxdraw.order(done)]
+    if not defer:
+        return [out[k] for k in fxdraw.order(out)]
+    at = [k for k, d in enumerate(out) if isinstance(d, _Deferred)]
+    later = [out[k] for k in at]
+    kw = {"color": color, "size": size}
+    entry, cols, values = _lanes(later, block_at, inputs, weights, settings, **kw)
+    walked = [k for k, s in enumerate(out) if isinstance(s, Splat)]
+    mine = [out[k] for k in walked]
+    # the walk's own splats and the deferred ones, by where the walk met them
+    # (a deferred entry's splats in their order, as the sort is stable)
+    met = np.array(at, dtype=np.int64)[entry]
+    where = np.concatenate([np.array(walked, dtype=np.int64), met])
+    order = np.argsort(where, kind="stable")
+    if len(order) > MAX_SPLATS:
+        raise TooBig
+    own = _columns(mine)
+    width = 4 if color else 1
+    rows = np.array([s.value for s in mine], dtype=np.float64).reshape(-1, width)
+    cols = {k: np.concatenate([own[k], v])[order] for k, v in cols.items()}
+    values = np.concatenate([rows, values])[order]
+    drawing = fxdraw.order_of(cols["pattern"], cols["blend_max"])
+    return SplatTable({k: v[drawing] for k, v in cols.items()}, values[drawing])
 
 
 def _reads_sets(block: Any) -> tuple[set[int], set[int]]:
@@ -470,8 +477,8 @@ def _lanes(
     *,
     color: bool,
     size: int,
-) -> dict[int, list[Splat]]:
-    """Return the deferred subtrees' splats, each's in the walk's order, by id.
+) -> tuple[np.ndarray, dict[str, np.ndarray], np.ndarray]:
+    """Return the deferred subtrees' splats in the walk's order (_gather's).
 
     Entries into one node at one depth run together, as lanes: each node's
     functions run once for all its lanes (function.evaluate_lanes,
@@ -654,20 +661,20 @@ def _lanes(
                 _stores(group),
             )
             enter(group[0].tree, front, group[0].depth)
-    out: dict[int, list[Splat]] = {id(d): [] for d in entries}
-    for k, s in _gather(drawn):
-        out[id(entries[k])].append(s)
-    return out
+    return _gather(drawn, 4 if color else 1)
 
 
-def _gather(drawn: list[dict[str, Any]]) -> list[tuple[int, Splat]]:
-    """Return _lanes' batches as (deferred entry, splat), in the walk's order.
+def _gather(
+    drawn: list[dict[str, Any]], width: int
+) -> tuple[np.ndarray, dict[str, np.ndarray], np.ndarray]:
+    """Return _lanes' batches in the walk's order: (deferred entry, columns, values).
 
     By path: the walk draws a node's own splat before its children's, so a
-    shorter path is padded with -1s, to sort first.
+    shorter path is padded with -1s, to sort first. Columns as _columns',
+    values a row of ``width`` a splat.
     """
     if not drawn:
-        return []
+        return np.zeros(0, dtype=np.int64), _columns([]), np.zeros((0, width))
     deepest = max(len(b["path"]) for b in drawn)
     columns = [
         np.concatenate(
@@ -679,23 +686,59 @@ def _gather(drawn: list[dict[str, Any]]) -> list[tuple[int, Splat]]:
         for level in range(deepest)
     ]
     order = np.lexsort(columns[::-1])
-
-    def joined(key: str) -> list:
-        return np.concatenate([b[key] for b in drawn])[order].tolist()
-
+    kinds = {"pattern": np.int64, "blend_max": bool}
+    cols = {
+        key: np.concatenate([np.asarray(b[key], dtype=kinds.get(key, np.float64))
+                             for b in drawn])[order]
+        for key in ("x", "y", "hx", "hy", "angle", "suppl", "pattern")
+    }  # fmt: skip
     blend = np.concatenate([np.full(len(b["x"]), b["blend_max"]) for b in drawn])
-    width = len(drawn[0]["value"])
+    cols["blend_max"] = blend[order]
     values = np.stack(
         [np.concatenate([b["value"][c] for b in drawn])[order] for c in range(width)],
         axis=1,
-    ).tolist()
-    fields = zip(
-        joined("x"), joined("y"), joined("hx"), joined("hy"), joined("angle"),
-        joined("pattern"), joined("suppl"), blend[order].tolist(), values,
-        strict=True,
-    )  # fmt: skip
-    entries = columns[0][order].tolist()
-    return list(zip(entries, (Splat(*f) for f in fields), strict=True))
+    )
+    return columns[0][order], cols, values
+
+
+class SplatTable(Sequence):
+    """Splats kept as columns of arrays, made into Splat objects as they are read.
+
+    What ``splats`` returns for a map it drew as lanes: the same splats,
+    field for field (Python floats, ints, bools), without making hundreds
+    of thousands of objects that packing and raster read as arrays anyway.
+    """
+
+    def __init__(self, cols: dict[str, np.ndarray], values: np.ndarray) -> None:
+        """Splats from _columns-like columns and their values' rows."""
+        self.cols = cols
+        self.values = values
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __getitem__(self, k: Any) -> Any:
+        if isinstance(k, slice):
+            return list(self)[k]
+        c = self.cols
+        return Splat(
+            float(c["x"][k]), float(c["y"][k]), float(c["hx"][k]), float(c["hy"][k]),
+            float(c["angle"][k]), int(c["pattern"][k]), float(c["suppl"][k]),
+            bool(c["blend_max"][k]), self.values[k].tolist(),
+        )  # fmt: skip
+
+    def __iter__(self) -> Iterator[Splat]:
+        c = {k: v.tolist() for k, v in self.cols.items()}
+        fields = zip(
+            c["x"], c["y"], c["hx"], c["hy"], c["angle"], c["pattern"], c["suppl"],
+            c["blend_max"], self.values.tolist(), strict=True,
+        )  # fmt: skip
+        return (Splat(*f) for f in fields)
+
+
+def has_images(spl: Sequence[Splat]) -> bool:
+    """Whether any splat draws an image (not a built-in pattern)."""
+    return bool((_columns(spl)["pattern"] < 0).any())
 
 
 def depth_weights(hurst: float, deepest: int) -> list[float]:
@@ -857,8 +900,10 @@ Region = tuple[float, float, float, float]
 """A render or tiling region: x0 x1 y0 y1 of pattern space."""
 
 
-def _columns(spl: list[Splat]) -> dict[str, np.ndarray]:
+def _columns(spl: Sequence[Splat]) -> dict[str, np.ndarray]:
     """Return the splats' scalar fields as arrays (float64; pattern int64)."""
+    if isinstance(spl, SplatTable):
+        return spl.cols
     f = np.float64
     return {
         "x": np.array([s.x for s in spl], dtype=f),
@@ -956,9 +1001,21 @@ def _copy_boxes(
     return k, boxes
 
 
-def _records(spl: list[Splat], rec: int) -> np.ndarray:
+def _value_rows(spl: Sequence[Splat]) -> np.ndarray | None:
+    """Return the splats' values as rows (float64), None if of several widths."""
+    if isinstance(spl, SplatTable):
+        return spl.values
+    if len({len(s.value) for s in spl}) > 1:
+        return None
+    if not spl:
+        return np.zeros((0, 0))
+    return np.array([s.value for s in spl], dtype=np.float64)
+
+
+def _records(spl: Sequence[Splat], rec: int) -> np.ndarray:
     """Return the splat records' words (uint32s), RECORD[color] floats a splat."""
-    if any(len(s.value) != rec - 8 for s in spl):
+    rows = _value_rows(spl)
+    if rows is None or (spl and rows.shape[1] != rec - 8):
         floats: list[float] = []
         for s in spl:
             floats += [s.x, s.y, s.hx, s.hy, s.angle, float(s.pattern), s.suppl]
@@ -973,12 +1030,12 @@ def _records(spl: list[Splat], rec: int) -> np.ndarray:
         table[:, j] = cols[key]
     table[:, 7] = cols["blend_max"]
     if spl:
-        table[:, 8:] = np.array([s.value for s in spl], dtype=np.float64)
+        table[:, 8:] = rows
     return table.astype("<f4").view("<u4").ravel()
 
 
 def pack(
-    spl: list[Splat],
+    spl: Sequence[Splat],
     *,
     color: bool,
     tile: tuple[bool, bool],
@@ -1036,7 +1093,7 @@ _TAU = np.float32(6.2831855)
 
 
 def raster(
-    spl: list[Splat],
+    spl: Sequence[Splat],
     tile: tuple[bool, bool],
     tiling: Region = (0.0, 1.0, 0.0, 1.0),
     render: Region = (0.0, 1.0, 0.0, 1.0),
@@ -1055,8 +1112,9 @@ def raster(
     side Substance takes it is not known. Float32s, a flat array.
     """
     f = np.float32
-    drawn = [s for s in spl if not (s.hx == 0 or s.hy == 0)]
-    cols = _columns(drawn)
+    every = _columns(spl)
+    drawn = ~((every["hx"] == 0) | (every["hy"] == 0))
+    cols = {k: v[drawn] for k, v in every.items()}
     w, h = (2 * cols["hx"]).astype(f), (2 * cols["hy"]).astype(f)
     turns = cols["angle"].astype(f) / _TAU
     angle = turns * _TAU
@@ -1067,7 +1125,11 @@ def raster(
     if copies is None:
         return None
     k, x, y = copies
-    v = np.array([s.value[0] for s in drawn], dtype=np.float64).astype(f)
+    if isinstance(spl, SplatTable):
+        first = spl.values[:, 0]
+    else:
+        first = np.array([s.value[0] for s in spl], dtype=np.float64)
+    v = first[drawn].astype(f)
     out = np.zeros((len(k), RASTER_FLOATS), dtype=f)
     out[:, 0] = out[:, 1] = out[:, 2] = v[k]
     out[:, 3] = 1.0
@@ -1147,7 +1209,7 @@ def write_png(path: Path, packed: Packed) -> None:
 
 
 def pixel_work(
-    spl: list[Splat],
+    spl: Sequence[Splat],
     render: Region = (0.0, 1.0, 0.0, 1.0),
     tiling: Region = (0.0, 1.0, 0.0, 1.0),
     tile: tuple[bool, bool] = (True, True),

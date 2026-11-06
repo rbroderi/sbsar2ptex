@@ -3613,7 +3613,7 @@ def _fx_raster(
         if fxsplat.evaluable(e):
             return None
         raise
-    if any(s.pattern < 0 for s in spl):
+    if fxsplat.has_images(spl):
         return None
     return fxsplat.raster(
         spl, (st.tile_x, st.tile_y), tuple(layout.tiling), tuple(layout.render)

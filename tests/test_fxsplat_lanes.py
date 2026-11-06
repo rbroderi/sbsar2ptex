@@ -126,8 +126,21 @@ def test_a_stateless_tree_draws_as_lanes() -> None:
     st = fxmap.Settings(seed=1234, hurst=0.7, opacity=0.8)
     node = asm.node()
     assert id(root) in fxsplat._deferrable(node, root, st)
-    assert len(splats_both(node, root, st)) > 60
+    gray = splats_both(node, root, st)
+    assert len(gray) > 60
     assert splats_both(node, root, st, color=True)
+    # drawn as lanes, the splats stay arrays: packing and raster read them so
+    assert isinstance(gray, fxsplat.SplatTable)
+    assert not fxsplat.has_images(gray)
+    assert bits(gray[3:5]) == bits([gray[3], gray[4]]) == bits(list(gray)[3:5])
+    want = fxsplat_scalar.pack(list(gray), color=False, tile=(True, True))
+    got = fxsplat.pack(gray, color=False, tile=(True, True))
+    assert got.image.tobytes() == want.image.tobytes()
+    want_raster = fxsplat_scalar.raster(list(gray), (True, True))
+    assert want_raster is not None
+    got_raster = fxsplat.raster(gray, (True, True))
+    expected = struct.pack(f"<{len(want_raster)}f", *want_raster)
+    assert fxsplat.float_bytes(got_raster) == expected
 
 
 def test_a_stateful_walk_defers_its_stateless_subtrees() -> None:
