@@ -53,7 +53,8 @@ def translated(name: str):
 
 def test_outputsize_is_the_render_size() -> None:
     # A function reading $outputsize sees the size the graph renders at, not
-    # the archive's default for it (8 here).
+    # the archive's default for it (8 here): the material's, live, not a
+    # knob (the graph is built at 10, and so is the node).
     files = read_archive(DATA / "pp_reads_outputsize.sbsar")
     asm = Asm(member(files, ".sbsasm"))
     inputs = graph_inputs(asm, member(files, ".xml").decode("utf-8"))
@@ -68,7 +69,8 @@ def test_outputsize_is_the_render_size() -> None:
         asm.nodes(), {"output": asm.output_nodes[0][1]}, images, size=10, inputs=inputs
     )
     params = {k: v for n in nodes for k, v in n.get("parameters", {}).items()}
-    assert params["p_outputsize_x"] == params["p_outputsize_y"] == 10
+    assert "p_outputsize_x" not in params
+    assert "ivec2(int(round(log2($pass_size.x))))" in json.dumps(nodes)
 
 
 def test_uniform_color() -> None:
@@ -410,6 +412,37 @@ def test_a_node_without_a_size_function_has_a_fixed_size() -> None:
     assert translate._output_size(image, 10) == 10
 
 
+def test_buffers_follow_the_materials_size_unless_fixed(monkeypatch) -> None:
+    # A fixed size stays at any graph size (absolute); the graph's size, or
+    # a size function's of it, follows the material's (size_mode 1, by the
+    # size less the graph's build size).
+    word = 0x0318BB04
+    n4677 = Node(index=0, start=0, end=4, op=4, flags=word >> 16, words=[word])
+    wide = Node(index=0, start=0, end=4, op=4, flags=0x318, words=[0x03184804])
+    monkeypatch.setattr(translate, "_CTX", translate._Context(size=10, graph_size=10))
+    assert translate.absolute_size(n4677, 10)
+    assert not translate.absolute_size(wide, 10)
+    assert translate.absolute_size(n4677, translate.MAX_SIZE)  # (one smaller)
+    rel = translate.buffer("b", 8)["parameters"]
+    assert (rel["size"], rel["size_mode"], rel["size_offset"]) == (8, 1, -2.0)
+    fixed = translate.buffer("b", 11, absolute=True)["parameters"]
+    assert (fixed["size"], fixed["size_mode"], fixed["size_offset"]) == (11, 0, 0.0)
+    translate._CTX.absolute = True  # the node being translated's, by default
+    assert translate.buffer("b", 11)["parameters"]["size_mode"] == 0
+
+
+def test_size_literals_are_live_but_an_fxmaps(monkeypatch) -> None:
+    # A node's width is its pass's ($pass_size: each node renders at its own
+    # size), another size's scaled from it; in an FX-Map, the build size's.
+    monkeypatch.setattr(translate, "_CTX", translate._Context(size=9, graph_size=10))
+    assert translate.px_glsl() == "$pass_size.x"
+    assert translate.px_glsl(7) == "($pass_size.x * 0.25)"
+    assert translate.px_int_glsl() == "int($pass_size.x)"
+    translate._CTX.fixed = True
+    assert translate.px_glsl() == "512.0"
+    assert translate.px_glsl(7) == "128.0"
+
+
 def test_a_functions_size_is_its_nodes() -> None:
     # $size in a node's functions is the node's own size: Biomech's n4677
     # (2048 in a 1024 graph, its words) shifts by 0.5 / $size, half of its
@@ -424,8 +457,13 @@ def test_a_functions_size_is_its_nodes() -> None:
     image = Node(index=0, start=0, end=4, op=32, uid=500)
     mm, _, _ = translate_graph([image, n4677], {"out": 1}, {500: "a.png"}, size=10)
     code = json.dumps(mm)
-    assert "vec2(2048.0)" in code
+    # live: its pass's, a buffer its own fixed size (absolute: 2048 at any
+    # graph size)
+    assert "vec2($pass_size.x)" in code
     assert "vec2(1024.0)" not in code
+    (own,) = [n for n in mm if n["name"] == "n1_size"]
+    assert own["parameters"]["size"] == 11
+    assert own["parameters"]["size_mode"] == 0
 
 
 def test_a_gradient_maps_size_function_follows_its_keys() -> None:
@@ -449,8 +487,10 @@ def test_a_gradient_maps_size_function_follows_its_keys() -> None:
     mm, _, _ = translate_graph(
         [image, n3904], {"out": 1}, {500: "a.png"}, size=10, inputs={words[12]: size}
     )
-    buffers = {n["name"]: n["parameters"]["size"] for n in mm if n["type"] == "buffer"}
-    assert buffers["n1_size"] == 5
+    buffers = {n["name"]: n["parameters"] for n in mm if n["type"] == "buffer"}
+    assert buffers["n1_size"]["size"] == 5
+    # its function gives 32 pixels at any graph size (9, 10, 11): absolute
+    assert buffers["n1_size"]["size_mode"] == 0
 
 
 def test_transformation_shrinking_reads_a_mip_level() -> None:
@@ -472,7 +512,7 @@ def test_transformation_shrinking_reads_a_mip_level() -> None:
     by_type = {n["type"]: n for n in made.nodes}
     assert set(by_type) == {"buffer", "shader"}
     code = by_type["shader"]["shader_model"]["instance"]
-    assert "int nin = int(float(256) * sc + 0.5);" in code
+    assert "int nin = int(float($pass_size.x) * sc + 0.5);" in code
     assert "int ml = nin >> L;" in code
     assert "tmlvin_$(name)(x, 0)" in code
     assert "$m11" in code
@@ -654,10 +694,16 @@ def test_a_samples_filtering_0_is_the_nearest_texel(monkeypatch) -> None:
     # nearest texel, 1 bilinear (the other way round before: 1.16% each)
     monkeypatch.setattr(translate, "_CTX", translate._Context(size=11))
     translate._CTX.sampled = ["input"]
+    # (the node's size, live: its pass's)
+    assert translate._sample("col", 0, "p", 0) == (
+        "$input((floor(fract(p) * $pass_size.x) + 0.5) / $pass_size.x)"
+    )
+    assert translate._sample("col", 0, "p", 1) == "$input(fract(p))"
+    # in an FX-Map, the build size's (its records render elsewhere)
+    translate._CTX.fixed = True
     assert translate._sample("col", 0, "p", 0) == (
         "$input((floor(fract(p) * 2048.0) + 0.5) / 2048.0)"
     )
-    assert translate._sample("col", 0, "p", 1) == "$input(fract(p))"
 
 
 def test_8_bit_node_stores_are_the_gpus(monkeypatch) -> None:

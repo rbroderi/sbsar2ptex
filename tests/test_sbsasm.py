@@ -14,8 +14,11 @@ from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import NO_NODE
+from sbsar2ptex.sbsasm import UNWIRED
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
+from sbsar2ptex.sbsasm import field_count
+from sbsar2ptex.sbsasm import pp_inputs
 from sbsar2ptex.sbsasm import reachable
 from sbsar2ptex.translate import word_params
 
@@ -112,7 +115,9 @@ def test_warp_layouts(
 ) -> None:
     # docs/warp-layout.md section 4, the node count 100.
     warp = warp_file(flags, rest, version=version).nodes()[-1]
-    assert warp.inputs == {"input": 7, "gradient": gradient}
+    # an unwired gradient (NO_NODE) is no input at all (Asm._node)
+    wired = {} if gradient == NO_NODE else {"gradient": gradient}
+    assert warp.inputs == {"input": 7, **wired}
     assert bool(warp.code) == bool(flags & 1)
     assert word_params(warp, [("intensity", 5, 1.0)], {}) == {"intensity": intensity}
 
@@ -131,6 +136,35 @@ def test_a_warp_without_code_in_a_file() -> None:
     assert warp.inputs == {"input": 0, "gradient": 1}
     assert warp.code == []
     assert warp.inline[0] == HALF
+
+
+def test_pixel_processor_input_count_is_16_bits() -> None:
+    # Version 9 cooks (mosaic.sbsar's n5) set 0x20000 above a pixel
+    # processor's input count: one input, node 4, then its code offsets.
+    rest = [0x20001, 4, 0x3F48, 0x3C4C, 0x3C40]
+
+    def is_offset(w: int) -> bool:
+        return w > 0x1000
+
+    assert pp_inputs(rest[0]) == 1
+    assert field_count(40, rest, is_offset) == 2
+    assert field_count(41, [0x20000, 0x2BD8], is_offset) == 1
+    assert field_count(40, [3, 1, 2, 3], is_offset) == 4  # (older cooks)
+
+
+def test_an_unwired_input_is_no_input() -> None:
+    # mosaic.sbsar's pixel processors: an input of node 0xFFFFFFFF
+    data = bytearray(0x84)
+    data[:4] = b"SBAM"
+    struct.pack_into("<HHI", data, 0x6C, 1, 0, 0x1234)
+    struct.pack_into("<4I", data, 0x74, 2, 0x60 - BASE, 0x64 - BASE, 0)
+    # node 0 at 0x40: a uniform (op 12, no inputs); node 1 at 0x48: a pixel
+    # processor of two inputs, node 0 and none
+    struct.pack_into("<I", data, 0x40, 12)
+    struct.pack_into("<4I", data, 0x48, 40, 2, 0, UNWIRED)
+    struct.pack_into("<2I", data, 0x60, 0x40 - BASE, 0x48 - BASE)
+    nodes = Asm(bytes(data)).nodes()
+    assert nodes[1].inputs == {"input": 0}
 
 
 def test_raw_image() -> None:

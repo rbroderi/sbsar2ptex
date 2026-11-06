@@ -102,6 +102,16 @@ class _Context:
     size: int = 11
     """The output size (log2) of the node being translated: its functions'
     $size, its samples' grid; the graph's before the first."""
+    graph_size: int = 11
+    """The graph's output size (log2) the translation is built at: buffers
+    are sized relative to the material's (buffer), so the graph renders at
+    whatever size the material is set to. Also a Value Processor's $size."""
+    absolute: bool = False
+    """Whether the node being translated has an absolute size (a fixed
+    size, not relative to the graph's: _output_size): its buffers keep it."""
+    fixed: bool = False
+    """Whether size-dependent values are the build size's literals, not
+    live (px_glsl): while translating an FX-Map (FIXED_OPS)."""
     inputs: dict[int, GraphInput] = field(default_factory=dict)
     helpers: list[str] = field(default_factory=list)
     """GLSL helper functions for the next shader node made."""
@@ -141,13 +151,40 @@ class _Context:
     slot_alias: dict[int, int] | None = None
     """While a library node's template is translated: its slots' graph slots
     (slots.template_slots); its other slots cannot be read."""
-    graph_size: int = 11
-    """The graph's output size (log2): a Value Processor's $size."""
     reader: int | None = None
     """The node (index) being translated: it reads only earlier slots."""
 
 
 _CTX = _Context()
+
+FIXED_OPS = (8, 9)
+"""Ops whose size-dependent values stay the build size's (_Context.fixed):
+FX-Maps, whose records and atlases render into buffers of their own sizes."""
+LIVE_WIDTH = "$pass_size.x"
+"""GLSL for the width in pixels of the texture being rendered (Material
+Maker's $pass_size): a node's own size, as each node renders in a pass of
+its size (translate_graph buffers it so). Size-dependent values are written
+in terms of it, so the graph follows the material's size live."""
+
+
+def px_glsl(size: int | None = None) -> str:
+    """Return GLSL for the width in pixels of an image ``size`` (log2) in size.
+
+    Live, relative to the node being translated (LIVE_WIDTH): its own size
+    when ``size`` is None or the node's. Sizes are powers of two, so the
+    scale and what is computed from it (1 / N, N / 256) are exact, as the
+    literals they replace.
+    """
+    s = _CTX.size if size is None else size
+    if _CTX.fixed:
+        return num(float(1 << s))
+    d = s - _CTX.size
+    return LIVE_WIDTH if d == 0 else f"({LIVE_WIDTH} * {num(2.0**d)})"
+
+
+def px_int_glsl(size: int | None = None) -> str:
+    """Return px_glsl as a GLSL int."""
+    return f"int({px_glsl(size)})"
 
 
 class GLExpr:
@@ -332,6 +369,9 @@ def _param_for(uid: int) -> str:
     if gi is None:
         msg = f"function reads unknown input {uid:#x}"
         raise UnsupportedError(msg)
+    if gi.identifier == "$outputsize" and not _CTX.fixed:
+        # the graph's size (log2), live: the material's, not a knob
+        return f"ivec2(int(round(log2({px_glsl(_CTX.graph_size)}))))"
     params, glsl = input_params(gi)
     for prm in params:
         _CTX.params[prm["name"]] = prm
@@ -401,7 +441,7 @@ def _sample(kind: str, index: int, pos: str, filtering: int) -> str:
     if _CTX.sampled is None or index >= len(_CTX.sampled):
         msg = f"sample of input {index} outside a pixel processor"
         raise UnsupportedError(msg)
-    n = num(float(1 << _CTX.size))
+    n = px_glsl()
     at = f"fract({pos})"
     if not filtering or _CTX.sample_nearest:
         at = f"(floor(fract({pos}) * {n}) + 0.5) / {n}"
@@ -490,6 +530,9 @@ def _writer_glsl(slot: int, kind: int, width: int) -> str:
         ident: num(v[0]) if len(v) == 1 else f"vec{len(v)}({', '.join(map(num, v))})"
         for ident, v in slot_builtins(_CTX.graph_size).items()
     }
+    if not _CTX.fixed:  # the graph's size, live: the material's (px_glsl)
+        width = px_glsl(_CTX.graph_size)
+        glsl[1], glsl[3] = f"vec2({width})", f"vec2(log2({width}))"
 
     def builtins(ident: int, _width: int) -> str:
         if ident not in glsl:
@@ -528,8 +571,8 @@ def dynamic(
     prefix = f"f{_CTX.count}"
     n = float(1 << _CTX.size)
     builtin_glsl = {
-        1: f"vec2({num(n)})",
-        3: f"vec2({num(float(_CTX.size))})",
+        1: f"vec2({px_glsl()})",  # $size
+        3: f"vec2(log2({px_glsl()}))",  # $sizelog2
         8: "uv",  # $pos: the pixel, in a pixel processor
     }
     builtin_vals = {1: [n, n], 3: [float(_CTX.size)] * 2}
@@ -740,6 +783,9 @@ def shader(
     ret = "vec4" if out_type == "rgba" else "float"
     helpers, params = "".join(_CTX.helpers), list(_CTX.params.values())
     shared = "".join(_CTX.globals)
+    if "$pass_size" in shared:  # global code is not substituted
+        msg = f"{name}: $pass_size in a shader's global code"
+        raise AssertionError(msg)
     _CTX.helpers, _CTX.params, _CTX.globals = [], {}, []
     for prm in params:  # graph inputs only: a node's knobs stay its own
         if prm["name"].startswith(GRAPH_PARAM):
@@ -868,7 +914,12 @@ class Fold(Protocol):
 
 
 def buffer(
-    name: str, size: int, *, filtering: bool = True, precise: bool = False
+    name: str,
+    size: int,
+    *,
+    filtering: bool = True,
+    precise: bool = False,
+    absolute: bool | None = None,
 ) -> dict[str, Any]:
     """Return a Material Maker buffer node: its input rendered to a texture.
 
@@ -879,19 +930,38 @@ def buffer(
     linear filtering unless not ``filtering``. Version 2: the version-1
     buffer Material Maker reads otherwise ignores both (always filtered,
     always 16-bit).
+
+    ``size`` (log2) is at the graph's build size: the buffer is the
+    material's size times 2^(size - graph's), so it follows the material's
+    size (size_mode 1), unless ``absolute`` (by default: the node being
+    translated's size is, _Context.absolute).
     """
     return {
         "name": name,
         "type": "buffer",
         "node_position": {"x": 0, "y": 0},
         "parameters": {
-            "size": size,
             "f32": precise or not filtering,
             "filter": filtering,
             "mipmap": False,
+            **size_params(size, absolute=absolute),
         },
         "seed_int": 0,
         "version": 2,
+    }
+
+
+def size_params(size: int, *, absolute: bool | None = None) -> dict[str, Any]:
+    """Return a buffer's (or iterate buffer's) size parameters, ``size`` log2.
+
+    Relative to the material's size (size_mode 1, by size - the graph's
+    build size), unless ``absolute`` (by default, _Context.absolute).
+    """
+    fixed = _CTX.absolute if absolute is None else absolute
+    return {
+        "size": size,
+        "size_mode": 0 if fixed else 1,
+        "size_offset": 0.0 if fixed else float(size - _CTX.graph_size),
     }
 
 
@@ -948,7 +1018,7 @@ def cache_shared(
                 cache = caches[0]
             else:
                 cache = f"{name}_cache{port or ''}"
-                made = buffer(cache, size, precise=precise(name))
+                made = buffer(cache, size, precise=precise(name), absolute=False)
                 mm = [*mm, made]
                 by_name[cache] = made
                 wires = [
@@ -981,7 +1051,7 @@ def merge_buffers(
     gone: dict[str, str] = {}
     for name, src in source.items():
         prm = by_name[name]["parameters"]
-        key = (src, prm["size"], prm["filter"])
+        key = (src, prm["size"], prm.get("size_mode", 0), prm["filter"])
         if key in kept:
             gone[name] = kept[key]
             first = by_name[kept[key]]["parameters"]
@@ -1077,6 +1147,7 @@ def _copies(buffer_node: dict[str, Any], source: dict[str, Any]) -> bool:
     b, s = buffer_node["parameters"], source["parameters"]
     return (
         b["size"] == s["size"]
+        and b.get("size_mode", 0) == s.get("size_mode", 0)
         and b["filter"] == s["filter"]
         and (b["f32"] or not s["f32"])
     )
@@ -1347,7 +1418,7 @@ def _blend(node: Node, name: str, *, color: bool, size: int) -> Made:
     inputs = [("source", t), ("destination", t)]
     if has_input:
         inputs.append(("opacity", "f"))
-    outside = crop_glsl([num(v) for v in crop], num(float(1 << size)), color=color)
+    outside = crop_glsl([num(v) for v in crop], px_glsl(), color=color)
     if color:
         lines = [
             "vec4 s = $source(uv); vec4 d = $destination(uv);",
@@ -1594,7 +1665,7 @@ def _transformation(node: Node, name: str, *, color: bool, size: int) -> Made | 
     # no buffer, where it varies per pixel)
     minifies = transform_minifies([float(v) * scale for v in matrix])
     lines += transform_read_lines(
-        "input", [num(x) for x in (a, b, c, d)], str(1 << size), str(fmt),
+        "input", [num(x) for x in (a, b, c, d)], px_glsl(), str(fmt),
         color=color, scale=num(1.0 if minifies else scale),
         # filtering, flag word bit 5: 1 bilinear, 0 nearest
         nearest=str(not node.fields[0] >> 5 & 1).lower(), tiling=str(tiling),
@@ -1874,11 +1945,12 @@ def _dyngradient(node: Node, name: str, *, color: bool, size: int) -> Made:
     t = "rgba" if color else "f"
     coordinate = word_params(node, [("coordinate", 1, 0.5)], {})["coordinate"]
     swap = bool(node.flags >> 8 & 0x08)
-    n = float(1 << size)
-    x = f"$input(uv) * {num((n - 1) / n)} + {num(0.5 / n)}"
-    c = f"{num(coordinate)} * {num((n - 1) / n)} + {num(0.5 / n)}"
+    n = px_glsl()
+    # (N - 1) / N and 0.5 / N: exact, N a power of two
+    x = f"$input(uv) * (({n} - 1.0) / {n}) + 0.5 / {n}"
+    c = f"{num(coordinate)} * (({n} - 1.0) / {n}) + 0.5 / {n}"
     p = f"vec2({c}, {x})" if swap else f"vec2({x}, {c})"
-    body = bilinear256_glsl("$gradient", p, num(n), t)
+    body = bilinear256_glsl("$gradient", p, n, t)
     inputs = [("input", "f"), ("gradient", t)]
     return shader(name, inputs, t, body), ["input", "gradient"]
 
@@ -1896,14 +1968,14 @@ def _blur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     t = "rgba" if color else "f"
     g = "vec4" if color else "float"
     fmt = node.flags >> 4 & 3
-    n = num(float(1 << size))
+    n = px_glsl()
     passes = []
     for pass_name, turn in ((f"{name}_x", "0.0"), (name, "0.25")):
         # Read for each: a function's helper goes with the shader made next.
         p = word_params(node, [("intensity", 4, 10.0)], {})
         k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
         setup = dmb_setup_glsl(num(k), turn, n, lpx=fmt == 1)
-        helpers, body = dmb_glsl(g, fmt, n, str((1 << size) - 1), setup)
+        helpers, body = dmb_glsl(g, fmt, n, f"({px_int_glsl()} - 1)", setup)
         made = shader(pass_name, [("input", t)], t, body)
         made["shader_model"]["instance"] = helpers + made["shader_model"]["instance"]
         passes.append(made)
@@ -1948,7 +2020,7 @@ def _dmb_setup(node: Node, size: int, *, lpx: bool = False) -> str:
     )
     k = knob("intensity", "Intensity", p["intensity"], 0.0, 32.0)
     turn = knob("angle", "Angle", p["angle"])
-    return dmb_setup_glsl(num(k), num(turn), num(float(1 << size)), lpx=lpx)
+    return dmb_setup_glsl(num(k), num(turn), px_glsl(), lpx=lpx)
 
 
 def dmb_setup_glsl(k: str, turn: str, n: str, *, lpx: bool = False) -> str:
@@ -2622,7 +2694,7 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     g = "vec4" if color else "float"
     fmt = node.flags >> 4 & 3
     setup = _dmb_setup(node, size, lpx=fmt == 1)
-    helpers, body = dmb_glsl(g, fmt, num(float(1 << size)), str((1 << size) - 1), setup)
+    helpers, body = dmb_glsl(g, fmt, px_glsl(), f"({px_int_glsl()} - 1)", setup)
     made = shader(name, [("input", t)], t, body)
     made["shader_model"]["instance"] = helpers + made["shader_model"]["instance"]
     # 16 bits: the input's levels exactly, so a 32-bit buffer.
@@ -2739,7 +2811,7 @@ def _sharpen(node: Node, name: str, *, color: bool, size: int) -> Sub:
     t = "rgba" if color else "f"
     k = word_params(node, [("intensity", 4, 1.0)], {})["intensity"]
     k = knob("intensity", "Intensity", k, 0.0, 4.0)
-    e = num(1 / (1 << size))
+    e = f"1.0 / {px_glsl()}"
     lines = [
         f"vec2 e = vec2({e}, 0.0);",
         "vec4 c = vec4($input(uv));",
@@ -3111,7 +3183,7 @@ def _warp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     fmt = node.flags >> 4 & 3
     k = word_params(node, [("intensity", 5, 1.0)], {})["intensity"]
     k = knob("intensity", "Intensity", k, 0.0, 32.0)
-    n = num(float(1 << size))
+    n = px_glsl()
     made = shader(name, [("input", t), ("gradient", "f")], t, warp_body(n, num(k)))
     model = made["shader_model"]
     eight = _eight("input", "gradient")
@@ -3143,7 +3215,7 @@ def _directionalwarp(node: Node, name: str, *, color: bool, size: int) -> Sub:
     )
     k = knob("warp_intensity", "Intensity", p["intensity"], 0.0, 64.0)
     turn = knob("angle", "Angle", p["angle"])
-    n = num(float(1 << size))
+    n = px_glsl()
     body = dwarp_body(n, num(k), num(turn))
     made = shader(name, [("input", t), ("intensity", "f")], t, body)
     model = made["shader_model"]
@@ -3167,13 +3239,14 @@ def _normal(node: Node, name: str, *, color: bool, size: int) -> Sub:
     ]
     k = knob("intensity", "Intensity", k, 0.0, 8.0)
     height = knob("height_alpha", "Height in alpha", 1.0 if flags & 0x10 else 0.0)
-    k *= (1 << size) / 256  # per texel at 256 px: resolution independent
-    sy = 1.0 if flags & 4 else -1.0
+    # per texel at 256 px: resolution independent (N / 256 exact)
+    kn = f"({num(k)} * ({px_glsl()} / 256.0))"
+    sy = "" if flags & 4 else "-"
     lines = [
-        f"vec2 e = vec2({num(1 / (1 << size))}, 0.0);",
+        f"vec2 e = vec2(1.0 / {px_glsl()}, 0.0);",
         "float h = $input(uv);",
         "vec2 g = vec2(h - $input(fract(uv - e)), h - $input(fract(uv - e.yx)));",
-        f"vec3 n = normalize(vec3({num(-k)} * g.x, {num(sy * k)} * g.y, 1.0));",
+        f"vec3 n = normalize(vec3(-{kn} * g.x, {sy}{kn} * g.y, 1.0));",
         f"return vec4(n * 0.5 + 0.5, {num(height)} > 0.5 ? h : 1.0);",
     ]
     made = shader(name, [("input", "f")], "rgba", "\n".join(lines))
@@ -3255,14 +3328,14 @@ def _emboss(node: Node, name: str, *, color: bool, size: int) -> Sub:
     at = emboss_scale_block(node)
     scaled = "" if at is None else f" * {vec(dynamic(node, at), 2)}"
     lines = [
-        f"vec2 e = vec2({num(1 / (1 << size))}, 0.0);",
+        f"vec2 e = vec2(1.0 / {px_glsl()}, 0.0);",
         "float h = $gradient(uv);",
         (
             "vec2 g = vec2(h - $gradient(fract(uv - e)),"
             f" h - $gradient(fract(uv - e.yx))){scaled};"
         ),
         f"vec2 light = vec2(cos({a}), sin({a}));",
-        f"float s = {num(p['intensity'] * (1 << size) / 256)} * dot(g, light);",
+        (f"float s = ({num(p['intensity'])} * ({px_glsl()} / 256.0)) * dot(g, light);"),
     ]
     if color:
         lines += [
@@ -3383,9 +3456,13 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
     init = shader(f"{name}_seed", [("mask", "f")], "rgba", JFA_SEED)
     nodes.append(init)
     last = init["name"]
+    live = px_glsl()
     for k, step in enumerate(steps):
         buf = buffer(f"{name}_jfa{k}", size, filtering=False)
-        body = "\n".join(jfa_step_lines(num(step / n)))
+        # The steps are the build size's, as parts of the image (they reach
+        # as far at any size); the one-texel ones are a texel at any size.
+        offset = f"1.0 / {live}" if step == 1 else num(step / n)
+        body = "\n".join(jfa_step_lines(offset))
         jfa = shader(f"{name}_pass{k}", [("input", "rgba")], "rgba", body)
         jfa["shader_model"]["instance"] = TORUS_GLSL + jfa["shader_model"]["instance"]
         nodes += [buf, jfa]
@@ -3394,9 +3471,9 @@ def _distance(node: Node, name: str, *, color: bool, size: int) -> Sub:
     final_buf = buffer(f"{name}_near", size, filtering=False)
     lines = [
         "vec4 c = $input(uv);",
-        f"float r = max({num(reach)} * {num(n / 256)}, 1e-6);",
-        f"float d = tdist_$(name)(uv, c.xy) * {num(float(n))};",
-        JFA_OWN.format(half=num(0.5 / n)),
+        f"float r = max({num(reach)} * ({live} / 256.0), 1e-6);",
+        f"float d = tdist_$(name)(uv, c.xy) * {live};",
+        JFA_OWN.format(half=f"(0.5 / {live})"),
         "float f = c.z > 0.5 ? clamp(1.0 - d / r, 0.0, 1.0) : 0.0;",
     ]
     inputs = [("input", "rgba")]
@@ -4538,8 +4615,10 @@ def _bspline(name: str, size: int, t: str) -> dict[str, Any]:
 
     The input is a buffer ``size`` in log2 pixels; four linear fetches, each
     placed between two texels so that it weighs them as the spline does.
+    Its width is live (px_glsl), against the reader's: the node being
+    translated, whose pass this renders in.
     """
-    n = num(float(1 << size))
+    n = px_glsl(size)
     g = "vec4" if t == "rgba" else "float"
     lines = [
         f"vec2 p = uv * {n} - 0.5;",
@@ -4673,6 +4752,33 @@ def _output_size(node: Node, size: int) -> int:
     return size
 
 
+def absolute_size(node: Node, size: int) -> bool:
+    """Return whether ``node``'s size stays as the graph's changes (_output_size).
+
+    A fixed size, or a size function that does not follow the graph's
+    ($outputsize, $size): its size at a graph one larger (smaller, at the
+    largest) is the same. Otherwise its size is relative to the graph's,
+    and its buffers follow the material's size (buffer).
+    """
+    other = size + 1 if size < MAX_SIZE else size - 1
+    saved = _CTX.inputs
+    _CTX.inputs = {
+        uid: replace(gi, default=[other, other])
+        if gi.identifier == "$outputsize"
+        else gi
+        for uid, gi in saved.items()
+    }
+    try:
+        moved = _output_size(node, other)
+    finally:
+        _CTX.inputs = saved
+    return moved == _output_size(node, size)
+
+
+MAX_SIZE = 14
+"""The largest size (log2) Material Maker's buffers take."""
+
+
 STORE_STEPS = {0: 255, 1: 65535}
 """A node's output format (node word flag bits 4-5) -> its integer steps:
 8 and 16 bits; the float formats (2, 3) keep what they are given."""
@@ -4775,7 +4881,13 @@ def node_shader(
     translated = node
     if template is not None:
         translated = replace(template, index=node.index, inputs=node.inputs)
-    return translate(translated, name, color=translated.op in COLOR_OPS, size=size)
+    # FX-Maps render records and atlases into buffers of their own sizes:
+    # their size-dependent values stay the build size's (FIXED_OPS).
+    fixed, _CTX.fixed = _CTX.fixed, node.op in FIXED_OPS
+    try:
+        return translate(translated, name, color=translated.op in COLOR_OPS, size=size)
+    finally:
+        _CTX.fixed = fixed
 
 
 def graph_inputs(asm: Any, xml: str) -> dict[int, GraphInput]:
@@ -4854,11 +4966,11 @@ def translate_graph(
         origins = {}  # the fold finds a node's nodes by them
     _CTX = _Context(
         size=size,
+        graph_size=size,
         inputs=dict(inputs or {}),
         data_dir=data_dir,
         raster=plugins is not None,
         slot_writers=writers(nodes),
-        graph_size=size,
     )
     # Functions reading $outputsize see the size the graph renders at, not
     # the archive's default for it.
@@ -4884,9 +4996,12 @@ def translate_graph(
             msg = f"node {k}: a Value Processor's image is read"
             raise UnsupportedError(msg)
     sizes = {}
+    fixed = set()  # sizes that do not follow the graph's: absolute buffers
     for k in sorted(need):
         _CTX.reader = k
         sizes[k] = _output_size(nodes[k], size)
+        if absolute_size(nodes[k], size):
+            fixed.add(k)
     # a loop's nodes all one size, or it stays unrolled
     loops = {
         k: loop
@@ -4898,7 +5013,8 @@ def translate_graph(
     folded = {m for k, loop in loops.items() for m in loop.members if m != k}
     levels: dict[tuple[int, int], str] = {}
     rounded: set[str] = set()  # outputs stored in 8 or 16 bits (stored)
-    smooth: dict[int, str] = {}
+    smooth: dict[tuple[int, int], str] = {}
+    own_buf: dict[int, str] = {}
 
     def fed(m: int, own: int) -> str:
         """Return input ``m`` as a node ``own`` in size reads it.
@@ -4910,12 +5026,24 @@ def translate_graph(
         no smaller than ``own``: pass that as ``own``.
         """
         if sizes[m] < own:
-            if m not in smooth:
-                smooth[m] = f"n{m}_smooth"
+            if (m, own) not in smooth:
+                # (one per reader size: its N is the reader's pass's)
+                smooth[m, own] = f"n{m}_smooth" + ("" if own == size else str(own))
                 t = "rgba" if nodes[m].op in COLOR_OPS else "f"
-                mm.append(_bspline(smooth[m], sizes[m], t))
-                wires.append(wire(out_of[m], smooth[m]))
-            return smooth[m]
+                mm.append(_bspline(smooth[m, own], sizes[m], t))
+                src = out_of[m]
+                if sizes[m] == size and nodes[m].op not in (32, 33):
+                    # rendered at its own size, not inline in the larger
+                    # reader's pass ($pass_size is the node's: LIVE_WIDTH)
+                    if m not in own_buf:
+                        own_buf[m] = f"n{m}_own"
+                        mm.append(
+                            buffer(own_buf[m], size, precise=True, absolute=m in fixed)
+                        )
+                        wires.append(wire(src, own_buf[m]))
+                    src = own_buf[m]
+                wires.append(wire(src, smooth[m, own]))
+            return smooth[m, own]
         if sizes[m] == own:
             return out_of[m]
         src = out_of[m]
@@ -4975,6 +5103,7 @@ def translate_graph(
         own = sizes[k]
         _CTX.size = own
         _CTX.reader = k
+        _CTX.absolute = k in fixed
         loop = loops.get(k)
         sources = loop.inputs if loop is not None else node.inputs
         _CTX.input_bits = {p: input_bits(nodes[m]) for p, m in sources.items()}
@@ -5030,7 +5159,9 @@ def translate_graph(
             origins.update((n["name"], k) for n in made.nodes)
         wires += made.wires
         for inp, to, port in made.ports:
-            m = sources[inp]
+            m = sources.get(inp)
+            if m is None:  # unwired (sbsasm.UNWIRED): the port's default, 0
+                continue
             if node.op not in (4, 5):
                 wires.append(wire(fed(m, own), to, port))
                 continue
@@ -5039,6 +5170,7 @@ def translate_graph(
             nearest = not node.fields[0] >> 5 & 1
             wires.append(wire((fed_nearest if nearest else fed)(m, at), to, port))
         out_of[k] = made.output
+    _CTX.absolute = False
     mm, wires = merge_buffers(mm, wires)
     mm, wires = cache_shared(mm, wires, size, origins)
     # After caching: a node read inline by each of its copies' readers stays

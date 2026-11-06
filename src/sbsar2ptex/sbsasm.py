@@ -66,6 +66,8 @@ from sbsar2ptex.archive import read_archive
 
 BASE = 0x34
 MAGICS = (b"\xff\xd8\xff", b"\x89PNG", b"DDS ", b"v/1\x01", b"II*\x00", b"MM\x00*")
+UNWIRED = 0xFFFFFFFF
+"""The node index of an input no node feeds (mosaic.sbsar's pixel processors)."""
 RAW_FORMATS = {1: (1, 1), 2: (3, 1), 3: (4, 1), 5: (1, 2), 6: (3, 2), 7: (4, 2)}
 """A raw image's format: (channels, bytes per channel). Checked against
 sbsrender's renders of previewsphere_sphere.sbsar (1, 3) and the sizes of
@@ -283,10 +285,20 @@ TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
 """Bytes a graph input of each type takes in the defaults block."""
 
 
+def pp_inputs(word: int) -> int:
+    """Return a pixel processor's input count from its first field.
+
+    The low 16 bits (IMAGE_COUNT): newer cooks (version 6 and 9) set bits
+    above them, then the inputs and the code offsets follow as in older
+    ones; a Value Processor's are its value's width (value_width).
+    """
+    return word & IMAGE_COUNT
+
+
 WARP_FLAG_WORD = {2: False, 5: False, 6: False, 9: True}
 """Whether a warp has a leading flag word, by cook version (docs/node-seed.md
 section 2.2, warp note); other versions not seen."""
-NO_NODE = 0xFFFFFFFF
+NO_NODE = UNWIRED
 """An input no node feeds."""
 
 
@@ -319,7 +331,7 @@ def field_count(
     """
     del flags, count
     if op in (40, 41):  # a count word (its low 16 bits), then that many inputs
-        return min(1 + (rest[0] & IMAGE_COUNT), len(rest)) if rest else 0
+        return min(1 + pp_inputs(rest[0]), len(rest)) if rest else 0
     if op not in LAYOUTS:
         return None
     n = len(LAYOUTS[op])
@@ -516,6 +528,9 @@ class Asm:
         node.inline = rest[k:stop]
         node.reads = [w for w in words if w in known]
         self._inputs(node)
+        # An input no node feeds (UNWIRED): not an input at all, so that
+        # what reads it sees nothing, as Substance's empty input.
+        node.inputs = {k: v for k, v in node.inputs.items() if v != UNWIRED}
         return node
 
     def _words(self, node: Node, rest: list[int], is_offset) -> int:
@@ -636,7 +651,7 @@ class Asm:
             if opacity == BLEND_OPACITY and node.inline:
                 node.inputs["opacity"] = node.inline[0]
         elif op in (40, 41) and fields:
-            for n, value in enumerate(fields[1 : 1 + (fields[0] & IMAGE_COUNT)]):
+            for n, value in enumerate(fields[1 : 1 + pp_inputs(fields[0])]):
                 node.inputs[f"input{n or ''}"] = value
 
 

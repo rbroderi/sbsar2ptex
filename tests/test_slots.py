@@ -773,10 +773,12 @@ def test_a_value_processors_built_ins() -> None:
     )  # fmt: skip
     size_block = code(iconst(9), ins(VEC2, 0, 0, kind=INT, width=2))
     pp = make_node(1, 40, [0], size_block, code(getslot(0, FLOAT, 2)))
+    pp.size_code = pp.code[0]  # flag bit 0: its first block, as Asm reads it
     mm, _, _ = translate_graph([vp, pp], {"out": 1}, {}, size=10)
     code_ = instances(mm)["n1"]
     slot_fn = code_.split("sbs_slot0_$(name)(vec2 uv) {")[1].split("}")[0]
-    assert "vec2(1024.0, 1024.0)" in slot_fn
+    # live: the graph's width, twice the 512 pass the reader renders in
+    assert "vec2(($pass_size.x * 2.0))" in slot_fn
     assert "vec2(0.0, 0.0)" in slot_fn
     store = SlotStore(writers([vp, pp]), {}, 10, reader=1)
     assert store[0] == [1024.0, 1024.0]
