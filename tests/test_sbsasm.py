@@ -5,12 +5,14 @@ wired to the filter's other inputs, cooked by Substance Designer 16.0.7.
 """
 
 import re
+import struct
 from pathlib import Path
 
 import pytest
 
 from sbsar2ptex.archive import member
 from sbsar2ptex.archive import read_archive
+from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import Asm
 from sbsar2ptex.sbsasm import Node
 from sbsar2ptex.sbsasm import reachable
@@ -34,6 +36,46 @@ def by_input(nodes: list[Node], names: dict[int, str]) -> dict[str, int]:
 def only(nodes: list[Node], name: str) -> Node:
     (node,) = [n for n in nodes if n.name.startswith(name)]
     return node
+
+
+def test_no_defaults_block() -> None:
+    # previewsphere_sphere.sbsar (a version 2 cook) has no inputs and no
+    # defaults block: offset 0. A decoy at 0x40 reads as a uid table ending
+    # at the trailer, as its bitmap's bytes did.
+    data = bytearray(0x84)
+    data[:4] = b"SBAM"
+    struct.pack_into("<H", data, 6, 2)
+    struct.pack_into("<HH", data, 0x40, 12, 0)  # the decoy
+    struct.pack_into("<I", data, 0x60, 0x50 - BASE)  # the node table: one node
+    struct.pack_into("<II", data, 0x64, 0xC0, 0)  # the outputs: (format, node)
+    struct.pack_into("<HHI", data, 0x6C, 1, 0, 0x1234)  # the uid table
+    struct.pack_into("<4I", data, 0x74, 1, 0x60 - BASE, 0x64 - BASE, 0)
+    asm = Asm(bytes(data))
+    assert asm.output_uids == [0x1234]
+    assert asm.output_nodes == [(0xC0, 0)]
+    assert asm.inputs == []
+    assert asm.defaults_at == 0x60
+
+
+def test_raw_image() -> None:
+    # A 2 x 1 RGB image stored raw (format 2) just before the node reading
+    # it, as stripe-new-1.sbsar's: the node word's x is log2 h << 4 | log2 w.
+    data = bytearray(0x84)
+    data[:4] = b"SBAM"
+    struct.pack_into("<HHI", data, 0x6C, 1, 0, 0x1234)
+    struct.pack_into("<4I", data, 0x74, 1, 0x60 - BASE, 0x64 - BASE, 0)
+    data[0x48:0x4E] = bytes([10, 20, 30, 40, 50, 60])
+    asm = Asm(bytes(data))
+    word = 0x0200 << 16 | 0x01 << 8 | 33
+    node = Node(index=0, start=0x50, end=0x58, op=33, flags=0x0200,
+                uid=0x48 - BASE, words=[word, 0x48 - BASE])  # fmt: skip
+    raw = asm.raw_image(node)
+    assert raw is not None
+    assert (raw.width, raw.height, raw.channels, raw.depth) == (2, 1, 3, 1)
+    assert raw.pixels == bytes([10, 20, 30, 40, 50, 60])
+    # pixels that would run into the node are not this node's
+    node.start = 0x4C
+    assert asm.raw_image(node) is None
 
 
 def test_blend_inputs_and_opacity() -> None:

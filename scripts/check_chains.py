@@ -97,7 +97,7 @@ def main() -> None:
         )
         cache.write_bytes(pickle.dumps(found))
     lib = library_nodes(found, nodes, inputs, size)
-    images = bitmaps(asm, out / "bitmaps")
+    images = bitmaps(asm, nodes, out / "bitmaps")
     data = out / "fxmaps"
     todo = [
         c

@@ -14,6 +14,11 @@ Header: "SBAM", u16 0, u16 version, u32 cooker build, u32 asmuid, u32 file
 size, ... Bitmaps follow at 0x38, each a u32 length then the image file
 (JPEG, PNG, ...), the next 4-byte aligned after it.
 
+Some cooks store an image raw instead: its pixels (rows top down, channels
+R G B A, 16-bit ones little-endian) just before the image input node that
+reads it, whose uid is their offset. The node word's x is the size, log2
+height << 4 | log2 width, and its flags >> 8 the format (RAW_FORMATS).
+
 Trailer (the file's last 16 bytes): u32 node count, offset of the node
 table, offset of the output map, offset of the defaults block.
 
@@ -52,6 +57,23 @@ from sbsar2ptex.archive import read_archive
 
 BASE = 0x34
 MAGICS = (b"\xff\xd8\xff", b"\x89PNG", b"DDS ", b"v/1\x01", b"II*\x00", b"MM\x00*")
+RAW_FORMATS = {1: (1, 1), 2: (3, 1), 3: (4, 1), 5: (1, 2), 6: (3, 2), 7: (4, 2)}
+"""A raw image's format: (channels, bytes per channel). Checked against
+sbsrender's renders of previewsphere_sphere.sbsar (1, 3) and the sizes of
+stripe-new-1's (1, 2) and persian-mosaic-wall-tiels's (5, 6, 7) images."""
+
+
+@dataclass
+class RawImage:
+    """An image stored raw in the bytecode (see the module notes)."""
+
+    width: int
+    height: int
+    channels: int
+    depth: int
+    """Bytes per channel: 1 or 2."""
+    pixels: bytes
+
 
 _PAIRS = {
     2: "blend",
@@ -222,11 +244,10 @@ class Asm:
         self.count, table, outputs, defaults = struct.unpack_from(
             "<4I", data, len(data) - 16
         )
-        self.table, self.outputs_at, self.defaults_at = (
-            table + BASE,
-            outputs + BASE,
-            defaults + BASE,
-        )
+        # A graph without (non-image) inputs may have no defaults block
+        # (offset 0, as in old cooks): its nodes end at the node table.
+        self.table, self.outputs_at = table + BASE, outputs + BASE
+        self.defaults_at = defaults + BASE if defaults else self.table
         self.bitmaps: list[tuple[int, int]] = []
         at = 0x38
         while at < self.table and data[at + 4 : at + 8].startswith(MAGICS):
@@ -240,13 +261,18 @@ class Asm:
             n_out, n_in = struct.unpack_from("<HH", data, at)
             if at + 4 + 4 * n_out + 8 * n_in != end:
                 return False
+            if not defaults:
+                return n_in == 0
             pairs = at + 4 + 4 * n_out
             kinds = [self.u32(pairs + 8 * i) for i in range(n_in)]
             if any(k not in TYPE_SIZES for k in kinds):
                 return True  # (sizes unknown: take it)
             return sum(TYPE_SIZES[k] for k in kinds) == at - self.defaults_at
 
-        at = next((a for a in range(self.defaults_at, end, 4) if table_at(a)), None)
+        # (after the defaults; without them, after the outputs: earlier bytes,
+        # a bitmap's, can look like a table that ends at the trailer)
+        first = self.defaults_at if defaults else self.outputs_at
+        at = next((a for a in range(first, end, 4) if table_at(a)), None)
         if at is None:
             msg = "no uid table before the trailer"
             raise ValueError(msg)
@@ -270,6 +296,25 @@ class Asm:
             fmt = "<" + ("f" if kind < 4 else "i") * (size // 4)  # noqa: PLR2004
             self.defaults[uid] = list(struct.unpack_from(fmt, data, at))
             at += size
+
+    def raw_image(self, node: "Node") -> RawImage | None:
+        """Return the raw image input ``node`` reads, if it reads one.
+
+        Its pixels must fit between BASE and the node (as they lie just
+        before it): a uid of a graph input or bitmap file does not.
+        """
+        if node.op not in (32, 33) or node.uid is None or not node.words:
+            return None
+        form = RAW_FORMATS.get(node.flags >> 8)
+        if form is None:
+            return None
+        sizes = node.words[0] >> 8 & 0xFF
+        width, height = 1 << (sizes & 0xF), 1 << (sizes >> 4)
+        start = node.uid + BASE
+        size = width * height * form[0] * form[1]
+        if start <= BASE or start + size > node.start:
+            return None
+        return RawImage(width, height, *form, self.d[start : start + size])
 
     def u16(self, at: int) -> int:
         """Return the u16 at ``at``."""

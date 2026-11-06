@@ -17,6 +17,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from PIL import Image
+
 from sbsar2ptex.archive import member
 from sbsar2ptex.convert import SLOTS
 from sbsar2ptex.convert import Graph
@@ -48,11 +51,12 @@ MM_MOD = ">=1.17"
 """The material-maker-mod version --experimental graphs need."""
 
 
-def bitmaps(asm: Asm, folder: Path) -> dict[int, str]:
+def bitmaps(asm: Asm, nodes: list[Node], folder: Path) -> dict[int, str]:
     """Write the embedded bitmaps; return their files by the id inputs use.
 
     An image input node names its bitmap by the offset (from BASE) of the
-    length word before it.
+    length word before it, or of its raw pixels (Asm.raw_image): those are
+    written as 8-bit PNGs, as Material Maker loads images in 8 bits.
     """
     folder.mkdir(parents=True, exist_ok=True)
     out: dict[int, str] = {}
@@ -62,6 +66,19 @@ def bitmaps(asm: Asm, folder: Path) -> dict[int, str]:
         path = folder / f"bitmap_{k:02d}{suffix}"
         path.write_bytes(blob)
         out[at - BASE - LENGTH_SIZE] = path.resolve().as_posix()
+    for node in nodes:
+        raw = None if node.uid in out else asm.raw_image(node)
+        if raw is None:
+            continue
+        dtype = np.uint8 if raw.depth == 1 else np.dtype("<u2")
+        px = np.frombuffer(raw.pixels, dtype).reshape(
+            raw.height, raw.width, raw.channels
+        )
+        if raw.depth == 2:  # noqa: PLR2004
+            px = ((px.astype(np.uint32) * 255 + 32767) // 65535).astype(np.uint8)
+        path = folder / f"raw_{node.index}.png"
+        Image.fromarray(px[..., 0] if raw.channels == 1 else px).save(path)
+        out[node.uid] = path.resolve().as_posix()
     return out
 
 
@@ -190,7 +207,7 @@ def build(
     mm, wires, outs = translate_graph(
         nodes,
         wanted,
-        bitmaps(asm, data / "bitmaps"),
+        bitmaps(asm, nodes, data / "bitmaps"),
         size=size,
         inputs=inputs,
         data_dir=data / "fxmaps",
