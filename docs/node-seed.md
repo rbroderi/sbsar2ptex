@@ -90,7 +90,10 @@ It sits at a fixed position:
 3. **the seed slot** (state 1 or 2 only);
 4. the output-size function's offset (only when `flags` bit 0 is set);
 5. the op's remaining offset words, then inline values, then code, exactly
-   as in a state-0 node.
+   as in a state-0 node. For the neighborhood filters (ops 14-17, 20-27,
+   37, 42, 43) these are not a fixed number of code offsets: each
+   parameter in state 2, the pixel-size vector included, adds one offset
+   among the inline values, in parameter order (`docs/node-params.md`).
 
 Read the slot by its position, never by how it looks. A state-1 seed can
 be any i32, including one that happens to look like an offset into the
