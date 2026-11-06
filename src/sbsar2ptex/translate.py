@@ -4193,6 +4193,9 @@ def _fxmap_drawn(node: Node, name: str, layout: fxglsl.Layout) -> Sub:
             if not isinstance(tree, (fxmap.Iterate, fxmap.Switch)) or tree.inherited
             else "0u"
         )
+        if tree.seed_code is not None:  # (fxseed: the splat walk's alone)
+            msg = "FX-Map: a tree node's seed function, live"
+            raise UnsupportedError(msg)
         lines.append(f"uint e = {incoming} + {tree.seed or 0}u;")
         if isinstance(tree, fxmap.Quadrant):
             kids = [emit(c) for c in tree.children]

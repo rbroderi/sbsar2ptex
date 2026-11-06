@@ -263,6 +263,44 @@ def test_deferred_runs_past_max_splats_are_too_big_without_the_rest(
         assert got == want, most
 
 
+def test_seeded_nodes_walk_and_their_subtrees_defer() -> None:
+    # A stateless tree but for nodes whose seeds are functions (of $number,
+    # of $depth, a constant): those and their ancestors are walked, the
+    # subtrees below them drawn as lanes, bit for bit as the plain walk.
+    asm = Asm()
+    params = quad_blocks(asm)
+    by_number = asm.block((0x01, FLOAT, 1, [10]), ("f", 3.5), (0x12, FLOAT, 1, [0, 1]),
+                          (0x11, INT, 1, [2]))  # fmt: skip
+    by_depth = asm.block((0x01, FLOAT, 1, [12]), (0x11, INT, 1, [0]), ("i", 9),
+                         (0x12, INT, 1, [1, 2]))  # fmt: skip
+    const = asm.block(("f", 3.0), (0x11, INT, 1, [0]))
+    tip = fxmap.Quadrant(pattern=3, params=params)
+    leaf = fxmap.Quadrant(pattern=7, params=params, children=[tip, tip, None, tip])
+    seeded_quad = fxmap.Quadrant(
+        pattern=2, params=params, seed_code=by_depth, children=[leaf] * 4
+    )
+    switch = code(asm.block(("f", 1.0), (0x32, FLOAT, 1, [0]), ("f", 0.4),
+                            (0x1F, BOOL, 1, [1, 2])))  # fmt: skip
+    pick = fxmap.Switch(
+        value=switch, seed_code=const, inherited=False, if_true=seeded_quad,
+        if_false=leaf,
+    )  # fmt: skip
+    inner = fxmap.Iterate(count=3, seed_code=by_number, repeated=pick, first=tip)
+    loop = fxmap.Iterate(count=4, seed=9, repeated=inner)
+    root = fxmap.Quadrant(pattern=1, params=params, children=[loop, None, leaf, tip])
+    st = fxmap.Settings(seed=1234, hurst=0.7, opacity=0.8)
+    node = asm.node()
+    later = fxsplat._deferrable(node, root, st)
+    for walked in (root, loop, inner, pick, seeded_quad):
+        assert id(walked) not in later
+    assert id(leaf) in later
+    assert id(tip) in later
+    gray = splats_both(node, root, st)
+    assert len(gray) > 40
+    assert isinstance(gray, fxsplat.SplatTable)
+    assert splats_both(node, root, st, color=True)
+
+
 # Packing, raster and pixel work.
 
 

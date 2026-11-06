@@ -35,6 +35,7 @@ from PIL import Image
 
 from sbsar2ptex import fxdraw
 from sbsar2ptex import fxmap
+from sbsar2ptex import fxseed
 from sbsar2ptex.function import SETSLOT
 from sbsar2ptex.function import Diverged
 from sbsar2ptex.function import FunctionError
@@ -156,6 +157,7 @@ def _walk(
     # tree's functions read, and they keep state from one call to the next
     # (a walk over a grid, pass by pass), in Substance's order of calls.
     variables: dict[int, list] = {}
+    seeds = fxseed.Seeds()
 
     def block_at(code: int) -> Any:
         block = blocks.get(code)
@@ -209,8 +211,6 @@ def _walk(
             store = {v: variables[v] for v in reads if v in variables}
             out.append(_Deferred(t, incoming, pos, depth, number, store))
             return
-        inherited = not isinstance(t, (fxmap.Iterate, fxmap.Switch)) or t.inherited
-        e = ((incoming if inherited else 0) + (t.seed or 0)) & UINT32_MASK
         ctx = {
             0: [0.0],
             1: [n, n],
@@ -219,6 +219,12 @@ def _walk(
             10: [number],
             12: [float(depth)],
         }
+        own = t.seed or 0
+        if t.seed_code is not None:  # first of the node's functions, each visit
+            block = block_at(t.seed_code)
+            own = seeds.seed(block, inputs, ctx, variables, slots=slots)
+        inherited = not isinstance(t, (fxmap.Iterate, fxmap.Switch)) or t.inherited
+        e = ((incoming if inherited else 0) + own) & UINT32_MASK
         if isinstance(t, fxmap.Quadrant):
             p = t.params
             op = param(p.get("opacity"), [1.0] * 4, e, "opacity", ctx)
@@ -333,12 +339,14 @@ def _reads_sets(block: Any) -> tuple[set[int], set[int]]:
 
 
 def _own_codes(t: fxmap.Tree) -> list[int]:
-    """Return the function blocks a tree node itself runs."""
+    """Return the function blocks a tree node itself runs, its seed's first."""
+    seed = [t.seed_code] if t.seed_code is not None else []
     if isinstance(t, fxmap.Quadrant):
         codes = [p.code for p in t.params.values() if p.state == fxmap.CODE]
-        return codes + ([t.image_index.code] if t.image_index is not None else [])
+        image = [t.image_index.code] if t.image_index is not None else []
+        return seed + codes + image
     param = t.count if isinstance(t, fxmap.Iterate) else t.value
-    return [param.code] if isinstance(param, fxmap.Param) else []
+    return seed + ([param.code] if isinstance(param, fxmap.Param) else [])
 
 
 def _kids(t: fxmap.Tree) -> list[fxmap.Tree | None]:
@@ -360,7 +368,9 @@ def _deferrable(
     it reads (set before it is entered) hold still. Only the outermost
     such subtrees, as the walk meets them, are left for later. None are
     when a tree function sets a value slot (the graph's store, which get
-    slots read): it would change under them.
+    slots read): it would change under them. Nor is a subtree holding a
+    node whose seed is a function (fxseed): the plain walk runs those, and
+    may defer below them.
     """
     try:
         found: dict[int, tuple[set[int], set[int]]] = {}
@@ -373,6 +383,7 @@ def _deferrable(
         return {}
     shared = set().union(*(r for r, _ in found.values()))
     memo: dict[int, tuple[set[int], set[int]]] = {}
+    seeded: set[int] = set()
     going: set[int] = set()
 
     def visit(t: fxmap.Tree | None) -> tuple[set[int], set[int]]:
@@ -387,10 +398,14 @@ def _deferrable(
             for code in _own_codes(t):
                 reads |= found[code][0]
                 sets |= found[code][1]
+            if t.seed_code is not None:
+                seeded.add(id(t))
             for kid in _kids(t):
                 r, s = visit(kid)
                 reads |= r
                 sets |= s
+                if kid is not None and id(kid) in seeded:
+                    seeded.add(id(t))
             memo[id(t)] = (reads, sets)
             going.discard(id(t))
         return memo[id(t)]
@@ -399,7 +414,9 @@ def _deferrable(
         visit(tree)
     except RecursionError:
         return {}
-    return {k: sorted(r) for k, (r, s) in memo.items() if not s & shared}
+    return {
+        k: sorted(r) for k, (r, s) in memo.items() if not s & shared and k not in seeded
+    }
 
 
 LANES_MAX = 1 << 22
@@ -556,6 +573,8 @@ def _lanes(
         if spread > LANES_MAX:
             raise _Spread
         cell = 0.5**depth
+        if t.seed_code is not None:  # (never deferred: _deferrable)
+            raise Diverged
         inherited = not isinstance(t, (fxmap.Iterate, fxmap.Switch)) or t.inherited
         base = front.incoming if inherited else np.zeros_like(front.incoming)
         e = (base + np.uint64(t.seed or 0)) & np.uint64(UINT32_MASK)
@@ -898,6 +917,8 @@ def _codes(tree: fxmap.Tree | None, settings: fxmap.Settings) -> list[int]:
         if t is None or id(t) in seen:
             return
         seen.add(id(t))
+        if t.seed_code is not None:  # (run first of the node's)
+            codes.append(t.seed_code)
         if isinstance(t, fxmap.Quadrant):
             codes.extend(p.code for p in t.params.values() if p.state == fxmap.CODE)
             if t.image_index is not None:

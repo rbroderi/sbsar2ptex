@@ -5,9 +5,14 @@ Switch nodes. Its third word is the tree's root; each tree node is a word, then
 offsets (from the file's BASE) and values, found by sbscooker probes
 (sbsar2ptex.probe.fx):
 
+Every tree node's word holds a seed state in bits 4-5
+(docs/fxmap-node-0x09.md section 1): 0, no seed; 1 (0x10), an inline seed;
+2 (0x20), the offset of a function block computing it (fxseed); 3, never
+seen (rejected). States 1 and 2 add one slot, where an inline seed sits.
+
 Quadrant, low nibble 8:
 
-    0x10        its own random seed, first of its parameters
+    0x30        its seed state, its slot first of its parameters
     0x40        draws a pattern, id bits 8-15 (pattern type - 2: 0 square...)
     0x80        draws an image (a pattern input), its index bits 8-15
     bits 16-17  children: 1, four slots (0 for none); 2, one child on all four
@@ -24,12 +29,14 @@ then the parameters' offset (if any are set), then the children. At the
 parameters' offset: the seed, then each parameter set, in that order, then
 the image index's code (if a function).
 
-Iterate, low byte 0x0b (0x1b, its own seed; 0x4b, output0 used; 0x8b, its
-count a function): the count (word >> 8, when not a function), then the seed,
-the count's code, output1, then output0 if used.
+Iterate, low byte 0x0b (0x08, inheriting the incoming state; 0x30 its seed
+state; 0x4b, output0 used; 0x8b, its count a function): the count (word >>
+8, when not a function), then the seed slot, the count's code, output1, then
+output0 if used.
 
-Switch, low byte 0x09 (0x19, its own seed; 0x49, constant true; 0x89, a
-function): the seed, the function's code, then output0 and output1.
+Switch, low byte 0x09 (0x08 inheriting; 0x30 its seed state; 0x49, constant
+true; 0x89, a function): the seed slot, the function's code, then output0
+and output1.
 
 The FX-Map node itself: its node word (bits 24-25 tiling, horizontal and
 vertical), a word of parameter states (2 bits each: background, hurst, global
@@ -56,6 +63,8 @@ import struct
 from dataclasses import dataclass
 from dataclasses import field
 
+from sbsar2ptex.function import INT
+from sbsar2ptex.function import decode
 from sbsar2ptex.sbsasm import BASE
 from sbsar2ptex.sbsasm import SEED_CODE
 from sbsar2ptex.sbsasm import SEED_INLINE
@@ -147,6 +156,9 @@ QUAD_PARAMS = (
 INLINE, CODE, INPUT = 1, 2, 3
 """Parameter states: a value inline, a function's code block, an input."""
 
+SEED_STATE_INLINE, SEED_STATE_CODE, SEED_STATE_BAD = 1, 2, 3
+"""A tree node's seed states (bits 4-5): inline, a function, never seen."""
+
 IMAGE_STRIDE = 64
 """Image pattern ids: -1 - (input index + IMAGE_STRIDE * filtering
 + PREMULTIPLIED * premultiplied)."""
@@ -193,6 +205,8 @@ class Quadrant:
     """The image's flags word (filtering << 2, 0x10 premultiplied...)."""
     blend_max: bool = False
     seed: int | None = None
+    seed_code: int | None = None
+    """Its seed's function block (file offset), when a function (fxseed)."""
     params: dict[str, Param] = field(default_factory=dict)
     children: list["Tree | None"] = field(default_factory=list)
 
@@ -203,6 +217,8 @@ class Iterate:
 
     count: int | Param = 0
     seed: int | None = None
+    seed_code: int | None = None
+    """Its seed's function block (file offset), when a function (fxseed)."""
     inherited: bool = True
     first: "Tree | None" = None
     repeated: "Tree | None" = None
@@ -214,6 +230,8 @@ class Switch:
 
     value: bool | Param = False
     seed: int | None = None
+    seed_code: int | None = None
+    """Its seed's function block (file offset), when a function (fxseed)."""
     inherited: bool = True
     if_false: "Tree | None" = None
     if_true: "Tree | None" = None
@@ -321,6 +339,22 @@ def read_tree(node: Node, *, color: bool = False) -> Tree | None:
     def word(off: int) -> int:
         return node.at(off + BASE, 1)[0]
 
+    def seed_slot(t: Tree, w: int, off: int, slot: int) -> None:
+        """Set ``t``'s seed from its slot's word ``slot`` (seed state 1 or 2)."""
+        if w >> 4 & 3 == SEED_STATE_INLINE:
+            t.seed = slot
+            return
+        code = slot + BASE
+        if slot % 4 or not node.start < code < node.end:
+            msg = f"FX-Map node {w:#010x} at {off:#x}: seed slot {slot:#x} not a block"
+            raise ValueError(msg)
+        block = decode(node.at(code, (node.end - code) // 4))
+        last = block.instrs[-1] if block.instrs else None
+        if last is None or last.type != INT or last.width != 1:
+            msg = f"FX-Map node {w:#010x} at {off:#x}: its seed function is not an int"
+            raise ValueError(msg)
+        t.seed_code = code
+
     def read(off: int) -> Tree | None:
         if not off:
             return None
@@ -330,6 +364,11 @@ def read_tree(node: Node, *, color: bool = False) -> Tree | None:
         lo = w & 0xFF
         nxt = off + 4
         tree: Tree
+        seeded = w >> 4 & 3
+        known = lo & 0x0F == 0x08 or lo & 0x07 in (0x01, 0x03)  # noqa: PLR2004
+        if known and seeded == SEED_STATE_BAD:
+            msg = f"FX-Map node word {w:#010x} at {off:#x}: seed state 3"
+            raise ValueError(msg)
         if lo & 0x0F == 0x08:  # noqa: PLR2004
             quad = Quadrant(
                 pattern=(w >> 8 & 0xFF) if w & 0x40 else None,
@@ -342,11 +381,11 @@ def read_tree(node: Node, *, color: bool = False) -> Tree | None:
             if w >> 31:
                 image_flags = quad.image_flags = word(nxt)
                 nxt += 4
-            if w & 0x10 or any(states.values()) or image_flags & 2:
+            if seeded or any(states.values()) or image_flags & 2:
                 at = word(nxt)
                 nxt += 4
-                if w & 0x10:
-                    quad.seed = word(at)
+                if seeded:
+                    seed_slot(quad, w, off, word(at))
                     at += 4
                 for name, _, size in QUAD_PARAMS:
                     n = 1 if name == "opacity" and not color else size
@@ -370,8 +409,8 @@ def read_tree(node: Node, *, color: bool = False) -> Tree | None:
             seen[off] = tree = it
             if not w & 0x80:
                 it.count = w >> 8
-            if w & 0x10:
-                it.seed = word(nxt)
+            if seeded:
+                seed_slot(it, w, off, word(nxt))
                 nxt += 4
             if w & 0x80:
                 it.count = Param(CODE, code=word(nxt) + BASE)
@@ -382,8 +421,8 @@ def read_tree(node: Node, *, color: bool = False) -> Tree | None:
         elif lo & 0x07 == 0x01:
             sw = Switch(value=bool(w & 0x40), inherited=bool(w & 0x08))
             seen[off] = tree = sw
-            if w & 0x10:
-                sw.seed = word(nxt)
+            if seeded:
+                seed_slot(sw, w, off, word(nxt))
                 nxt += 4
             if w & 0x80:
                 sw.value = Param(CODE, code=word(nxt) + BASE)
