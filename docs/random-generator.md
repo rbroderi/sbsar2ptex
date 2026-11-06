@@ -365,11 +365,15 @@ iterate_step(s) =
     (s * ITERATE_M + ITERATE_C) & 0xFFFFFFFF
 ```
 
-The optional output 0 is evaluated once using the Iterate node's effective
-state unchanged:
+The optional output 0 is evaluated once using the Iterate node's
+**incoming** state unchanged, not its effective state: the Iterate's own
+seed and `randominherited` flag do not reach it (measured: seed 5 and
+seed 0, inheriting or not, render output 0 identically;
+`docs/fxmap-node-0x09.md` section 2.6). The two are equal when the
+node's seed is 0 and it inherits:
 
 ```text
-output0.incoming = iterate_effective
+output0.incoming = iterate_incoming
 ```
 
 For output 1, keep a private pass state. Advance it before every repeated
@@ -472,7 +476,7 @@ function enter_node(node, incoming, depth, context):
         count = evaluate_count_with_private_rng(effective, context)
 
         if node.output0 exists:
-            enter_node(node.output0, effective, depth, context)
+            enter_node(node.output0, incoming, depth, context)
 
         pass_state = effective
         for number in range(count):
