@@ -168,8 +168,8 @@ def test_too_many_splats_drawn_as_lanes_is_too_big(
         fxsplat.splats(node, root, st, {}, color=False, size=8)
 
 
-def test_a_stateful_walk_defers_its_stateless_subtrees() -> None:
-    asm = Asm()
+def stateful_tree(asm: Asm) -> tuple[fxmap.Tree, ...]:
+    """Return (root, sub, noisy, pick): a walk ``sub`` reads the state of."""
     # Iterate: count 40, setting v5 = 0.25; each pass's Switch reads v5,
     # adds rand, keeps its fraction in v5 and v6 = 0.3 v5, true past 0.3;
     # the Quadrant subtree reads v6.
@@ -187,7 +187,12 @@ def test_a_stateful_walk_defers_its_stateless_subtrees() -> None:
     setter = code(asm.block(("f", 0.5), (0x07, FLOAT, 1, [0, 5]), ("f", 1.0)))
     noisy = fxmap.Quadrant(pattern=6, params={"opacity": setter})
     pick = fxmap.Switch(value=code(switch), if_true=sub, if_false=noisy)
-    root = fxmap.Iterate(count=count, repeated=pick)
+    return fxmap.Iterate(count=count, repeated=pick), sub, noisy, pick
+
+
+def test_a_stateful_walk_defers_its_stateless_subtrees() -> None:
+    asm = Asm()
+    root, sub, noisy, pick = stateful_tree(asm)
     st = fxmap.Settings(seed=99)
     node = asm.node()
     later = fxsplat._deferrable(node, root, st)
@@ -197,6 +202,63 @@ def test_a_stateful_walk_defers_its_stateless_subtrees() -> None:
     assert id(pick) not in later
     assert id(root) not in later
     assert len(splats_both(node, root, st)) > 40
+
+
+def test_deferred_subtrees_past_lanes_max_run_in_smaller_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asm = Asm()
+    root = stateful_tree(asm)[0]
+    st = fxmap.Settings(seed=99)
+    node = asm.node()
+    # one entry spreads to 4 lanes: runs of entries are halved till they fit
+    monkeypatch.setattr(fxsplat, "LANES_MAX", 9)
+    assert len(splats_both(node, root, st)) > 40
+    # one entry alone spreads further: the plain walk draws
+    monkeypatch.setattr(fxsplat, "LANES_MAX", 3)
+    kw = {"color": False, "size": 8}
+    with pytest.raises(fxsplat._Spread):
+        fxsplat._walk(node, root, st, {}, defer=True, **kw)
+    want = fxsplat._walk(node, root, st, {}, defer=False, **kw)
+    assert bits(fxsplat.splats(node, root, st, {}, **kw)) == bits(want)
+
+
+def test_deferred_runs_past_max_splats_are_too_big_without_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asm = Asm()
+    root = stateful_tree(asm)[0]
+    st = fxmap.Settings(seed=99)
+    node = asm.node()
+    monkeypatch.setattr(fxsplat, "LANES_MAX", 9)
+    lanes: list[int] = []
+    evaluate_lanes = fxsplat.evaluate_lanes
+    monkeypatch.setattr(
+        fxsplat, "evaluate_lanes", lambda *a: lanes.append(a[4]) or evaluate_lanes(*a)
+    )
+    fxsplat._walk(node, root, st, {}, color=False, size=8, defer=True)
+    every = sum(lanes)
+    lanes.clear()
+    monkeypatch.setattr(fxsplat, "MAX_SPLATS", 60)
+    with pytest.raises(fxsplat.TooBig):
+        fxsplat._walk(node, root, st, {}, color=False, size=8, defer=False)
+    with pytest.raises(fxsplat._Counted):
+        fxsplat._walk(node, root, st, {}, color=False, size=8, defer=True)
+    # it stopped once the runs so far drew past MAX_SPLATS
+    assert 0 < sum(lanes) < every
+    # TooBig, or the same splats, as the plain walk, whatever MAX_SPLATS
+    kw = {"color": False, "size": 8}
+    for most in range(0, 130, 3):
+        monkeypatch.setattr(fxsplat, "MAX_SPLATS", most)
+        try:
+            want = bits(fxsplat._walk(node, root, st, {}, defer=False, **kw))
+        except fxsplat.TooBig:
+            want = "TooBig"
+        try:
+            got = bits(fxsplat.splats(node, root, st, {}, **kw))
+        except fxsplat.TooBig:
+            got = "TooBig"
+        assert got == want, most
 
 
 # Packing, raster and pixel work.

@@ -281,7 +281,10 @@ def _walk(
         return [out[k] for k in fxdraw.order(out)]
     at = [k for k, d in enumerate(out) if isinstance(d, _Deferred)]
     later = [out[k] for k in at]
-    kw = {"color": color, "size": size}
+    # the walk's own splats met before each entry's next one (all, the last's)
+    met_own = np.cumsum([isinstance(s, Splat) for s in out], dtype=np.int64)
+    own = [int(met_own[k]) for k in at[1:]] + [int(met_own[-1]) if out else 0]
+    kw = {"color": color, "size": size, "own": own}
     entry, cols, values = _lanes(later, block_at, inputs, weights, settings, **kw)
     walked = [k for k, s in enumerate(out) if isinstance(s, Splat)]
     mine = [out[k] for k in walked]
@@ -389,7 +392,11 @@ def _deferrable(
 
 
 LANES_MAX = 1 << 22
-"""Most lanes a level of deferred subtrees may spread to (else the walk draws)."""
+"""Most lanes a run of deferred subtrees may spread to, all levels together."""
+
+
+class _Spread(Diverged):
+    """The deferred subtrees spread to more than LANES_MAX lanes."""
 
 
 @dataclass
@@ -485,8 +492,12 @@ def _lanes(
     *,
     color: bool,
     size: int,
+    own: Sequence[int] = (),
 ) -> tuple[np.ndarray, dict[str, np.ndarray], np.ndarray]:
     """Return the deferred subtrees' splats in the walk's order (_gather's).
+
+    ``own``: how many of the walk's own splats it met before each entry's
+    next one (by entry; all of them, for the last).
 
     Entries into one node at one depth run together, as lanes: each node's
     functions run once for all its lanes (function.evaluate_lanes,
@@ -530,7 +541,7 @@ def _lanes(
             return
         spread += count
         if spread > LANES_MAX:
-            raise Diverged
+            raise _Spread
         cell = 0.5**depth
         inherited = not isinstance(t, (fxmap.Iterate, fxmap.Switch)) or t.inherited
         base = front.incoming if inherited else np.zeros_like(front.incoming)
@@ -592,7 +603,7 @@ def _lanes(
                 return
             passes = np.maximum(passes, 0)
             if int(passes.sum()) > LANES_MAX:
-                raise Diverged
+                raise _Spread
             lane = np.repeat(np.arange(count), passes)
             i = np.arange(len(lane)) - (np.cumsum(passes) - passes)[lane]
             again = front.take(lane)
@@ -654,10 +665,12 @@ def _lanes(
         batch["path"] = [k[keep] for k in front.path]
         drawn.append(batch)
 
-    groups: dict[tuple[int, int], list[int]] = {}
-    for k, d in enumerate(entries):
-        groups.setdefault((id(d.tree), d.depth), []).append(k)
-    with np.errstate(all="ignore"):
+    def run_entries(first: int, stop: int) -> None:
+        """Draw entries ``first`` to ``stop``: into one node at one depth, together."""
+        groups: dict[tuple[int, int], list[int]] = {}
+        for k in range(first, stop):
+            d = entries[k]
+            groups.setdefault((id(d.tree), d.depth), []).append(k)
         for members in groups.values():
             group = [entries[k] for k in members]
             front = _Front(
@@ -669,6 +682,30 @@ def _lanes(
                 _stores(group),
             )
             enter(group[0].tree, front, group[0].depth)
+
+    # Entries run in the walk's order, as many at a time as LANES_MAX allows
+    # (a run that spreads further is halved). Once the runs so far, with the
+    # walk's own splats met before the next entry, are past MAX_SPLATS,
+    # every function before that point in the walk's order has run without
+    # error (the walk's own ones ran before), so the plain walk would get
+    # there too and raise TooBig: _Counted.
+    first, chunk, total = 0, len(entries), 0
+    with np.errstate(all="ignore"):
+        while first < len(entries):
+            stop = min(first + chunk, len(entries))
+            mark, spread = len(drawn), 0
+            try:
+                run_entries(first, stop)
+            except _Spread:
+                if stop - first == 1:
+                    raise
+                del drawn[mark:]
+                chunk = (stop - first) // 2
+                continue
+            total += sum(len(b["x"]) for b in drawn[mark:])
+            if total + (own[stop - 1] if own else 0) > MAX_SPLATS:
+                raise _Counted
+            first = stop
     return _gather(drawn, 4 if color else 1)
 
 
