@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 
+import numpy as np
+
 FLOAT, INT, BOOL = 1, 2, 0
 NO_VALUE = 0xFFFF
 """An operand naming no value: a sequence whose result the cooker dropped."""
@@ -97,10 +99,19 @@ class Block:
     """A decoded code block: instructions; its value is the last one's."""
 
     instrs: list[Instr] = field(default_factory=list)
+    _loops: "dict[int, Loop] | None" = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def uids(self) -> set[int]:
         """Return the graph inputs (uids) the block reads."""
         return {i.u32s()[0] for i in self.instrs if i.op == 0x02}  # noqa: PLR2004
+
+    def loops(self) -> "dict[int, Loop]":
+        """Return ``loops(self)``, found once (the instructions as they are then)."""
+        if self._loops is None:
+            self._loops = loops(self)
+        return self._loops
 
 
 def u16s(words: list[int]) -> list[int]:
@@ -376,6 +387,49 @@ def _dropped(ins: Instr, first: list) -> list:
     return first
 
 
+class _Scalars:
+    """evaluate's arithmetic: a value's components are Python numbers."""
+
+    f32 = staticmethod(f32)
+    sin = staticmethod(engine_sin)
+    cos = staticmethod(engine_cos)
+    div = staticmethod(_div)
+    mod = staticmethod(_mod)
+    as_kind = staticmethod(_as)
+    dropped = staticmethod(_dropped)
+
+    @staticmethod
+    def lift(values: list) -> list:
+        return values
+
+    @staticmethod
+    def binary(op: int, a: Any, b: Any, kind: int) -> Any:  # noqa: ARG004
+        return _BINARY[op](a, b)
+
+    @staticmethod
+    def unary(op: int, a: Any, kind: int) -> Any:  # noqa: ARG004
+        return _UNARY[op](a)
+
+    @staticmethod
+    def atan2(y: Any, x: Any, kind: int) -> Any:  # noqa: ARG004
+        return math.atan2(y, x)
+
+    @staticmethod
+    def select(c: Any, a: list, b: list) -> list:
+        return a if c else b
+
+    @staticmethod
+    def truth(c: Any) -> bool:
+        return bool(c)
+
+    @staticmethod
+    def unconverted(ins: Instr) -> None:
+        """Leave an instruction of no known type as computed."""
+
+
+_SCALARS = _Scalars()
+
+
 def evaluate(
     block: Block,
     inputs: dict[int, list],
@@ -396,10 +450,22 @@ def evaluate(
     loop's condition and body ranges again per iteration), so each value is
     stored by its index and a read sees its most recent run.
     """
+    var: dict[int, list] = {} if variables is None else variables
+    return _run(block, inputs, builtins, rand, var, _SCALARS)
+
+
+def _run(
+    block: Block,
+    inputs: Mapping[int, list],
+    builtins: Mapping[int, list] | None,
+    rand: Callable[[Any], Any] | None,
+    var: dict[int, list],
+    num: Any,
+) -> list:
+    """Run ``block`` with ``num``'s arithmetic (_Scalars, or lanes.Lanes)."""
     instrs = block.instrs
     vals: list[list] = [[] for _ in instrs]
-    var: dict[int, list] = {} if variables is None else variables
-    starts = loops(block)
+    starts = block.loops()
 
     def run(lo: int, hi: int, own: Loop | None = None) -> None:
         """Run instructions lo to hi, both included, and the loops among them."""
@@ -424,30 +490,33 @@ def evaluate(
                 msg = f"while #{loop.at} still running after {n} iterations"
                 raise FunctionError(msg)
             run(loop.start, loop.cond, loop)
-            if vals[loop.cond][0]:
+            if num.truth(vals[loop.cond][0]):
                 break
             run(loop.cond + 1, loop.body)
             n += 1
         ins = instrs[loop.at]
-        vals[loop.at] = vals[loop.body] if n else _as(ins.type, [0] * ins.width)
+        zero = num.as_kind(ins.type, num.lift([0] * ins.width))
+        vals[loop.at] = vals[loop.body] if n else zero
 
     def step(ins: Instr) -> list:
         """Return one instruction's value (a while is run_loop's)."""
         ops, op = ins.operands, ins.op
         if op == 0x00:
-            v = constant(ins)
+            v = num.lift(constant(ins))
         elif op == 0x01 and builtins is not None:
-            v = builtins[ops[0]]
+            v = num.lift(builtins[ops[0]])
         elif op == 0x02:  # noqa: PLR2004
-            v = inputs[ins.u32s()[0]]
+            v = num.lift(inputs[ins.u32s()[0]])
         elif op == 0x04:  # noqa: PLR2004
-            v = var.get(ops[0], [0.0] * ins.width)
+            v = var.get(ops[0])
+            if v is None:
+                v = num.lift([0.0] * ins.width)
         elif op == 0x07:  # noqa: PLR2004
             var[ops[1]] = v = vals[ops[0]]
         elif op == 0x09:  # noqa: PLR2004
-            v = vals[ops[1]] if vals[ops[0]][0] else vals[ops[2]]
+            v = num.select(vals[ops[0]][0], vals[ops[1]], vals[ops[2]])
         elif op == 0x0C:  # noqa: PLR2004
-            v = vals[ops[1]] if ops[1] != NO_VALUE else _dropped(ins, vals[ops[0]])
+            v = vals[ops[1]] if ops[1] != NO_VALUE else num.dropped(ins, vals[ops[0]])
         elif op in (0x0D, 0x0E, 0x0F):
             v = [x for o in ops for x in vals[o]]
         elif op == 0x10:  # noqa: PLR2004
@@ -458,39 +527,283 @@ def evaluate(
         elif op == 0x18:  # noqa: PLR2004
             acc = 0.0
             for x, y in zip(vals[ops[0]], vals[ops[1]], strict=True):
-                acc = f32(acc + f32(x * y))
+                acc = num.f32(acc + num.f32(x * y))
             v = [acc]
         elif op == 0x2D:  # noqa: PLR2004
             x, y = vals[ops[0]][:2]
-            v = [math.atan2(y, x)]
+            v = [num.atan2(y, x, ins.type)]
         elif op == 0x2E:  # noqa: PLR2004
             rho, theta = vals[ops[0]][0], vals[ops[1]][0]
-            v = [f32(rho * engine_cos(theta)), f32(rho * engine_sin(theta))]
+            v = [num.f32(rho * num.cos(theta)), num.f32(rho * num.sin(theta))]
         elif op == 0x2F:  # noqa: PLR2004
             a, b = _spread(vals[ops[0]], vals[ops[1]])
             t = vals[ops[2]] * (len(a) if len(vals[ops[2]]) == 1 else 1)
-            v = [f32(p + f32(f32(q - p) * s)) for p, q, s in zip(a, b, t, strict=True)]
+            f = num.f32
+            v = [f(p + f(f(q - p) * s)) for p, q, s in zip(a, b, t, strict=True)]
         elif op == 0x32 and rand is not None:  # noqa: PLR2004
             v = [rand(vals[ops[0]][0])]
         elif op in _BINARY or op in (0x15, 0x16):
             a, b = _spread(vals[ops[0]], vals[ops[1]])
+            kind = ins.type
             if op == 0x15:  # noqa: PLR2004
-                v = [_div(p, q, ins.type) for p, q in zip(a, b, strict=True)]
+                v = [num.div(p, q, kind) for p, q in zip(a, b, strict=True)]
             elif op == 0x16:  # noqa: PLR2004
-                v = [_mod(p, q, ins.type) for p, q in zip(a, b, strict=True)]
+                v = [num.mod(p, q, kind) for p, q in zip(a, b, strict=True)]
             else:
-                v = [_BINARY[op](p, q) for p, q in zip(a, b, strict=True)]
+                v = [num.binary(op, p, q, kind) for p, q in zip(a, b, strict=True)]
         elif op in _UNARY:
-            v = [_UNARY[op](p) for p in vals[ops[0]]]
+            v = [num.unary(op, p, ins.type) for p in vals[ops[0]]]
         else:
             msg = f"cannot evaluate {ins.name}"
             raise FunctionError(msg)
-        if op not in (0x07, 0x09, 0x0C) and ins.type in (FLOAT, INT, BOOL):
-            v = _as(ins.type, v)
+        if op not in (0x07, 0x09, 0x0C):
+            if ins.type in (FLOAT, INT, BOOL):
+                v = num.as_kind(ins.type, v)
+            else:
+                num.unconverted(ins)
         return v
 
     run(0, len(instrs) - 1)
     return vals[-1]
+
+
+# Lanes: one block evaluated for many inputs at once (an FX-Map's tree
+# nodes, all of a level), each component a numpy array of one value a lane.
+# The arithmetic is evaluate's, bit for bit: floats are float64 arrays
+# holding what evaluate's Python floats hold, rounded to float32 where it
+# rounds; ints (and bools, as 0 or 1: Python's bools add and compare as
+# ints) are int64 arrays. Ops numpy has no exact twin of (exp, log, pow,
+# atan2...) run evaluate's own function a lane at a time.
+
+
+class Diverged(Exception):  # noqa: N818
+    """Lanes that evaluate cannot follow together: run them one by one."""
+
+
+_INT_SAFE = 1 << 31
+"""Ints past this (a dropped sequence's rounding) could overflow int64 math."""
+
+
+def _is_int(x: np.ndarray) -> bool:
+    return x.dtype.kind in "iub"
+
+
+class Lanes:
+    """evaluate's arithmetic over ``n`` lanes: components are numpy arrays."""
+
+    def __init__(self, n: int) -> None:
+        """Lanes ``n`` wide."""
+        self.n = n
+
+    def lift(self, values: list) -> list[np.ndarray]:
+        """Return components as lane arrays (numbers repeated)."""
+        out = []
+        for x in values:
+            if isinstance(x, np.ndarray):
+                out.append(x.astype(np.int64) if x.dtype.kind == "b" else x)
+            else:
+                kind = np.int64 if isinstance(x, int) else np.float64
+                out.append(np.full(self.n, x, dtype=kind))
+        return out
+
+    @staticmethod
+    def f32(x: Any) -> np.ndarray:
+        """Return ``x`` rounded to float32, as float64s (f32's overflow: inf)."""
+        return np.asarray(x, dtype=np.float64).astype(np.float32).astype(np.float64)
+
+    def lanewise(self, kind: int, fn: Callable, *args: np.ndarray) -> np.ndarray:
+        """Return evaluate's ``fn`` of each lane, converted to ``kind``."""
+        lanes = zip(*(a.tolist() for a in args), strict=True)
+        out = [_as(kind, [fn(*xs)])[0] for xs in lanes]
+        return np.array(out, dtype=np.float64 if kind == FLOAT else np.int64)
+
+    def sin(self, x: np.ndarray) -> np.ndarray:
+        """Return engine_sin of each lane."""
+        x = np.asarray(x, dtype=np.float64)
+        f = self.f32
+        t = f(x * _TURN)
+        ok = np.isfinite(x)
+        if (ok & ~np.isfinite(t)).any():  # round(inf) raises: as evaluate
+            return self.lanewise(FLOAT, engine_sin, x)
+        t = f(t - (np.rint(t) + 0.0))  # (round's int: no -0.0)
+        t = np.where(t > 0.25, f(0.5 - t), np.where(t < -0.25, f(-0.5 - t), t))  # noqa: PLR2004
+        c1, c3, c5, c7 = _SIN
+        t2 = f(t * t)
+        p = f(c5 - f(c7 * t2))
+        p = f(f(p * t2) - c3)
+        p = f(f(p * t2) + c1)
+        return np.where(ok, f(p * t), np.nan)
+
+    def cos(self, x: np.ndarray) -> np.ndarray:
+        """Return engine_cos of each lane."""
+        return self.sin(self.f32(self.f32(x) + _QUARTER))
+
+    def div(self, a: np.ndarray, b: np.ndarray, kind: int) -> np.ndarray:
+        """Return _div of each lane."""
+        nz = b != 0
+        q = a / np.where(nz, b, 1)
+        if kind == INT:
+            if not np.isfinite(q[nz]).all():  # int(inf) raises: as evaluate
+                return self.lanewise(kind, lambda p, r: _div(p, r, kind), a, b)
+            return np.where(nz, np.trunc(q), 0.0)
+        zero = np.where(a != 0, np.copysign(np.inf, a), np.nan)
+        return np.where(nz, q, zero)
+
+    def mod(self, a: np.ndarray, b: np.ndarray, kind: int) -> np.ndarray:
+        """Return _mod of each lane."""
+        ints = _is_int(a), _is_int(b)
+        if ints[0] != ints[1] or (kind == FLOAT and ints[1]):
+            # exact int products of a float's floor: evaluate's own
+            return self.lanewise(kind, lambda p, r: _mod(p, r, kind), a, b)
+        zero = b == 0
+        bs = np.where(zero, 1, b)
+        q = a / bs if kind != FLOAT else self.f32(a / bs)
+        if not np.isfinite(q[~zero]).all():  # math.floor(inf) raises
+            return self.lanewise(kind, lambda p, r: _mod(p, r, kind), a, b)
+        fl = np.floor(q) + 0.0  # (math.floor's int: no -0.0)
+        if kind != FLOAT:
+            r = a - bs * (fl.astype(np.int64) if ints[1] else fl)
+        else:
+            r = self.f32(a - self.f32(bs * fl))
+        return np.where(zero, 0.0, r)
+
+    def binary(  # noqa: PLR0911
+        self, op: int, a: np.ndarray, b: np.ndarray, kind: int
+    ) -> np.ndarray:
+        """Return _BINARY[op] of each lane."""
+        if op == 0x12:  # noqa: PLR2004
+            return a + b
+        if op == 0x13:  # noqa: PLR2004
+            return a - b
+        if op == 0x14:  # noqa: PLR2004
+            return a * b
+        if op == 0x1A:  # noqa: PLR2004
+            return ((a != 0) & (b != 0)).astype(np.int64)
+        if op == 0x1B:  # noqa: PLR2004
+            return ((a != 0) | (b != 0)).astype(np.int64)
+        compare = _COMPARE.get(op)
+        if compare is not None:
+            return compare(a, b).astype(np.int64)
+        if op == 0x30:  # noqa: PLR2004 - min(a, b): b only when below
+            return np.where(b < a, b, a)
+        if op == 0x31:  # noqa: PLR2004
+            return np.where(b > a, b, a)
+        return self.lanewise(kind, _BINARY[op], a, b)
+
+    def unary(self, op: int, a: np.ndarray, kind: int) -> np.ndarray:  # noqa: PLR0911
+        """Return _UNARY[op] of each lane."""
+        if op == 0x17:  # noqa: PLR2004
+            return -a
+        if op == 0x1C:  # noqa: PLR2004
+            return (a == 0).astype(np.int64)
+        if op == 0x23:  # noqa: PLR2004
+            return np.abs(a)
+        if op in (0x24, 0x25):  # math's floor and ceil: nan past the finite
+            if _is_int(a):
+                return a
+            r = np.floor(a) if op == 0x24 else np.ceil(a)  # noqa: PLR2004
+            # (math's are ints: no -0.0)
+            return np.where(np.isfinite(a), r + 0.0, np.nan)
+        if op == 0x26:  # noqa: PLR2004
+            return self.cos(a)
+        if op == 0x27:  # noqa: PLR2004
+            return self.sin(a)
+        if op == 0x28:  # noqa: PLR2004
+            ok = a >= 0
+            return np.where(ok, np.sqrt(np.where(ok, a, 0).astype(np.float64)), np.nan)
+        return self.lanewise(kind, _UNARY[op], a)
+
+    def atan2(self, y: np.ndarray, x: np.ndarray, kind: int) -> np.ndarray:
+        """Return math.atan2 of each lane."""
+        return self.lanewise(kind, math.atan2, y, x)
+
+    def as_kind(self, kind: int, values: list) -> list[np.ndarray]:
+        """Return _as of each lane: floats to float32, ints wrapped, bools 0 or 1."""
+        if kind == FLOAT:
+            return [self.f32(x) for x in values]
+        if kind == INT:
+            return [self.wrap(x) for x in values]
+        return [(np.asarray(x) != 0).astype(np.int64) for x in values]
+
+    @staticmethod
+    def wrap(x: np.ndarray) -> np.ndarray:
+        """Return _as(INT): truncated, wrapped to 32 bits; 0 past the finite."""
+        if not _is_int(x):
+            ok = np.isfinite(x)
+            # fmod is exact: the truncation's low 32 bits, as int(x) & mask
+            x = np.where(ok, np.fmod(np.trunc(np.where(ok, x, 0)), 2.0**32), 0)
+            x = x.astype(np.int64)
+        return ((x.astype(np.int64) + _INT_SAFE) & 0xFFFFFFFF) - _INT_SAFE
+
+    @staticmethod
+    def select(c: np.ndarray, a: list, b: list) -> list:
+        """Return each lane's a where c, else b (of one width and kind)."""
+        if len(a) != len(b) or any(
+            _is_int(x) != _is_int(y) for x, y in zip(a, b, strict=True)
+        ):
+            raise Diverged
+        pick = c != 0
+        return [np.where(pick, x, y) for x, y in zip(a, b, strict=True)]
+
+    @staticmethod
+    def truth(c: np.ndarray) -> bool:
+        """Return a loop condition all lanes agree on (else Diverged)."""
+        t = c != 0
+        if t.all():
+            return True
+        if not t.any():
+            return False
+        raise Diverged
+
+    def dropped(self, ins: Instr, first: list) -> list:
+        """Return _dropped of each lane."""
+        if len(first) != ins.width:
+            return self.lift([0.0] * ins.width)
+        if ins.type != INT:
+            return first
+        out = []
+        for x in first:
+            if not _is_int(x):
+                ok = np.isfinite(x)
+                if (np.abs(x[ok]) >= _INT_SAFE).any():
+                    raise Diverged
+                x = np.where(ok, np.rint(np.where(ok, x, 0)), 0).astype(np.int64)  # noqa: PLW2901
+            out.append(x)
+        return out
+
+    @staticmethod
+    def unconverted(ins: Instr) -> None:  # noqa: ARG004
+        """Values left as computed (no known type) may mix kinds lane by lane."""
+        raise Diverged
+
+
+_COMPARE: dict[int, Callable[[Any, Any], Any]] = {
+    0x1D: np.equal, 0x1E: np.not_equal, 0x1F: np.greater,
+    0x20: np.greater_equal, 0x21: np.less, 0x22: np.less_equal,
+}  # fmt: skip
+
+
+def evaluate_lanes(
+    block: Block,
+    inputs: Mapping[int, list],
+    builtins: Mapping[int, list],
+    rand: Callable[[np.ndarray], np.ndarray] | None,
+    n: int,
+    variables: dict[int, list] | None = None,
+) -> list[np.ndarray]:
+    """Return ``evaluate`` of the block over ``n`` lanes at once, bit for bit.
+
+    ``builtins`` components may be lane arrays (or numbers, the same in all
+    lanes); ``rand(a)`` takes and returns lane arrays. ``variables``, read
+    and written in place, holds lane arrays (int64 for ints and bools,
+    float64 for floats); empty if not given. Raises what evaluate raises,
+    or Diverged where lanes would part ways (an if/else between values of
+    different widths or kinds, a loop condition they disagree on): then
+    evaluate each lane.
+    """
+    var: dict[int, list] = {} if variables is None else variables
+    with np.errstate(all="ignore"):
+        return _run(block, inputs, builtins, rand, var, Lanes(n))
 
 
 # Interval bounds (for culling): each component's (low, high), or infinite.
