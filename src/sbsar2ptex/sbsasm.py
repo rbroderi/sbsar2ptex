@@ -99,6 +99,7 @@ _PAIRS = {
     26: "sharpen",
     30: "levels",
     32: "input",
+    34: "text",
     38: "dyngradient",
     40: "pixelprocessor",
     42: "distance",
@@ -147,6 +148,7 @@ _LAYOUT = {
     29: ("input",),
     30: ("-", "input"),
     32: ("uid",),
+    34: ("-", "-", "-", "-"),  # F, 0, the text and font records (text_record)
     37: ("-", "input"),
     38: ("input", "gradient"),
     42: ("-", "mask", "source"),
@@ -184,6 +186,43 @@ UNSEEDED_OPS = frozenset({32, 33})
 SEED_NONE, SEED_INLINE, SEED_CODE = 0, 1, 2
 """Node flag bits 6-7, the seed state (docs/node-seed.md section 1)."""
 UINT32 = 0xFFFFFFFF
+
+
+TEXT_OPS = (34, 35)
+"""Text nodes (docs/op-34.md): gray and color."""
+CODE_COUNT.update(dict.fromkeys(TEXT_OPS, 1))  # (their size function's)
+
+
+def text_record(data: bytes, offset: int) -> list[int] | None:
+    """Return the code points of a Text node's string at ``offset`` (op-34.md 2.3).
+
+    A u32 count, then that many u32 code points; offset 0 is the empty
+    string. None when the record does not fit in ``data``.
+    """
+    if offset == 0:
+        return []
+    at = offset + BASE
+    if offset % 4 or at + 4 > len(data):
+        return None
+    (n,) = struct.unpack_from("<I", data, at)
+    if at + 4 + 4 * n > len(data):
+        return None
+    return list(struct.unpack_from(f"<{n}I", data, at + 4))
+
+
+def font_record(data: bytes, offset: int) -> bytes | None:
+    """Return a Text node's embedded font file at ``offset`` (op-34.md 2.4).
+
+    A u32 (an identifier), a u32 byte length, then the font file's bytes.
+    None for offset 0 (no font) or a record that does not fit.
+    """
+    at = offset + BASE
+    if offset == 0 or offset % 4 or at + 8 > len(data):
+        return None
+    (n,) = struct.unpack_from("<I", data, at + 4)
+    if at + 8 + n > len(data):
+        return None
+    return data[at + 8 : at + 8 + n]
 
 
 class UnsupportedError(Exception):
@@ -371,6 +410,11 @@ class Node:
     """Flag bit 0: the output-size function's block (file offset)."""
     unsupported: str | None = None
     """Why the node's layout could not be read (seed state 3...), if so."""
+    text: list[int] | None = None
+    """A Text node (op 34/35): its string's code points (text_record), if
+    read; empty for offset 0."""
+    font: bytes | None = None
+    """A Text node: its embedded font file; None for offset 0 or unread."""
 
     @property
     def seed_state(self) -> int:
@@ -507,7 +551,12 @@ class Asm:
         bounds = sorted(starts)
         nxt = dict(zip(bounds, [*bounds[1:], self.defaults_at], strict=True))
         known = {uid for uid, _ in self.inputs}
-        return [self._node(i, s, nxt[s], known) for i, s in enumerate(starts)]
+        found = [self._node(i, s, nxt[s], known) for i, s in enumerate(starts)]
+        for node in found:
+            if node.op in TEXT_OPS and len(node.fields) == 4:  # noqa: PLR2004
+                node.text = text_record(self.d, node.fields[2])
+                node.font = font_record(self.d, node.fields[3])
+        return found
 
     def _node(self, index: int, start: int, end: int, known: set[int]) -> Node:
         node = Node(index, start, end)

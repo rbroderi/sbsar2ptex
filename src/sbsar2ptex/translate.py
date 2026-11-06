@@ -1270,6 +1270,101 @@ def _uniform(node: Node, name: str, *, color: bool, size: int) -> Made:
     return shader(name, [], "f", f"return {num(v)};"), []
 
 
+TEXT_PARAMS = (("background", 2), ("fontcolor", 4), ("matrix", 10),
+               ("position", 6), ("fontsize", 8))  # fmt: skip
+"""A Text node's parameters in their words' order (not bit order), with
+their state's bit in F (docs/op-34.md 2.2)."""
+TEXT_KNOWN_F = 0x3FFC
+"""F's bits in use: five 2-bit states and the alignment (bits 12-13)."""
+
+
+def text_params(node: Node, *, color: bool) -> dict[str, tuple[str, Any]]:
+    """Return a Text node's parameters: (state, value) by name (docs/op-34.md 2).
+
+    "default" (None), "const" (its f32s) or "func" (its block's file
+    offset). Raises UnsupportedError for what the spec does not know: a
+    state 3, an alignment of 3, F bits 0-1 or 14-31 set, a non-zero second
+    word, or words missing.
+    """
+    where = f"node {node.index} (text)"
+    if len(node.fields) < 4:  # noqa: PLR2004
+        msg = f"{where}: its fields could not be read"
+        raise UnsupportedError(msg)
+    f, unknown = node.fields[0], node.fields[1]
+    if f & ~TEXT_KNOWN_F & 0xFFFFFFFF:
+        msg = f"{where}: unknown parameter-state bits {f:#010x}"
+        raise UnsupportedError(msg)
+    if unknown:
+        msg = f"{where}: its second word is {unknown:#x}, not 0 (unknown)"
+        raise UnsupportedError(msg)
+    if f >> 12 & 3 == 3:  # noqa: PLR2004
+        msg = f"{where}: alignment 3 (unknown)"
+        raise UnsupportedError(msg)
+    width = {"background": 4 if color else 1, "fontcolor": 4 if color else 1,
+             "matrix": 4, "position": 2, "fontsize": 1}  # fmt: skip
+    out: dict[str, tuple[str, Any]] = {}
+    at = 0
+    for pname, bit in TEXT_PARAMS:
+        state = f >> bit & 3
+        if state == 0:
+            out[pname] = ("default", None)
+            continue
+        if state == 3:  # noqa: PLR2004
+            msg = f"{where}: {pname} in state 3 (unknown)"
+            raise UnsupportedError(msg)
+        n = width[pname] if state == 1 else 1
+        words = node.inline[at : at + n]
+        if len(words) < n:
+            msg = f"{where}: no words for its {pname}"
+            raise UnsupportedError(msg)
+        at += n
+        if state == 1:
+            out[pname] = ("const", [f32(w) for w in words])
+            continue
+        target = words[0] + BASE
+        if not (node.start < target < node.end and words[0] % 4 == 0):
+            msg = f"{where}: its {pname} function's offset is not in the node"
+            raise UnsupportedError(msg)
+        out[pname] = ("func", target)
+    return out
+
+
+def _text(node: Node, name: str, *, color: bool, size: int) -> Made:
+    """Translate a Text node (docs/op-34.md): drawn without ink, a uniform fill.
+
+    With no font, an empty text or one of spaces only, nothing is drawn and
+    the node is its background colour, filled as a uniform colour is
+    (stored rounds it so: TEXT_OPS). The background stays live: a knob, or
+    its function. Text with ink needs its embedded font's glyphs drawn,
+    which is not translated (UnsupportedError).
+    """
+    params = text_params(node, color=color)
+    text_at, font_at = node.fields[2], node.fields[3]
+    if font_at:
+        text = [] if text_at == 0 else node.text
+        if text is None:
+            msg = f"node {node.index} (text): its text record could not be read"
+            raise UnsupportedError(msg)
+        if any(c != 0x20 for c in text):  # noqa: PLR2004 (a space: no outline)
+            msg = (
+                f"node {node.index} (text): text drawn with an embedded font"
+                " (glyph rendering is not translated)"
+            )
+            raise UnsupportedError(msg)
+    state, value = params["background"]
+    n, t = (4, "rgba") if color else (1, "f")
+    if state == "func":  # (gray: the block returns the colour's mean)
+        bg: Any = dynamic(node, value)
+    else:
+        default = [0.0, 0.0, 0.0, 1.0] if color else [0.0]
+        vals = value if state == "const" else default
+        bg = knob("background", "Background", vals if color else vals[0])
+    return shader(name, [], t, f"return {vec(bg, n)};"), []
+
+
+TEXT_OPS = (34, 35)
+
+
 def _levels(node: Node, name: str, *, color: bool, size: int) -> Made:
     t, n = ("rgba", 4) if color else ("f", 1)
     p = flag_params(node.fields[0], node.inline, LEVELS, n, node)
@@ -4608,6 +4703,8 @@ TRANSLATORS = {
     39: _dyngradient,
     44: _curve,
     45: _curve,
+    34: _text,
+    35: _text,
 }
 """Each op's translator: (node, MM node name, *, color, size log2) -> Made."""
 
@@ -4809,7 +4906,7 @@ def stored(made: Sub, node: Node) -> bool:
         out = next((n for n in out["nodes"] if n["name"] == last), None)
     if out is None or out.get("type") != "shader":
         return False
-    return store_shader(out, steps, fill=node.op in (12, 13))
+    return store_shader(out, steps, fill=node.op in (12, 13, *TEXT_OPS))
 
 
 def store_shader(out: dict[str, Any], steps: int | None, *, fill: bool = False) -> bool:
