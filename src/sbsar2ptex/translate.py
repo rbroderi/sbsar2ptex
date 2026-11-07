@@ -42,6 +42,7 @@ from sbsar2ptex import fxmap
 from sbsar2ptex import fxsplat
 from sbsar2ptex.function import ENGINE_TRIG_GLSL
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
+from sbsar2ptex.function import GETSLOT as GETSLOT_OP
 from sbsar2ptex.function import INT as FUNC_INT
 from sbsar2ptex.function import TRIG_OPS
 from sbsar2ptex.function import Block
@@ -72,6 +73,7 @@ from sbsar2ptex.slots import Aliased
 from sbsar2ptex.slots import SlotStore
 from sbsar2ptex.slots import Writers
 from sbsar2ptex.slots import builtins as slot_builtins
+from sbsar2ptex.slots import reads as slot_reads
 from sbsar2ptex.slots import slot_bounds
 from sbsar2ptex.slots import writer
 from sbsar2ptex.slots import writers
@@ -156,6 +158,18 @@ class _Context:
     (slots.template_slots); its other slots cannot be read."""
     reader: int | None = None
     """The node (index) being translated: it reads only earlier slots."""
+    node_sizes: dict[int, int] = field(default_factory=dict)
+    """The graph's translated nodes' own output sizes (log2), by index."""
+    fixed_nodes: set[int] = field(default_factory=set)
+    """Those of them with an absolute size."""
+    vp_inputs: dict[str, int] = field(default_factory=dict)
+    """Inputs the next shader node made needs for the Value Processor
+    samples its helpers make (_vp_sample): input name -> the image's node."""
+    vp_wires: list[tuple[str, int, int]] = field(default_factory=list)
+    """Such inputs of shader nodes made: (MM node, port, image's node), for
+    translate_graph to wire."""
+    slot_nodes: Sequence[Node] = ()
+    """The graph's nodes, by index (a Value Processor's image input)."""
 
 
 _CTX = _Context()
@@ -543,12 +557,15 @@ def _writer_glsl(slot: int, kind: int, width: int) -> str:
             raise UnsupportedError(msg)
         return glsl[ident]
 
+    def samples(kind: str, index: int, pos: str, filtering: int) -> str:
+        return _vp_sample(w.node, kind, index, pos, filtering)
+
     reader, _CTX.reader = _CTX.reader, w.node
     alias, _CTX.slot_alias = _CTX.slot_alias, None  # the writer is the graph's
     try:
         lines, result = to_glsl(
             w.block, f"s{slot}", lambda uid, *_: _param_for(uid), builtins,
-            engine_trig=_engine_trig(w.block), slots=_writer_glsl,
+            samples, engine_trig=_engine_trig(w.block), slots=_writer_glsl,
         )  # fmt: skip
     except FunctionError as e:
         raise UnsupportedError(str(e)) from e
@@ -557,6 +574,102 @@ def _writer_glsl(slot: int, kind: int, width: int) -> str:
     body = "\n\t".join(lines)
     _CTX.helpers.append(f"{t} {fn}(vec2 uv) {{\n\t{body}\n\treturn {result};\n}}\n")
     return call
+
+
+VP_SAMPLE_OPS = (0x33, 0x34)
+"""samplelum and samplecol (docs/function-sample.md)."""
+
+
+def sampled_images(
+    nodes: Sequence[Node], need: Iterable[int], table: Writers
+) -> set[int]:
+    """Return the images Value Processors sample that nodes ``need`` read.
+
+    The writers of the slots those nodes read, and of the slots those
+    writers read in turn; of each that samples, its image input
+    (docs/function-sample.md 4: the image must be there for the read).
+    """
+    out: set[int] = set()
+    seen: set[int] = set()
+    todo = [s for k in need for s, _, _ in slot_reads(nodes[k])]
+    while todo:
+        slot = todo.pop()
+        if slot in seen:
+            continue
+        seen.add(slot)
+        for w in table.get(slot, []):
+            ins = w.block.instrs
+            todo += [i.operands[0] for i in ins if i.op == GETSLOT_OP and i.operands]
+            vp = nodes[w.node]
+            if any(i.op in VP_SAMPLE_OPS for i in ins) and "input" in vp.inputs:
+                out.add(vp.inputs["input"])
+    return out
+
+
+def vp_image(vp: Node, index: int) -> int:
+    """Return the node a Value Processor's sample of input ``index`` reads.
+
+    docs/function-sample.md 2.1: a Value Processor has one image input, its
+    field after the first; another index was never seen (section 7).
+    """
+    if index != 0:
+        msg = f"node {vp.index}: a Value Processor's sample of input {index}"
+        raise UnsupportedError(msg)
+    if "input" not in vp.inputs:
+        msg = f"node {vp.index}: a Value Processor's sample without an image input"
+        raise UnsupportedError(msg)
+    return vp.inputs["input"]
+
+
+def _vp_sample(vp: int, kind: str, index: int, pos: str, filtering: int) -> str:
+    """Return GLSL for a Value Processor's sample (docs/function-sample.md 3, 4).
+
+    It reads its image input's stored texels at that input's own size: an
+    input of the shader being made (_Context.vp_inputs), wired by
+    translate_graph to an unfiltered 32-bit buffer of the image at its size.
+    Positions wrap. Nearest (filtering 0) reads the texel ``floor(p N) mod
+    N`` (an unfiltered lookup at fract(p) is that texel); bilinear (1) mixes
+    the four texels around ``p N - 0.5`` with full-precision weights.
+    samplelum is the mean of R, G and B of a colour image, the value of a
+    grayscale one; samplecol of a grayscale one is (v, v, v, 1).
+    """
+    if filtering not in (0, 1):
+        msg = f"node {vp}: a sample's filtering {filtering}"
+        raise UnsupportedError(msg)
+    m = vp_image(_CTX.slot_nodes[vp], index)
+    if m not in _CTX.node_sizes:
+        msg = f"node {vp}: its sample's image (node {m}) is not translated"
+        raise UnsupportedError(msg)
+    name = f"vp{m}"
+    _CTX.vp_inputs[name] = m
+    if not filtering:
+        value = f"${name}(fract({pos}))"
+    else:
+        n = (
+            num(float(1 << _CTX.node_sizes[m]))
+            if m in _CTX.fixed_nodes
+            else px_glsl(_CTX.node_sizes[m])
+        )
+        fn = f"sbs_vpbilinear{m}_$(name)"
+        if not any(h.startswith(f"vec4 {fn}(") for h in _CTX.helpers):
+            _CTX.helpers.append(
+                f"vec4 {fn}(vec2 p) {{\n"
+                f"\tvec2 n = vec2({n});\n"
+                "\tvec2 t = p * n - 0.5;\n"
+                "\tvec2 i0 = floor(t);\n"
+                "\tvec2 f = t - i0;\n"
+                f"\tvec4 a = ${name}(fract((i0 + 0.5) / n));\n"
+                f"\tvec4 b = ${name}(fract((i0 + vec2(1.5, 0.5)) / n));\n"
+                f"\tvec4 c = ${name}(fract((i0 + vec2(0.5, 1.5)) / n));\n"
+                f"\tvec4 d = ${name}(fract((i0 + 1.5) / n));\n"
+                "\treturn mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n"
+                "}\n"
+            )
+        value = f"{fn}({pos})"
+    color = _CTX.slot_nodes[m].op in COLOR_OPS
+    if kind == "lum":
+        return f"dot({value}.rgb, vec3(1.0 / 3.0))" if color else f"{value}.r"
+    return value if color else f"vec4(vec3({value}.r), 1.0)"
 
 
 def dynamic(
@@ -795,6 +908,13 @@ def shader(
         msg = f"{name}: $pass_size in a shader's global code"
         raise AssertionError(msg)
     _CTX.helpers, _CTX.params, _CTX.globals = [], {}, []
+    # Value Processor samples' images (_vp_sample): inputs after the others
+    inputs = list(inputs)
+    for inp, m in _CTX.vp_inputs.items():
+        if f"${inp}(" in helpers + body:
+            _CTX.vp_wires.append((name, len(inputs), m))
+            inputs.append((inp, "rgba"))
+    _CTX.vp_inputs = {}
     for prm in params:  # graph inputs only: a node's knobs stay its own
         if prm["name"].startswith(GRAPH_PARAM):
             _CTX.exposed.setdefault(prm["name"], []).append(name)
@@ -5338,6 +5458,7 @@ def translate_graph(
         data_dir=data_dir,
         raster=plugins is not None,
         slot_writers=writers(nodes),
+        slot_nodes=nodes,
     )
     # Functions reading $outputsize see the size the graph renders at, not
     # the archive's default for it.
@@ -5347,10 +5468,13 @@ def translate_graph(
     need: set[int] = set()
     todo = list(outputs.values())
     while todo:
-        k = todo.pop()
-        if k not in need:
-            need.add(k)
-            todo += nodes[k].inputs.values()
+        while todo:
+            k = todo.pop()
+            if k not in need:
+                need.add(k)
+                todo += nodes[k].inputs.values()
+        # the images the Value Processors they read sample (_vp_sample)
+        todo = list(sampled_images(nodes, need, _CTX.slot_writers) - need)
     mm: list[dict[str, Any]] = []
     wires: list[dict[str, Any]] = []
     out_of: dict[int, str] = {}
@@ -5369,6 +5493,23 @@ def translate_graph(
         sizes[k] = _output_size(nodes[k], size)
         if absolute_size(nodes[k], size):
             fixed.add(k)
+    _CTX.node_sizes, _CTX.fixed_nodes = sizes, fixed
+    vp_bufs: dict[int, str] = {}
+
+    def vp_fed(m: int) -> str:
+        """Return image ``m`` as Value Processor samples read it: whole texels.
+
+        An unfiltered 32-bit buffer at its own size (docs/function-sample.md
+        3.1), not the reader's.
+        """
+        if m not in vp_bufs:
+            vp_bufs[m] = f"n{m}_vp"
+            mm.append(
+                buffer(vp_bufs[m], sizes[m], filtering=False, absolute=m in fixed)
+            )
+            wires.append(wire(out_of[m], vp_bufs[m]))
+        return vp_bufs[m]
+
     # a loop's nodes all one size, or it stays unrolled
     loops = {
         k: loop
@@ -5473,6 +5614,7 @@ def translate_graph(
         _CTX.size = own
         _CTX.reader = k
         _CTX.absolute = k in fixed
+        _CTX.vp_inputs, _CTX.vp_wires = {}, []
         loop = loops.get(k)
         sources = loop.inputs if loop is not None else node.inputs
         _CTX.input_bits = {p: input_bits(nodes[m]) for p, m in sources.items()}
@@ -5513,6 +5655,18 @@ def translate_graph(
             for p in n.get(PLUGIN_LINKS, {}):
                 if p.startswith(GRAPH_PARAM):
                     _CTX.exposed.setdefault(p, []).append(n["name"])
+        if _CTX.vp_inputs:  # sampled by helpers no shader took (_vp_sample)
+            msg = f"node {k}: a Value Processor's sample outside a shader node"
+            raise UnsupportedError(msg)
+        made_names = {n["name"] for n in made.nodes}
+        for to, port, m in _CTX.vp_wires:
+            if to not in made_names:  # (a discarded attempt's)
+                continue
+            if m not in out_of:
+                msg = f"node {k}: its Value Processor samples node {m}, not translated"
+                raise UnsupportedError(msg)
+            made.wires.append(wire(vp_fed(m), to, port))
+        _CTX.vp_wires = []
         if (
             made.rounded
             or stored(made, node)

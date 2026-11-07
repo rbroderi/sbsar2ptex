@@ -275,7 +275,9 @@ def reads(node: Node) -> list[tuple[int, int, int]]:
         except (IndexError, ValueError):
             continue
         out += [
-            (i.operands[0], i.type, i.width) for i in block.instrs if i.op == GETSLOT
+            (i.operands[0], i.type, i.width)
+            for i in block.instrs
+            if i.op == GETSLOT and i.operands  # (words that are no block: none)
         ]
     return out
 
