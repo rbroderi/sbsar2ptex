@@ -98,9 +98,11 @@ _PAIRS = {
     2: "blend",
     4: "transformation",
     8: "fxmaps",
+    10: "svg",
     12: "uniform",
     14: "warp",
     16: "emboss",
+    18: "motionblur",
     20: "blur",
     22: "dirmotionblur",
     24: "directionalwarp",
@@ -149,6 +151,7 @@ _LAYOUT = {
     12: (),
     14: ("input", "gradient"),
     16: ("-", "input", "gradient"),
+    18: ("-", "input", "gradient"),  # F, input1, inputgradient (motion-blur-legacy)
     20: ("input",),
     22: ("-", "input"),
     24: ("-", "input", "intensity"),
@@ -193,6 +196,8 @@ _NEIGHBOR = {
                ("shadow", 7, 1))),
     17: ("F", (("intensity", 1, 1), ("angle", 3, 1), ("highlight", 5, 4),
                ("shadow", 7, 4))),
+    # docs/motion-blur-legacy.md 2.2: the shift angle in turns
+    18: ("F", (("intensity", 0, 1), ("angle", 2, 1))),
     20: ("P", (("intensity", 4, 1),)),
     22: ("F", (("intensity", 0, 1), ("angle", 2, 1))),
     24: ("F", (("intensity", 1, 1), ("angle", 3, 1))),

@@ -2992,6 +2992,105 @@ def _dirmotionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     return buffered(made, ["input"], {"input"}, size, precise=precise)
 
 
+MOTION_BLUR_K = "0.335"
+"""The legacy motion blur's scale (docs/motion-blur-legacy.md 3.2)."""
+MOTION_BLUR_W = "0.166666"
+"""Its average's weight: not exactly 1 / 6 (3.2 step 5)."""
+
+
+def motion_blur_glsl(
+    g: str, n: str, k: str, turn: str, v: str, wrap: tuple[bool, bool]
+) -> tuple[str, str]:
+    """Return a legacy motion blur's GLSL helpers and body (motion-blur-legacy 3).
+
+    ``g`` its value type, ``n`` the image width (square), ``k`` the
+    intensity, ``turn`` the shift angle (turns), ``v`` the pixel-size
+    vector (GLSL), ``wrap`` per axis whether tiling wraps (else clamps).
+    The gradient's backward differences, rotated by the angle, scaled to
+    the line's half-step D; six bilinear taps of the input at p +- t D (t =
+    0.5, 1.5, 2.5; each one float32 rounding, fma), their 1/256-quantized
+    fractions rounded; their sum times 0.166666.
+    """
+
+    def index(axis: str, x: str) -> str:
+        if wrap["xy".index(axis)]:
+            return f"mod({x}, {n})"
+        return f"clamp({x}, 0.0, {n} - 1.0)"
+
+    texel = "(vec2({}, {}) + 0.5) / {}".format(
+        index("x", "ij.x"), index("y", "ij.y"), n
+    )
+    helpers = (
+        f"{g} $(name)_tx(vec2 ij) {{\n\treturn $input({texel});\n}}\n"
+        f"{g} $(name)_tap(vec2 q) {{\n"
+        f"\tvec2 x = q * {n} - 0.5;\n"
+        "\tvec2 i0 = floor(x);\n"
+        "\tvec2 f = floor((x - i0) * 256.0 + 0.5) / 256.0;\n"
+        f"\t{g} a = $(name)_tx(i0);\n"
+        f"\t{g} b = $(name)_tx(i0 + vec2(1.0, 0.0));\n"
+        f"\t{g} c = $(name)_tx(i0 + vec2(0.0, 1.0));\n"
+        f"\t{g} d = $(name)_tx(i0 + vec2(1.0));\n"
+        "\treturn mix(mix(a, b, f.x), mix(c, d, f.x), f.y);\n"
+        "}\n"
+        f"float $(name)_h(vec2 ij) {{\n\treturn $gradient({texel});\n}}\n"
+    )
+    body = "\n".join(
+        [
+            f"vec2 pix = floor(uv * {n});",
+            f"vec2 p = (pix + 0.5) / {n};",
+            "float h0 = $(name)_h(pix);",
+            (
+                "vec2 d = vec2(h0 - $(name)_h(pix - vec2(1.0, 0.0)),"
+                " h0 - $(name)_h(pix - vec2(0.0, 1.0)));"
+            ),
+            f"float ang = 6.2831855 * {turn};",
+            "float c = cos(ang);",
+            "float s = sin(ang);",
+            "vec2 r = vec2(d.x * c - d.y * s, d.x * s + d.y * c);",
+            f"vec2 m = ({k} * {v}) * ({n} / 256.0);",
+            f"vec2 D = r * (m * {MOTION_BLUR_K});",
+            f"{g} acc = {g}(0.0);",
+            "for (int i = 1; i <= 3; i++) {",
+            "\tvec2 t = vec2(float(i) - 0.5);",
+            "\tacc += $(name)_tap(fma(t, D, p)) + $(name)_tap(fma(-t, D, p));",
+            "}",
+            f"return acc * {MOTION_BLUR_W};",
+        ]
+    )
+    return helpers, body
+
+
+def _motionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
+    """Legacy motion blur (ops 18 / 19): docs/motion-blur-legacy.md.
+
+    Intensity (default 1) and shift angle (turns, default 0) are live knobs
+    or functions; the pixel-size vector a literal or a function; the tiling
+    (node word P bits 0-1) wraps or clamps each axis.
+    """
+    t = "rgba" if color else "f"
+    g = "vec4" if color else "float"
+    p = flag_params(
+        node.fields[0] if node.fields else 0,
+        node.inline,
+        [("intensity", 0, 1.0), ("angle", 2, 0.0)],
+        1,
+        node,
+    )
+    k = knob("intensity", "Intensity", p["intensity"], 0.0, 16.0)
+    turn = knob("angle", "Shift angle", p["angle"])
+    v = pixel_size_glsl(node) or "vec2(1.0)"
+    tiling = node.flags >> 8 & 3
+    helpers, body = motion_blur_glsl(
+        g, px_glsl(), num(k), num(turn), v, (bool(tiling & 1), bool(tiling & 2))
+    )
+    made = shader(name, [("input", t), ("gradient", "f")], t, body)
+    made["shader_model"]["instance"] = helpers + made["shader_model"]["instance"]
+    return buffered(
+        made, ["input", "gradient"], {"input", "gradient"}, size,
+        precise={"input", "gradient"},
+    )  # fmt: skip
+
+
 def dmb_glsl(g: str, fmt: int, n: str, mask: str, setup: str) -> tuple[str, str]:
     """Return a directional motion blur's GLSL: helpers and the body.
 
@@ -5070,6 +5169,8 @@ TRANSLATORS = {
     15: _warp,
     16: _emboss,
     17: _emboss,
+    18: _motionblur,
+    19: _motionblur,
     20: _blur,
     21: _blur,
     22: _dirmotionblur,
