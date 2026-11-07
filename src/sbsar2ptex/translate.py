@@ -40,6 +40,7 @@ from sbsar2ptex import fxdraw
 from sbsar2ptex import fxglsl
 from sbsar2ptex import fxmap
 from sbsar2ptex import fxsplat
+from sbsar2ptex import svg
 from sbsar2ptex.function import ENGINE_TRIG_GLSL
 from sbsar2ptex.function import FLOAT as FUNC_FLOAT
 from sbsar2ptex.function import GETSLOT as GETSLOT_OP
@@ -3060,6 +3061,44 @@ def motion_blur_glsl(
     return helpers, body
 
 
+def _svg(node: Node, name: str, *, color: bool, size: int) -> Made:
+    """SVG (ops 10 / 11): the vector record drawn over the background.
+
+    docs/svg-filter.md: the background is a live knob (default 0, or its
+    constant) or the background input; the record's triangles and lines
+    (fixed geometry, cooked from the resource) are drawn in record order,
+    each covered pixel its paint's colour (alpha 1), by the exact coverage
+    rule at the output's live size (svg.glsl). An empty record (the corpus
+    default) is the background alone.
+    """
+    del size
+    t = "rgba" if color else "f"
+    paints = node.vector or []
+    if not color:
+        svg.gray_record(paints)
+    state, payload = node.params.get("background", (0, None))
+    inputs: list[tuple[str, str]] = []
+    if state == 3:  # noqa: PLR2004
+        inputs.append(("background", t))
+        bg = "vec4($background(uv))"  # (a grayscale one: its value in .r)
+    elif color:
+        value = payload if state == 1 else [0.0, 0.0, 0.0, 0.0]
+        bg = vec(knob("background", "Background", value), 4)
+    else:
+        value = payload[0] if state == 1 else 0.0
+        bg = f"vec4({num(knob('background', 'Background', value))})"
+    n = px_glsl()
+    helpers, lines = svg.glsl(paints, n, n, color=color)
+    if helpers and svg.SGN_GLSL not in _CTX.globals:  # (shared by every SVG node)
+        _CTX.globals.append(svg.SGN_GLSL)
+    body = "\n".join(
+        [f"vec4 col = {bg};", lines, "return col;" if color else "return col.r;"]
+    )
+    made = shader(name, inputs, t, body)
+    made["shader_model"]["instance"] = helpers + made["shader_model"]["instance"]
+    return made, [i for i, _ in inputs]
+
+
 def _motionblur(node: Node, name: str, *, color: bool, size: int) -> Sub:
     """Legacy motion blur (ops 18 / 19): docs/motion-blur-legacy.md.
 
@@ -5167,6 +5206,8 @@ TRANSLATORS = {
     12: _uniform,
     14: _warp,
     15: _warp,
+    10: _svg,
+    11: _svg,
     16: _emboss,
     17: _emboss,
     18: _motionblur,

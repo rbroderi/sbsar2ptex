@@ -232,6 +232,8 @@ SEED_NONE, SEED_INLINE, SEED_CODE = 0, 1, 2
 UINT32 = 0xFFFFFFFF
 
 
+SVG_OPS = (10, 11)
+"""SVG nodes (docs/svg-filter.md): gray and color."""
 TEXT_OPS = (34, 35)
 """Text nodes (docs/op-34.md): gray and color."""
 CODE_COUNT.update(dict.fromkeys(TEXT_OPS, 1))  # (their size function's)
@@ -483,6 +485,8 @@ class Node:
     read; empty for offset 0."""
     font: bytes | None = None
     """A Text node: its embedded font file; None for offset 0 or unread."""
+    vector: Any = None
+    """An SVG node (op 10/11): its vector record, a svg.Paint list, if read."""
 
     @property
     def seed_state(self) -> int:
@@ -743,11 +747,14 @@ class Asm:
 
         if node.op in (8, 9):
             k = self._fxmap_words(node, rest, is_offset)
+        elif node.op in SVG_OPS:
+            k = self._svg_words(node, rest, is_offset)
         else:
             k = self._words(node, rest, is_offset)
-        walked = node.op in NEIGHBOR_PARAMS and len(node.params) == len(
-            NEIGHBOR_PARAMS[node.op][1]
-        )  # (Asm._neighbor_words set its inline words)
+        walked = node.op in SVG_OPS or (
+            node.op in NEIGHBOR_PARAMS
+            and len(node.params) == len(NEIGHBOR_PARAMS[node.op][1])
+        )  # (Asm._neighbor_words, Asm._svg_words set its inline words)
         if not walked:
             blocks = node.blocks()
             stop = (blocks[0] - start) // 4 - 1 if blocks else len(rest)
@@ -878,6 +885,61 @@ class Asm:
         if k != end:
             bad(f"malformed: its parameter words end at word {k + 1}, not {end + 1}")
         return first
+
+    def _svg_words(self, node: Node, rest: list[int], is_offset) -> int:  # noqa: PLR0911
+        """Read an SVG node's words (docs/svg-filter.md section 2).
+
+        The record offset (always; Node.fields), the size function's offset
+        (flag bit 0), then the background by P bits 1-2: 0 none, 1 one f32
+        (op 10) or four (op 11) in Node.inline and Node.params, 3 an input
+        node. A seed state (never seen), P bits 1-2 = 2 (a background
+        function, never seen), any other P bit, or a malformed record mark
+        the node unsupported (section 7).
+        """
+        from sbsar2ptex.svg import read_record  # noqa: PLC0415 (svg imports this)
+
+        def bad(why: str) -> int:
+            node.unsupported = f"node {node.index}: {why}"
+            return len(rest)
+
+        if not rest:
+            return bad("an SVG node without words")
+        node.fields = rest[:1]
+        top = node.flags >> 8
+        if top & ~0x06:
+            return bad(f"SVG node word P {top:#x}: unknown bits (never seen)")
+        if node.seed_state:
+            return bad(f"SVG node seed state {node.seed_state} (never seen)")
+        k = 1
+        if node.flags & 1:
+            if k >= len(rest) or not is_offset(rest[k]):
+                return bad("malformed: its size function's word is not an offset")
+            node.size_code = rest[k] + BASE
+            node.code.append(node.size_code)
+            k += 1
+        background = top >> 1 & 3
+        if background == 2:  # noqa: PLR2004
+            return bad("an SVG background function (never seen)")
+        if background == 1:
+            n = 4 if node.op in COLOR_OPS else 1
+            if k + n > len(rest):
+                return bad("malformed: no words for its background")
+            node.inline = rest[k : k + n]
+            vals = [struct.unpack("<f", struct.pack("<I", w))[0] for w in node.inline]
+            node.params["background"] = (1, vals)
+            k += n
+        elif background == 3:  # noqa: PLR2004
+            if k >= len(rest):
+                return bad("malformed: no word for its background input")
+            node.inputs["background"] = rest[k]
+            node.params["background"] = (3, rest[k])
+            k += 1
+        else:
+            node.params["background"] = (0, None)
+        node.vector = read_record(self.d, rest[0])
+        if node.vector is None:
+            return bad(f"malformed SVG vector record at {rest[0]:#x}")
+        return k
 
     @staticmethod
     def _seed_slot(node: Node, rest: list[int], k: int, is_offset) -> int:
