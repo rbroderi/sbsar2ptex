@@ -1,0 +1,482 @@
+node	category	package	variant	inputs	outputs	cooked_ok	rendered_ok	error
+l_2dtransform_path	Splines & Paths/Paths	paths_tools.sbs#2dtransform_path	default	paths:c	paths:c[baseColor]	1	1	
+l_3D_perlin_noise	Generator/Noise	3d_perlin_noise.sbs#3D_perlin_noise	default	position:c	output:g[roughness]	1	1	
+l_3D_perlin_noise_fractal	Generator/Noise	3d_perlin_noise.sbs#3D_perlin_noise_fractal	default	position:c	output:g[roughness]	1	1	
+l_3D_ridged_noise_fractal	Generator/Noise	3d_perlin_noise.sbs#3D_ridged_noise_fractal	default	position:c	output:g[roughness]	1	1	
+l_3D_worley_noise	Generator/Noise	3d_worley_noise.sbs#3D_worley_noise	default	position:c	output:g[roughness]	1	1	
+l_3d_linear_gradient	Generator/Pattern	3d_gradient.sbs#3d_linear_gradient	default	position:c	output:g[roughness]	1	1	
+l_3d_planar_projection	Mesh Adaptive/Utilities	3d_planar_projection.sbs#3d_planar_projection	default	position:c wsnormal:c texture:g	output:g[roughness]	1	1	
+l_3d_planar_projection_color	Mesh Adaptive/Utilities	3d_planar_projection.sbs#3d_planar_projection_color	default	position:c wsnormal:c texture:c	output:c[baseColor]	1	1	
+l_3d_simplex_noise	Generator/Noise	3d_simplex_noise.sbs#3d_simplex_noise	default	position:c	output:g[roughness]	1	1	
+l_3d_texture_offset_color	Filter/Transformation	3d_texture_transform.sbs#3d_texture_offset_color	default	input:c	output:c[baseColor]	1	1	
+l_3d_texture_offset_grayscale	Filter/Transformation	3d_texture_transform.sbs#3d_texture_offset_grayscale	default	input:g	output:g[roughness]	1	1	
+l_3d_texture_position	Filter/Effect	3d_texture_position.sbs#3d_texture_position	default		output:c[baseColor]	1	1	
+l_3d_texture_sdf	Filter/Effect	3d_texture_jump_flood.sbs#3d_texture_sdf	default	mask_input:g	output:g[roughness]	1	1	
+l_3d_texture_surface_render	Filter/Effect	3d_texture_render.sbs#3d_texture_surface_render	default	3d_distance_field:g environment:c	output:c[baseColor]	1	1	
+l_3d_texture_volume_render_light	Filter/Effect	3d_texture_render.sbs#3d_texture_volume_render_light	default	3d_signed_distance_field:g density:g	output:c[baseColor]	1	1	
+l_3d_viewer	Filter/Effect	3d_viewer.sbs#3d_viewer	default	environment:c input_1:c input_2:c	output:c[baseColor]	1	1	
+l_3d_volume_mask	Generator/Pattern	3d_volume_mask.sbs#3d_volume_mask	default	position:c	output:g[roughness]	1	1	
+l_3d_voronoi	Generator/Noise	noise_voronoi.sbs#3d_voronoi	default	position:c	output:g[roughness]	1	1	
+l_3d_voronoi_fractal	Generator/Noise	noise_voronoi.sbs#3d_voronoi_fractal	default	position:c	output:g[roughness]	1	1	
+l_Bitmap2Material_2_Light	Material Filter/1-Click	bitmaptomaterial_2_light.sbs#Bitmap2Material_2_Light	default	bitmap_diffuse:c metallic_1:g	diffuse:c[baseColor] normal:c[emissive] specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] ambient_occlusion:g[opacity] height:g[height]	1	1	
+l_PBR_render	Material Filter/PBR Utilities	pbr_render2.sbs#PBR_render	default	basecolor:c normal:c emissive:c roughness:g metallic:g specularlevel:g height:g ambient_occlusion:g opacity:g anisotropyLevel:g anisotropyAngle:g translucency:g scatteringdistancescale:c lens_dirt_map:g lens_aperture_map:g background_input:c environment_map:c	output:c[baseColor] raw_irradiance:c[emissive] raw_specular:c[] normalws:c[] normal:c[] uv:c[]	1	1	
+l_PBR_render_mapping_color	Material Filter/PBR Utilities	pbr_render2.sbs#PBR_render_mapping_color	default	texture:c uv:c	output:c[baseColor]	1	1	
+l_PBR_render_mapping_grayscale	Material Filter/PBR Utilities	pbr_render2.sbs#PBR_render_mapping_grayscale	default	texture:g uv:c	output:c[baseColor]	1	1	
+l_acescg_to_linear_srgb	Filter/Adjustments	color_space_conversion.sbs#acescg_to_linear_srgb	default	input:c	output:c[baseColor]	1	1	
+l_acescg_to_srgb	Filter/Adjustments	color_space_conversion.sbs#acescg_to_srgb	default	input:c	output:c[baseColor]	1	1	
+l_alveolus	Generator/Pattern	pattern_alveolus.sbs#alveolus	default		output:g[roughness]	1	1	
+l_angle_to_vector	Filter/Adjustments	angle_to_vector.sbs#angle_to_vector	default	input:g	output:c[baseColor]	1	1	
+l_anisotropic_blur	Filter/Blur	anisotropic_blur.sbs#anisotropic_blur	default	Source:c	Anisotropic_Blur:c[baseColor]	1	1	
+l_anisotropic_blur_grayscale	Filter/Blur	anisotropic_blur.sbs#anisotropic_blur_grayscale	default	Source:g	Anisotropic_Blur:g[roughness]	1	1	
+l_anisotropic_kuwahara_color	Filter/Effect	anisotropic_kuwahara.sbs#anisotropic_kuwahara_color	default	input:c anisotropy_angle_map:g slope_map:g radius_map:g direction_map:c	output:c[baseColor] direction_map:c[emissive]	1	1	
+l_anisotropic_kuwahara_grayscale	Filter/Effect	anisotropic_kuwahara.sbs#anisotropic_kuwahara_grayscale	default	input:g anisotropy_angle_map:g slope_map:g radius_map:g direction_map:c	output:g[roughness] direction_map:c[baseColor]	1	1	
+l_anisotropic_noise_v2	Generator/Noise	noise_anisotropic_noise_v2.sbs#anisotropic_noise_v2	default		output:g[roughness]	1	1	
+l_ao_cancel	Material Filter/Scan Processing	ao_cancel.sbs#ao_cancel	default	color:c AO:g	color:c[baseColor]	1	1	
+l_apply_color_palette	Filter/Adjustments	quantize_color.sbs#apply_color_palette	default	id:g palette:c	output:c[baseColor]	1	1	
+l_arc_pavement	Generator/Pattern	pattern_arc_pavement.sbs#arc_pavement	default	pattern_input:g	output:g[roughness]	1	1	
+l_atlas_scatter	Material Filter/Scan Processing	atlas_scatter.sbs#atlas_scatter	default	basecolor:c normal:c roughness:g metallic:g height:g opacity:g background_basecolor:c background_normal:c background_roughness:g background_metallic:g background_height:g pattern_distribution_map:g shape_scale_map:g shape_rotation_map:g height_offset_map:g height_scale_map:g mask_random_map:g vector_map:c	basecolor:c[baseColor] normal:c[emissive] roughness:g[roughness] metallic:g[metallic] height:g[ambientOcclusion] mask:g[opacity]	1	1	
+l_atlas_spliter	Material Filter/Scan Processing	atlas_spliter.sbs#atlas_spliter	default	basecolor:c normal:c roughness:g metallic:g height:g opacity:g user1:g user2:g	basecolor:c[baseColor] normal:c[emissive] roughness:g[roughness] metallic:g[metallic] height:g[ambientOcclusion] opacity:g[opacity] user1:g[height] user2:g[]	1	1	
+l_auto_crop_color	Filter/Transformation	auto_crop.sbs#auto_crop_color	default	input:c	output:c[baseColor]	1	1	
+l_auto_crop_grayscale	Filter/Transformation	auto_crop.sbs#auto_crop_grayscale	default	input:g	output:g[roughness]	1	1	
+l_auto_levels	Filter/Adjustments	auto_levels.sbs#auto_levels	default	Input:g	Output:g[roughness]	1	1	
+l_base_color_2_inputs	Material Filter	mesh_adaptive_base_color.sbs#base_color_2_inputs	default	Input_Map:c SVG_Mask:g	Base_Color:c[baseColor]	1	1	
+l_base_color_4_inputs	Material Filter	mesh_adaptive_base_color.sbs#base_color_4_inputs	default	Input_Map:c Hue_Shift_SVG_Mask:c	Base_Color:c[baseColor]	1	1	
+l_base_color_8_inputs	Material Filter	mesh_adaptive_base_color.sbs#base_color_8_inputs	default	Input_Map:c Hue_Shift_SVG_Mask:c	Base_Color:c[baseColor]	1	1	
+l_basecolor_metallic_roughness_converter	Material Filter/PBR Utilities	pbr_converter.sbs#basecolor_metallic_roughness_converter	default	basecolor:c normal:c roughness:g metallic:g specularlevel:g	diffuse:c[baseColor] normal:c[emissive] specular:c[] speuclar_face_color:c[] reflection:c[] glossiness:g[roughness] roughness:g[metallic] ior:g[ambientOcclusion] f0:g[opacity]	1	1	
+l_bevel	Filter/Effect	bevel.sbs#bevel	default	input:g custom_curve:g	height:g[roughness] normal:c[baseColor]	1	1	
+l_bevel_smooth	Filter/Effect	bevel_smooth.sbs#bevel_smooth	default	mask_input:g source_input:g distance_map:g	output:g[roughness] uv:c[baseColor]	1	1	
+l_blackbody	3D View/HDRI Tools	blackbody.sbs#blackbody	default		output:c[baseColor]	1	1	
+l_blue_noise_fast	Generator/Noise	blue_noise.sbs#blue_noise_fast	default		output:g[roughness]	1	1	
+l_blur_hq	Filter/Blur	blur_hq.sbs#blur_hq	default	Source:c	Blur_HQ:c[baseColor]	1	1	
+l_blur_hq_grayscale	Filter/Blur	blur_hq.sbs#blur_hq_grayscale	default	Source:g	Blur_HQ:g[roughness]	1	1	
+l_bnw_spots_1	Generator/Noise	noise_bnw_spots_1_v2.sbs#bnw_spots_1	default		output:g[roughness]	1	1	
+l_bnw_spots_2	Generator/Noise	noise_bnw_spots_2_v2.sbs#bnw_spots_2	default		output:g[roughness]	1	1	
+l_bnw_spots_3	Generator/Noise	noise_bnw_spots_3_v2.sbs#bnw_spots_3	default		output:g[roughness]	1	1	
+l_brick_1	Generator/Pattern	pattern_brick_1.sbs#brick_1	default		output:g[roughness]	1	1	
+l_brick_2	Generator/Pattern	pattern_brick_2.sbs#brick_2	default		output:g[roughness]	1	1	
+l_brick_generator	Generator/Pattern	pattern_brick_generator.sbs#brick_generator	default		Bricks_Generator:g[roughness]	1	1	
+l_cartesian_to_polar	Filter/Transformation	cartesian_polar_transformation.sbs#cartesian_to_polar	default	input:c	output:c[baseColor]	1	1	
+l_cartesian_to_polar_grayscale	Filter/Transformation	cartesian_polar_transformation.sbs#cartesian_to_polar_grayscale	default	input:g	output:g[roughness]	1	1	
+l_cells_1	Generator/Noise	noise_cells_1_v2.sbs#cells_1	default		output:g[roughness]	1	1	
+l_cells_2	Generator/Noise	noise_cells_2_v2.sbs#cells_2	default		output:g[roughness]	1	1	
+l_cells_3	Generator/Noise	noise_cells_3_v2.sbs#cells_3	default		output:g[roughness]	1	1	
+l_cells_4	Generator/Noise	noise_cells_4_v2.sbs#cells_4	default	input:g	output:g[roughness]	1	1	
+l_channel_mixer	Filter/Adjustments	channel_mixer.sbs#channel_mixer	default	Input:c	Output:c[baseColor]	1	1	
+l_checker_1	Generator/Pattern	pattern_checker_1.sbs#checker_1	default		output:g[roughness]	1	1	
+l_chrominance_extract	Filter/Adjustments	chrominance_extract.sbs#chrominance_extract	default	Source:c	Chrominance_Extract:c[baseColor]	1	1	
+l_clamp__clamp	Filter/Adjustments	clamp.sbs#clamp	default	input:c	output:c[baseColor]	1	1	
+l_clamp__glow		glow.sbs#clamp	default	Source:g	Clamp:g[roughness]	1	1	
+l_clamp_grayscale	Filter/Adjustments	clamp.sbs#clamp_grayscale	default	input:g	output:g[roughness]	1	1	
+l_clone	Filter/Transformation	clone.sbs#clone	default	Source:c Mask:g	Clone:c[baseColor]	1	1	
+l_clone_patch	Material Filter/Scan Processing	clone_patch.sbs#clone_patch	default	input:c	output:c[baseColor] areas:c[emissive]	1	1	
+l_clone_patch_grayscale	Material Filter/Scan Processing	clone_patch.sbs#clone_patch_grayscale	default	input:g	output:g[roughness] areas:g[metallic]	1	1	
+l_clouds_1	Generator/Noise	noise_clouds_1_v2.sbs#clouds_1	default		output:g[roughness]	1	1	
+l_clouds_2	Generator/Noise	noise_clouds_2_v2.sbs#clouds_2	default		output:g[roughness]	1	1	
+l_clouds_3	Generator/Noise	noise_clouds_3_v2.sbs#clouds_3	default		output:g[roughness]	1	1	
+l_color	Filter/Blending	blend.sbs#color	default	Foreground:c Background:c Mask:g	Color:c[baseColor]	1	1	
+l_color_burn	Filter/Blending	blend.sbs#color_burn	default	Foreground:c Background:c Mask:g	Color_Burn:c[baseColor]	1	1	
+l_color_dodge	Filter/Blending	blend.sbs#color_dodge	default	Foreground:c Background:c Mask:g	Color_Dodge:c[baseColor]	1	1	
+l_color_equalizer	Material Filter/Scan Processing	color_equalizer.sbs#color_equalizer	default	input:c mask_input:g	output:c[baseColor] mask:g[roughness]	1	1	
+l_color_match	Filter/Adjustments	color_match.sbs#color_match	default	input:c input_src_color:c input_target_color:c mask_input:g	output:c[baseColor] mask:g[roughness]	1	1	
+l_color_temperature_adjustment	3D View/HDRI Tools	color_temperature_adjustment.sbs#color_temperature_adjustment	default	input:c	output:c[baseColor]	1	1	
+l_color_to_mask	Filter/Adjustments	color_to_mask_v2.sbs#color_to_mask	default	input:c color_input:c	output:g[roughness]	1	1	
+l_contrast_luminosity	Filter/Adjustments	contrast_luminosity.sbs#contrast_luminosity	default	Source:c	Contrast_Luminosity:c[baseColor]	1	1	
+l_contrast_luminosity_grayscale	Filter/Adjustments	contrast_luminosity.sbs#contrast_luminosity_grayscale	default	Source:g	Contrast_Luminosity:g[roughness]	1	1	
+l_cracks_weathering	Mesh Adaptive/Weathering	cracks_weathering_material.sbs#cracks_weathering	default	Input_9:c Input_13:c Input_6:c Input:c Input_8:g Input_11:g Input_12:g Input_14:g Input_2:g Input_4:g Input_10:g Input_5:g	Diffuse_1:c[baseColor] basecolor:c[emissive] Normal:c[] Specular:c[] Glossiness:g[roughness] Roughness:g[metallic] Metallic:g[ambientOcclusion] Height:g[opacity] ambient_occlusion:g[height]	1	1	
+l_creased	Generator/Noise	noise_creased.sbs#creased	default		output:g[roughness]	1	1	
+l_create_color_palette_16colors	Filter/Adjustments	quantize_color.sbs#create_color_palette_16colors	default	palette:c	palette:c[baseColor]	1	1	
+l_crop	Material Filter/Scan Processing	crop.sbs#crop	default	input:c	output:c[baseColor] area:c[emissive]	1	1	
+l_crop_grayscale	Material Filter/Scan Processing	crop.sbs#crop_grayscale	default	input:g	output:g[roughness] area:g[metallic]	1	1	
+l_cross_section	Filter/Effect	cross_section.sbs#cross_section	default	input:g	output:g[roughness]	1	1	
+l_crystal_1	Generator/Noise	noise_crystal_1.sbs#crystal_1	default		output:g[roughness]	1	1	
+l_crystal_2	Generator/Noise	noise_crystal_2.sbs#crystal_2	default		output:g[roughness]	1	1	
+l_cube_3d	Generator/Pattern	pattern_cube_3d.sbs#cube_3d	default		output:g[roughness]	1	1	
+l_cube_3d_gbuffers	Generator/Pattern	pattern_cube_3d.sbs#cube_3d_gbuffers	default		position:c[baseColor] normal:c[emissive] depth:g[roughness] uv:c[]	1	1	
+l_curvature	Filter/Effect	curvature.sbs#curvature	default	Input:c	Output:g[roughness]	1	1	
+l_curvature_smooth_v2	Filter/Effect	curvature_smooth_v2.sbs#curvature_smooth_v2	default	input:c	curvature:g[roughness] convexity:g[metallic] concavity:g[ambientOcclusion]	1	1	
+l_curvature_sobel	Filter/Effect	curvature_sobel.sbs#curvature_sobel	default	normal:c	output:g[roughness]	1	1	
+l_details_to_baked_maps	Material Filter/Mesh Adaptive	details_to_baked_maps.sbs#details_to_baked_maps	default	Height:g Baked_Normal_T:c Baked_AO:g Baked_Curvature:g	Combined_Normal:c[baseColor] Combined_AO:g[roughness] Combined_Curvature:g[metallic]	1	1	
+l_difference	Filter/Blending	blend.sbs#difference	default	Background:c Foreground:c Mask:g	Difference:c[baseColor]	1	1	
+l_diffusion_color	Filter/Effect	diffusion.sbs#diffusion_color	default	input:c mask:g intensity:g	output:c[baseColor]	1	1	
+l_diffusion_grayscale	Filter/Effect	diffusion.sbs#diffusion_grayscale	default	input:g mask:g intensity:g	output:g[roughness]	1	1	
+l_diffusion_uv	Filter	diffusion.sbs#diffusion_uv	default	input:c mask:g	output:c[baseColor]	1	1	
+l_directional_distance	Filter/Effect	directional_distance.sbs#directional_distance	default	input:g distance_map:g angle_map:g	output:g[roughness] uv:c[baseColor]	1	1	
+l_directional_noise_1	Generator/Noise	noise_directional_noise_1_v2.sbs#directional_noise_1	default		output:g[roughness]	1	1	
+l_directional_noise_2	Generator/Noise	noise_directional_noise_2_v2.sbs#directional_noise_2	default		output:g[roughness]	1	1	
+l_directional_noise_3	Generator/Noise	noise_directional_noise_3_v2.sbs#directional_noise_3	default		output:g[roughness]	1	1	
+l_directional_noise_4	Generator/Noise	noise_directional_noise_4_v2.sbs#directional_noise_4	default		output:g[roughness]	1	1	
+l_directional_scratches	Generator/Noise	noise_directional_scratches_v2.sbs#directional_scratches	default		output:g[roughness]	1	1	
+l_dirt_1	Generator/Noise	noise_dirt_1_v2.sbs#dirt_1	default		output:g[roughness]	1	1	
+l_dirt_2	Generator/Noise	noise_dirt_2_v2.sbs#dirt_2	default		output:g[roughness]	1	1	
+l_dirt_3	Generator/Noise	noise_dirt_3_v2.sbs#dirt_3	default		output:g[roughness]	1	1	
+l_dirt_4	Generator/Noise	noise_dirt_4_v2.sbs#dirt_4	default		output:g[roughness]	1	1	
+l_dirt_5	Generator/Noise	noise_dirt_5_v2.sbs#dirt_5	default		output:g[roughness]	1	1	
+l_dirt_gradient	Generator/Noise	noise_dirt_gradient_v2.sbs#dirt_gradient	default		output:g[roughness]	1	1	
+l_dissolve_2	Filter/Blending	blend.sbs#dissolve_2	default	foreground:c background:c mask:g	output:c[baseColor]	1	1	
+l_edge_detect	Filter/Effect	edge_detect.sbs#edge_detect	default	input:g	output:g[roughness]	1	1	
+l_emboss_with_gloss	Filter/Effect	emboss_with_gloss.sbs#emboss_with_gloss	default	Source:c Height:g	Emboss_With_Gloss:c[baseColor]	1	1	
+l_exposure	Filter/Adjustments	exposure.sbs#exposure	default	input:c	output:c[baseColor]	1	1	
+l_extend_shape_color	Filter/Effect	extend_shape.sbs#extend_shape_color	default	input:c	output:c[baseColor]	1	1	
+l_extend_shape_grayscale	Filter/Effect	extend_shape.sbs#extend_shape_grayscale	default	input:g	output:g[roughness]	1	1	
+l_fabric_weathering	Mesh Adaptive/Weathering	fabric_weathering_material.sbs#fabric_weathering	default	Diffuse_1:c basecolor_1:c Input:c Specular_1:c Input_1:g Input_3:g Input_4:g Height_1:g Input_2:g AO:g Normal_Wold_Space:c Input_12:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] height:g[opacity] ambient_occlusion:g[height]	1	1	
+l_facing_normal	Filter/Normal Map	facing_normal.sbs#facing_normal	default	Normal:c	Facing_Normal:g[roughness]	1	1	
+l_fibers_1	Generator/Pattern	pattern_fibers_1.sbs#fibers_1	default		output:g[roughness]	1	1	
+l_fibers_2	Generator/Pattern	pattern_fibers_2.sbs#fibers_2	default		output:g[roughness]	1	1	
+l_flood_fill	Filter/Effect	flood_fill_2.sbs#flood_fill	default	mask:g	output:c[baseColor] referenceMap:c[emissive]	1	1	
+l_flood_fill_to_bbox_size	Filter/Effect	flood_fill_2.sbs#flood_fill_to_bbox_size	default	input:c	output:g[roughness]	1	1	
+l_flood_fill_to_color	Filter/Effect	flood_fill_2.sbs#flood_fill_to_color	default	input:c color_input:c	output:c[baseColor]	1	1	
+l_flood_fill_to_gradient_2	Filter/Effect	flood_fill_2.sbs#flood_fill_to_gradient_2	default	input:c angle_input:g slope_input:g	output:g[roughness]	1	1	
+l_flood_fill_to_grayscale	Filter/Effect	flood_fill_2.sbs#flood_fill_to_grayscale	default	input:c grayscale_input:g	output:g[roughness]	1	1	
+l_flood_fill_to_position	Filter/Effect	flood_fill_2.sbs#flood_fill_to_position	default	input:c	output:c[baseColor]	1	1	
+l_flood_fill_to_random_color	Filter/Effect	flood_fill_2.sbs#flood_fill_to_random_color	default	input:c	output:c[baseColor]	1	1	
+l_flood_fill_to_random_grayscale	Filter/Effect	flood_fill_2.sbs#flood_fill_to_random_grayscale	default	input:c	output:g[roughness]	1	1	
+l_floodfill_mapper_color	Filter/Effect	floodfill_mapper.sbs#floodfill_mapper_color	default	bbox:c pattern_input_1:c pattern_input_2:c pattern_input_3:c pattern_input_4:c pattern_input_5:c pattern_input_6:c pattern_input_7:c pattern_input_8:c pattern_distribution_map:g scale_map:g rotation_map:g luminance_offset_map:g	Output:c[baseColor]	1	1	
+l_floodfill_mapper_grayscale	Filter/Effect	floodfill_mapper.sbs#floodfill_mapper_grayscale	default	bbox:c pattern_input:g pattern_input_2:g pattern_input_3:g pattern_input_4:g pattern_input_5:g pattern_input_6:g pattern_input_7:g pattern_input_8:g pattern_distribution_map:g scale_map:g rotation_map:g luminance_offset_map:g	Output:g[roughness]	1	1	
+l_floodfill_to_index	Filter/Effect	floodfill_to_index.sbs#floodfill_to_index	default	bbox:c special_shape_infos:c	shape_index:g[roughness] shape_data_table:c[baseColor]	1	1	
+l_fluid	Generator/Noise	noise_fluid.sbs#fluid	default		output:g[roughness]	1	1	
+l_fractal_sum_1	Generator/Noise	noise_fractal_sum_1_v2.sbs#fractal_sum_1	default		output:g[roughness]	1	1	
+l_fractal_sum_2	Generator/Noise	noise_fractal_sum_2_v2.sbs#fractal_sum_2	default		output:g[roughness]	1	1	
+l_fractal_sum_3	Generator/Noise	noise_fractal_sum_3_v2.sbs#fractal_sum_3	default		output:g[roughness]	1	1	
+l_fractal_sum_4	Generator/Noise	noise_fractal_sum_4_v2.sbs#fractal_sum_4	default		output:g[roughness]	1	1	
+l_fractal_sum_base	Generator/Noise	noise_fractal_sum_base_v2.sbs#fractal_sum_base	default		output:g[roughness]	1	1	
+l_fur_1	Generator/Noise	noise_fur_1.sbs#fur_1	default		output:g[roughness]	1	1	
+l_fur_2	Generator/Noise	noise_fur_2.sbs#fur_2	default		output:g[roughness]	1	1	
+l_fur_3	Generator/Noise	noise_fur_3.sbs#fur_3	default		output:g[roughness]	1	1	
+l_fxaa_color	Filter/Effect	fxaa.sbs#fxaa_color	default	input:c	output:c[baseColor]	1	1	
+l_fxaa_grayscale	Filter/Effect	fxaa.sbs#fxaa_grayscale	default	input:g	output:g[roughness]	1	1	
+l_gaussian_1	Generator/Pattern	pattern_gaussian_1.sbs#gaussian_1	default		output:g[roughness]	1	1	
+l_gaussian_2	Generator/Pattern	pattern_gaussian_2.sbs#gaussian_2	default		output:g[roughness]	1	1	
+l_gaussian_noise	Generator/Noise	noise_gaussian_noise_v2.sbs#gaussian_noise	default		output:g[roughness]	1	1	
+l_gaussian_spots_1	Generator/Noise	noise_gaussian_spots_1_v2.sbs#gaussian_spots_1	default		output:g[roughness]	1	1	
+l_gaussian_spots_2	Generator/Noise	noise_gaussian_spots_2_v2.sbs#gaussian_spots_2	default		output:g[roughness]	1	1	
+l_glow	Filter/Effect	glow.sbs#glow	default	Source:c	Glow:c[baseColor]	1	1	
+l_glow_grayscale	Filter/Effect	glow.sbs#glow_grayscale	default	Source:g	Glow:g[roughness]	1	1	
+l_gradient_axial	Generator/Pattern	gradient_axial.sbs#gradient_axial	default		output:g[roughness]	1	1	
+l_gradient_axial_reflected	Generator/Pattern	gradient_axial.sbs#gradient_axial_reflected	default		output:g[roughness]	1	1	
+l_gradient_circular	Generator/Pattern	gradient_circular.sbs#gradient_circular	default		output:g[roughness]	1	1	
+l_gradient_linear_1	Generator/Pattern	gradient_linear_1.sbs#gradient_linear_1	default		Simple_Gradient:g[roughness]	1	1	
+l_gradient_linear_2	Generator/Pattern	gradient_linear_2.sbs#gradient_linear_2	default		Simple_Gradient_2:g[roughness]	1	1	
+l_gradient_linear_3	Generator/Pattern	gradient_linear_3.sbs#gradient_linear_3	default		output:g[roughness]	1	1	
+l_gradient_radial	Generator/Pattern	gradient_radial.sbs#gradient_radial	default		output:g[roughness]	1	1	
+l_grayscale_conversion_advanced	Filter/Adjustments	grayscale_conversion_advanced.sbs#grayscale_conversion_advanced	default	input:c	output:g[roughness]	1	1	
+l_grid_atlas_color	Generator/Pattern	grid_atlas.sbs#grid_atlas_color	default	input_1:c input_2:c input_3:c input_4:c input_5:c input_6:c input_7:c input_8:c input_9:c input_10:c input_11:c input_12:c input_13:c input_14:c input_15:c input_16:c	output:c[baseColor]	1	1	
+l_grid_atlas_grayscale	Generator/Pattern	grid_atlas.sbs#grid_atlas_grayscale	default	input_1:g input_2:g input_3:g input_4:g input_5:g input_6:g input_7:g input_8:g input_9:g input_10:g input_11:g input_12:g input_13:g input_14:g input_15:g input_16:g	output:g[roughness]	1	1	
+l_grunge_concrete	Generator/Noise	grunge_concrete.sbs#grunge_concrete	default		output:g[roughness]	1	1	
+l_grunge_damas	Generator/Noise	grunge_damas.sbs#grunge_damas	default		output:g[roughness]	1	1	
+l_grunge_galvanic_large	Generator/Noise	grunge_galvanic_large.sbs#grunge_galvanic_large	default		output:g[roughness]	1	1	
+l_grunge_galvanic_small	Generator/Noise	grunge_galvanic_small.sbs#grunge_galvanic_small	default		output:g[roughness]	1	1	
+l_grunge_leaks	Generator/Noise	grunge_leaks.sbs#grunge_leaks	default		output:g[roughness]	1	1	
+l_grunge_leaky_paint	Generator/Noise	grunge_leaky_paint.sbs#grunge_leaky_paint	default		output:g[roughness]	1	1	
+l_grunge_map_001	Generator/Noise	noise_grunge_map_001.sbs#grunge_map_001	default		output:g[roughness]	1	1	
+l_grunge_map_002	Generator/Noise	noise_grunge_map_002.sbs#grunge_map_002	default		output:g[roughness]	1	1	
+l_grunge_map_003	Generator/Noise	noise_grunge_map_003.sbs#grunge_map_003	default		output:g[roughness]	1	1	
+l_grunge_map_004	Generator/Noise	noise_grunge_map_004.sbs#grunge_map_004	default		output:g[roughness]	1	1	
+l_grunge_map_005	Generator/Noise	noise_grunge_map_005.sbs#grunge_map_005	default		output:g[roughness]	1	1	
+l_grunge_map_006	Generator/Noise	noise_grunge_map_006.sbs#grunge_map_006	default		output:g[roughness]	1	1	
+l_grunge_map_007	Generator/Noise	noise_grunge_map_007.sbs#grunge_map_007	default		output:g[roughness]	1	1	
+l_grunge_map_008	Generator/Noise	noise_grunge_map_008.sbs#grunge_map_008	default		output:g[roughness]	1	1	
+l_grunge_map_009	Generator/Noise	noise_grunge_map_009.sbs#grunge_map_009	default		output:g[roughness]	1	1	
+l_grunge_map_010	Generator/Noise	noise_grunge_map_010.sbs#grunge_map_010	default		output:g[roughness]	1	1	
+l_grunge_map_011	Generator/Noise	noise_grunge_map_011.sbs#grunge_map_011	default		output:g[roughness]	1	1	
+l_grunge_map_012	Generator/Noise	noise_grunge_map_012.sbs#grunge_map_012	default		output:g[roughness]	1	1	
+l_grunge_map_013	Generator/Noise	noise_grunge_map_013.sbs#grunge_map_013	default		output:g[roughness]	1	1	
+l_grunge_map_014	Generator/Noise	noise_grunge_map_014.sbs#grunge_map_014	default		output:g[roughness]	1	1	
+l_grunge_map_015	Generator/Noise	noise_grunge_map_015.sbs#grunge_map_015	default		output:g[roughness]	1	1	
+l_grunge_rough_dirty	Generator/Noise	grunge_rough_dirty.sbs#grunge_rough_dirty	default		output:g[roughness]	1	1	
+l_grunge_rust_fine	Generator/Noise	grunge_rust_fine.sbs#grunge_rust_fine	default		output:g[roughness]	1	1	
+l_grunge_scratches_dirty	Generator/Noise	grunge_scratches_dirty.sbs#grunge_scratches_dirty	default		output:g[roughness]	1	1	
+l_grunge_scratches_fine	Generator/Noise	grunge_scratches_fine.sbs#grunge_scratches_fine	default		output:g[roughness]	1	1	
+l_grunge_scratches_rough	Generator/Noise	grunge_scratches_rough.sbs#grunge_scratches_rough	default		output:g[roughness]	1	1	
+l_grunge_shavings	Generator/Noise	grunge_shavings.sbs#grunge_shavings	default		output:g[roughness]	1	1	
+l_grunge_splashes_dusty	Generator/Noise	grunge_splashes_dusty.sbs#grunge_splashes_dusty	default		output:g[roughness]	1	1	
+l_grunge_spots	Generator/Noise	grunge_spots.sbs#grunge_spots	default		output:g[roughness]	1	1	
+l_grunge_spots_dirty	Generator/Noise	grunge_spots_dirty.sbs#grunge_spots_dirty	default		output:g[roughness]	1	1	
+l_hald_clut	Filter/Adjustments	hald_clut.sbs#hald_clut	default	input:c lut:c	output:c[baseColor]	1	1	
+l_hbao	Filter/Effect	hbao_2.sbs#hbao	default	input:g	output:g[roughness]	1	1	
+l_hdr_exposure_preview	3D View/HDRI Tools	hdr_exposure_preview.sbs#hdr_exposure_preview	default	input:c	output:c[baseColor]	1	1	
+l_hdr_merge_2	3D View/HDRI Tools	hdr_merge.sbs#hdr_merge_2	default	input_1:c input_2:c input_3:c input_4:c input_5:c input_6:c input_7:c input_8:c input_9:c input_10:c input_11:c input_12:c input_13:c input_14:c input_15:c input_16:c	output:c[baseColor]	1	1	
+l_hdr_range_viewer	Filter/Adjustments	hdr_range_viewer.sbs#hdr_range_viewer	default	input:c	output:c[baseColor]	1	1	
+l_hdr_range_viewer_grayscale	Filter/Adjustments	hdr_range_viewer.sbs#hdr_range_viewer_grayscale	default	input:g	output:c[baseColor]	1	1	
+l_height_blend	Material Filter/Effect	height_blend.sbs#height_blend	default	height_top:g height_bottom:g mask:g	blended_height:g[roughness] height_mask:g[metallic]	1	1	
+l_height_extrude	Generator/Pattern	height_extrude.sbs#height_extrude	default	height:g	depth:g[roughness] normal:c[baseColor]	1	1	
+l_height_map_frequencies_mapper	Filter/Adjustments	height_map_frequencies_mapper.sbs#height_map_frequencies_mapper	default	Height:g	Displacement:g[roughness] Relief_Parallax:g[metallic]	1	1	
+l_height_normal_blend	Filter/Normal Map	height_normal_blend.sbs#height_normal_blend	default	Height:g Normal:c	Normal:c[baseColor]	1	1	
+l_height_to_normal_world_units_2	Filter/Normal Map	height_to_normal_world_units.sbs#height_to_normal_world_units_2	default	input:g	output:c[baseColor]	1	1	
+l_hemisphere		pattern_shape.sbs#hemisphere	default		output:g[roughness]	1	1	
+l_highpass	Filter/Adjustments	highpass.sbs#highpass	default	Source:c	Highpass:c[baseColor]	1	1	
+l_highpass_grayscale	Filter/Adjustments	highpass.sbs#highpass_grayscale	default	Source:g	Highpass:g[roughness]	1	1	
+l_histogram_compute	Filter/Adjustments	histogram_tools.sbs#histogram_compute	default	input:g	histogram:g[roughness] cdf:g[metallic]	1	1	
+l_histogram_equalize	Filter/Adjustments	histogram_tools.sbs#histogram_equalize	default	input:g	output:g[roughness]	1	1	
+l_histogram_range	Filter/Adjustments	histogram_range.sbs#histogram_range	default	input:g	output:g[roughness]	1	1	
+l_histogram_render	Filter/Adjustments	histogram_tools.sbs#histogram_render	default	input:g	output:g[roughness]	1	1	
+l_histogram_scan	Filter/Adjustments	histogram_scan.sbs#histogram_scan	default	Input_1:g	Output:g[roughness]	1	1	
+l_histogram_scan_non_uniform	Filter/Adjustments	histogram_scan_non_uniform.sbs#histogram_scan_non_uniform	default	input:g position_1:g contrast_1:g	output:g[roughness]	1	1	
+l_histogram_select	Filter/Adjustments	histogram_select.sbs#histogram_select	default	input:g	output:g[roughness]	1	1	
+l_histogram_shift	Filter/Adjustments	histogram_shift.sbs#histogram_shift	default	input:g	output:g[roughness]	1	1	
+l_id_to_mask_grayscale	Filter/Adjustments	id_to_mask.sbs#id_to_mask_grayscale	default	id:g	output:g[roughness]	1	1	
+l_invert	Filter/Adjustments	invert.sbs#invert	default	Source:c	Invert_Color:c[baseColor]	1	1	
+l_invert_grayscale	Filter/Adjustments	invert.sbs#invert_grayscale	default	Source:g	Invert_Grayscale:g[roughness]	1	1	
+l_leather_weathering	Mesh Adaptive/Weathering	leather_weathering_material.sbs#leather_weathering	default	Diffuse_1:c basecolor_1:c Input:c Specular_1:c Input_1:g Input_3:g Input_4:g Height_1:g Input_2:g AO:g Normal_Wold_Space:c Input_12:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] height:g[opacity] ambient_occlusion:g[height]	1	1	
+l_lighting_cancel_hf	Filter/Adjustments	lighting_cancel_hf.sbs#lighting_cancel_hf	default	Source:c	Lighting_Cancel_HF:c[baseColor]	1	1	
+l_lighting_cancel_lf	Filter/Adjustments	lighting_cancel_lf.sbs#lighting_cancel_lf	default	Source:c	Lighting_Cancel_LF:c[baseColor]	1	1	
+l_linear_burn	Filter/Blending	blend.sbs#linear_burn	default	Foreground:c Background:c Mask:g	Linear_Burn:c[baseColor]	1	1	
+l_linear_srgb_to_acescg	Filter/Adjustments	color_space_conversion.sbs#linear_srgb_to_acescg	default	input:c	output:c[baseColor]	1	1	
+l_linear_srgb_to_srgb	Filter/Adjustments	color_space_conversion.sbs#linear_srgb_to_srgb	default	input:c	output:c[baseColor]	1	1	
+l_linear_srgb_to_srgb_grayscale	Filter/Adjustments	color_space_conversion.sbs#linear_srgb_to_srgb_grayscale	default	input:g	output:g[roughness]	1	1	
+l_liquid	Generator/Noise	noise_liquid.sbs#liquid	default		output:g[roughness]	1	1	
+l_luminance_highpass	Filter/Adjustments	luminance_highpass.sbs#luminance_highpass	default	Source:c	Luminance_Highpass:c[baseColor]	1	1	
+l_luminosity	Filter/Blending	blend.sbs#luminosity	default	Foreground:c Background:c Mask:g	Exclusion:c[baseColor]	1	1	
+l_make_it_tile_patch	Filter/Tiling	make_it_tile_patch.sbs#make_it_tile_patch	default	Source:c	Make_It_Tile_Patch:c[baseColor]	1	1	
+l_make_it_tile_patch_grayscale	Filter/Tiling	make_it_tile_patch_grayscale.sbs#make_it_tile_patch_grayscale	default	Source:g	Make_It_Tile_Patch:g[roughness]	1	1	
+l_make_it_tile_photo	Filter/Tiling	make_it_tile_photo.sbs#make_it_tile_photo	default	Source:c	Make_It_Tile_Photo:c[baseColor]	1	1	
+l_make_it_tile_photo_grayscale	Filter/Tiling	make_it_tile_photo_grayscale.sbs#make_it_tile_photo_grayscale	default	Source:g	Make_It_Tile_Photo:g[roughness]	1	1	
+l_mask_to_paths_2	Splines & Paths/Paths	paths_tools.sbs#mask_to_paths_2	default	mask:g	paths:c[baseColor] preview:c[emissive]	1	1	
+l_material_adjustment_blend	Material Filter/Blending	material_adjustment_blend.sbs#material_adjustment_blend	default	diffuse:c basecolor:c normal:c specular:c emissive:c glossiness:g roughness:g metallic:g specularlevel:g height:g ambientocclusion:g opacity:g Input_20:c Input_21:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] emissive:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] specularlevel:g[opacity] height:g[height] ambientocclusion:g[] opacity:g[]	1	1	
+l_material_blend	Material Filter/Blending	material_blend.sbs#material_blend	default	material2_diffuse:c material2_basecolor:c material2_normal:c material2_specular:c material2_emissive:c material2_glossiness:g material2_roughness:g material2_metallic:g material2_specularlevel:g material2_height:g material2_ambientocclusion:g material2_opacity:g material1_diffuse:c material1_basecolor:c material1_normal:c material1_specular:c material1_emissive:c material1_glossiness:g material1_roughness:g material1_metallic:g material1_specularlevel:g material1_height:g material1_ambientocclusion:g material1_opacity:g Input_20:c Input_21:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] emissive:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] specularlevel:g[opacity] height:g[height] ambientocclusion:g[] opacity:g[]	1	1	
+l_material_clone_patch	Material Filter/Scan Processing	clone_patch.sbs#material_clone_patch	default	diffuse:c basecolor:c normal:c specular:c emissive:c glossiness:g roughness:g metallic:g specular_level:g height:g ambient_occlusion:g opacity:g anisotropy_level:g anisotropy_angle:g mask:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] emissive:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] specular_level:g[opacity] height:g[height] ambient_occlusion:g[] opacity:g[] anisotropy_level:g[] anisotropy_angle:g[] mask:g[] areas_basecolor:c[] areas_normal:c[] areas_height:g[]	1	1	
+l_material_color_blend	Material Filter/Blending	material_color_blend.sbs#material_color_blend	default	diffuse:c basecolor:c normal:c specular:c emissive:c glossiness:g roughness:g metallic:g specularlevel:g height:g ambientocclusion:g opacity:g Input_20:c Input_21:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] emissive:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] specularlevel:g[opacity] height:g[height] ambientocclusion:g[] opacity:g[]	1	1	
+l_material_crop	Material Filter/Scan Processing	crop.sbs#material_crop	default	diffuse:c basecolor:c normal:c specular:c emissive:c glossiness:g roughness:g metallic:g specular_level:g height:g ambient_occlusion:g opacity:g anisotropy_level:g anisotropy_angle:g mask:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] emissive:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] specular_level:g[opacity] height:g[height] ambient_occlusion:g[] opacity:g[] anisotropy_level:g[] anisotropy_angle:g[] mask:g[] area:c[]	1	1	
+l_material_height_blend	Material Filter/Effect	material_height_blend.sbs#material_height_blend	default	material2_diffuse:c material2_basecolor:c material2_normal:c material2_specular:c material2_emissive:c material2_glossiness:g material2_roughness:g material2_metallic:g material2_specularlevel:g material2_height:g material2_ambientocclusion:g material2_opacity:g material1_diffuse:c material1_basecolor:c material1_normal:c material1_specular:c material1_emissive:c material1_glossiness:g material1_roughness:g material1_metallic:g material1_specularlevel:g material1_height:g material1_ambientocclusion:g material1_opacity:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] emissive:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] specularlevel:g[opacity] height:g[height] ambientocclusion:g[] opacity:g[] height_mask:g[]	1	1	
+l_material_mesh_data_blender	Mesh Adaptive/Utilities	material_mesh_data_blender.sbs#material_mesh_data_blender	default	diffuse:c basecolor:c normal_2:c specular:c glossiness:g roughness:g metallic:g Input_10:g ambient_occlusion_2:g ambient_occlusion:g curvature:g height:g normal:c vertex_color:c normalWS:c	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] height:g[opacity] ambient_occlusion:g[height]	1	1	
+l_material_selector	Mesh Adaptive/Utilities	material_selector.sbs#material_selector	default	Input:c	mask:g[roughness]	1	1	
+l_material_switch	Material Filter/Blending	material_switch.sbs#material_switch	default	material2_diffuse:c material2_basecolor:c material2_normal:c material2_specular:c material2_emissive:c material2_glossiness:g material2_roughness:g material2_metallic:g material2_specularlevel:g material2_height:g material2_ambientocclusion:g material2_opacity:g material1_diffuse:c material1_basecolor:c material1_normal:c material1_specular:c material1_emissive:c material1_glossiness:g material1_roughness:g material1_metallic:g material1_specularlevel:g material1_height:g material1_ambientocclusion:g material1_opacity:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] emissive:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] specularlevel:g[opacity] height:g[height] ambientocclusion:g[] opacity:g[]	1	1	
+l_material_transform	Material Filter/Transformation	material_transform.sbs#material_transform	default	Input_12:c Input_14:c Input_11:c Input_15:c Input_20:c Input_18:g Input_13:g Input_16:g Input_21:g Input_10:g Input_19:g Input_17:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] emissive:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] specularlevel:g[opacity] height:g[height] ambient_occlusion:g[] opacity:g[]	1	1	
+l_median_filter_color	Filter/Blur	median_filter.sbs#median_filter_color	default	input:c	output:c[baseColor]	1	1	
+l_median_filter_grayscale	Filter/Blur	median_filter.sbs#median_filter_grayscale	default	input:g	output:g[roughness]	1	1	
+l_mesh_1	Generator/Pattern	pattern_mesh_1.sbs#mesh_1	default		output:g[roughness]	1	1	
+l_mesh_2	Generator/Pattern	pattern_mesh_2.sbs#mesh_2	default		output:g[roughness]	1	1	
+l_mesh_data_combiner	Mesh Adaptive/Utilities	mesh_data_combiner.sbs#mesh_data_combiner	default	ambient_occlusion:g curvature:g height:g position_grayscale:g thickness:g normal:c position:c uv_masks:c vertex_color:c direction:c normalWS:c	ambient_occlusion:g[roughness] curvature:g[metallic] height:g[ambientOcclusion] position_grayscale:g[opacity] thickness:g[height] normal:c[baseColor] position:c[emissive] uv_masks:c[] vertex_color:c[] direction:c[] normalWS:c[]	1	1	
+l_messy_fibers_1	Generator/Noise	noise_messy_fibers_1_v2.sbs#messy_fibers_1	default		output:g[roughness]	1	1	
+l_messy_fibers_2	Generator/Noise	noise_messy_fibers_2_v2.sbs#messy_fibers_2	default		output:g[roughness]	1	1	
+l_messy_fibers_3	Generator/Noise	noise_messy_fibers_3_v2.sbs#messy_fibers_3	default		output:g[roughness]	1	1	
+l_mg_bottom_to_top	Mesh Adaptive/Mask Generators	mg_bottom_to_top.sbs#mg_bottom_to_top	default	position:c Input:g mask:g	mask:g[roughness]	1	1	
+l_mg_cloth_wear	Mesh Adaptive/Mask Generators	mg_cloth_wear.sbs#mg_cloth_wear	default	curvature:g height:g mask:g	mask:g[roughness]	1	1	
+l_mg_dirt	Mesh Adaptive/Mask Generators	mg_dirt.sbs#mg_dirt	default	ambient_occlusion:g curvature:g input:g mask:g position:c world_space_normals:c	mask:g[roughness]	1	1	
+l_mg_dripping_rust	Mesh Adaptive/Mask Generators	mg_dripping_rust.sbs#mg_dripping_rust	default	ambientOcclusion:g curvature:g position:g mask_1:g	mask:g[roughness]	1	1	
+l_mg_dust	Mesh Adaptive/Mask Generators	mg_dust.sbs#mg_dust	default	ambient_occlusion:g normalWS:c noise:g mask:g	mask:g[roughness]	1	1	
+l_mg_edge_blur	Mesh Adaptive/Mask Generators	mg_edge_blur.sbs#mg_edge_blur	default	curvature:g mask:g	mask:g[roughness]	1	1	
+l_mg_edge_damages	Mesh Adaptive/Mask Generators	mg_edge_damages.sbs#mg_edge_damages	default	ambient_occlusion:g curvature:g mask:g	mask:g[roughness]	1	1	
+l_mg_edge_dirt	Mesh Adaptive/Mask Generators	mg_edge_dirt.sbs#mg_edge_dirt	default	curvature:g variation_mask:g mask:g	mask:g[roughness]	1	1	
+l_mg_edge_notch	Mesh Adaptive/Mask Generators	mg_edge_notch.sbs#mg_edge_notch	default	curvature:g mask:g	mask:g[roughness]	1	1	
+l_mg_edge_select	Mesh Adaptive/Mask Generators	mg_edge_select.sbs#mg_edge_select	default	curvature:g mask:g	mask:g[roughness]	1	1	
+l_mg_edge_speckle	Mesh Adaptive/Mask Generators	mg_edge_speckle.sbs#mg_edge_speckle	default	curvature:g variation_mask:g mask:g	mask:g[roughness]	1	1	
+l_mg_edge_wear	Mesh Adaptive/Mask Generators	mg_edge_wear.sbs#mg_edge_wear	default	curvature:g mask:g	mask:g[roughness]	1	1	
+l_mg_fiber_glass_edge_wear	Mesh Adaptive/Mask Generators	mg_fiber_glass_edge_wear.sbs#mg_fiber_glass_edge_wear	default	ambient_occlusion:g curvature:g input:g mask:g position:c normalWS:c	mask:g[roughness]	1	1	
+l_mg_grease	Mesh Adaptive/Mask Generators	mg_grease.sbs#mg_grease	default	thickness:g noise:g mask:g	mask:g[roughness]	1	1	
+l_mg_ground_dirt	Mesh Adaptive/Mask Generators	mg_ground_dirt.sbs#mg_ground_dirt	default	position:g mask:g	mask:g[roughness]	1	1	
+l_mg_leaks	Mesh Adaptive/Mask Generators	mg_leaks.sbs#mg_leaks	default	ambient_occlusion:g curvature:g position:g normalws:c variation_mask:g mask:g	mask:g[roughness]	1	1	
+l_mg_leather_wear	Mesh Adaptive/Mask Generators	mg_leather_wear.sbs#mg_leather_wear	default	ambient_occlusion:g curvature:g input:g mask:g	mask:g[roughness]	1	1	
+l_mg_light	Mesh Adaptive/Mask Generators	mg_light.sbs#mg_light	default	normalWS:c	output:g[roughness]	1	1	
+l_mg_mask_builder_2	Mesh Adaptive/Mask Generators	mg_mask_builder.sbs#mg_mask_builder_2	default	ambient_occlusion:g curvature:g position:c normalWS:c grunge:g grunge2:g scatter:g mask:g	diffuse:g[roughness]	1	1	
+l_mg_metal_edge_wear	Mesh Adaptive/Mask Generators	mg_metal_edge_wear.sbs#mg_metal_edge_wear	default	ambient_occlusion:g curvature:g position:c normalWS:c input:g mask:g	mask:g[roughness]	1	1	
+l_mg_paint_wear	Mesh Adaptive/Mask Generators	mg_paint_wear.sbs#mg_paint_wear	default	ambient_occlusion:g curvature:g variation_mask:g mask:g	mask:g[roughness]	1	1	
+l_mg_selective_dirt	Mesh Adaptive/Mask Generators	mg_selective_dirt.sbs#mg_selective_dirt	default	curvature:g variation_mask:g mask:g	mask:g[roughness]	1	1	
+l_mg_sun_bleach	Mesh Adaptive/Mask Generators	mg_sun_bleach.sbs#mg_sun_bleach	default	ambient_occlusion:g normalws:c mask:g	mask:g[roughness]	1	1	
+l_mg_surface_brush	Mesh Adaptive/Mask Generators	mg_surface_brush.sbs#mg_surface_brush	default	ambient_occlusion:g curvature:g position:g world_space_normal:c mask:g	mask:g[roughness]	1	1	
+l_microscope_view	Generator/Noise	noise_microscope_view.sbs#microscope_view	default		output:g[roughness]	1	1	
+l_mirror	Filter/Transformation	mirror.sbs#mirror	default	input:c	output:c[baseColor]	1	1	
+l_mirror_grayscale	Filter/Transformation	mirror.sbs#mirror_grayscale	default	input:g	output:g[roughness]	1	1	
+l_mlv_color	Filter/Blur	mean_of_least_variance.sbs#mlv_color	default	input:c	output:c[baseColor]	1	1	
+l_mlv_grayscale	Filter/Blur	mean_of_least_variance.sbs#mlv_grayscale	default	input:g	output:g[roughness]	1	1	
+l_modify_color_palette	Filter/Adjustments	quantize_color.sbs#modify_color_palette	default	id:g palette:c	output:c[baseColor] palette:c[emissive]	1	1	
+l_moisture_noise_1	Generator/Noise	noise_moisture_noise_1_v2.sbs#moisture_noise_1	default		output:g[roughness]	1	1	
+l_moisture_noise_2	Generator/Noise	noise_moisture_noise_2.sbs#moisture_noise_2	default		output:g[roughness]	1	1	
+l_mosaic	Filter/Effect	mosaic.sbs#mosaic	default	Source:c Effect:g	Mosaic:c[baseColor]	1	1	
+l_mosaic_grayscale	Filter/Effect	mosaic.sbs#mosaic_grayscale	default	Source:g Effect:g	Mosaic:g[roughness]	1	1	
+l_moss_weathering	Mesh Adaptive/Weathering	moss_weathering_material.sbs#moss_weathering	default	Input_2:c Input_5:c Input:c Input_7:c Input_6:g Input_8:g Input_9:g Input_11:g Input_10:g Input_3:c Input_4:g Input_12:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] ambient_Oolusion:g[opacity] height:g[height]	1	1	
+l_multi_clone_patch	Material Filter/Scan Processing	clone_patch.sbs#multi_clone_patch	default	input_1:c input_2:c input_3:c input_4:c input_5:c input_6:c input_7:c input_8:c	output_1:c[baseColor] output_2:c[emissive] output_3:c[] output_4:c[] output_5:c[] output_6:c[] output_7:c[] output_8:c[] areas:c[]	1	1	
+l_multi_clone_patch_grayscale	Material Filter/Scan Processing	clone_patch.sbs#multi_clone_patch_grayscale	default	input_1:g input_2:g input_3:g input_4:g input_5:g input_6:g input_7:g input_8:g	output_1:g[roughness] output_2:g[metallic] output_3:g[ambientOcclusion] output_4:g[opacity] output_5:g[height] output_6:g[] output_7:g[] output_8:g[] areas:g[]	1	1	
+l_multi_color_equalizer	Material Filter/Scan Processing	color_equalizer.sbs#multi_color_equalizer	default	input_1:c input_2:c input_3:c input_4:c input_5:c input_6:c input_7:c input_8:c mask_input:g	output_1:c[baseColor] output_2:c[emissive] output_3:c[] output_4:c[] output_5:c[] output_6:c[] output_7:c[] output_8:c[]	1	1	
+l_multi_crop	Material Filter/Scan Processing	crop.sbs#multi_crop	default	input_1:c input_2:c input_3:c input_4:c input_5:c input_6:c input_7:c input_8:c	output_1:c[baseColor] output_2:c[emissive] output_3:c[] output_4:c[] output_5:c[] output_6:c[] output_7:c[] output_8:c[] area:c[]	1	1	
+l_multi_crop_grayscale	Material Filter/Scan Processing	crop.sbs#multi_crop_grayscale	default	input_1:g input_2:g input_3:g input_4:g input_5:g input_6:g input_7:g input_8:g	output_1:g[roughness] output_2:g[metallic] output_3:g[ambientOcclusion] output_4:g[opacity] output_5:g[height] output_6:g[] output_7:g[] output_8:g[] area:g[]	1	1	
+l_multi_directional_warp_color	Filter/Effect	multi_directional_warp.sbs#multi_directional_warp_color	default	input:c intensity_input:g	output:c[baseColor]	1	1	
+l_multi_directional_warp_grayscale	Filter/Effect	multi_directional_warp.sbs#multi_directional_warp_grayscale	default	input:g intensity_input:g	output:g[roughness]	1	1	
+l_multi_material_blend	Material Filter/Blending	multi_material_blend.sbs#multi_material_blend	default	material16_diffuse:c material16_basecolor:c Input_123:c material16_specular:c material16_emissive:c material16_glossiness:g material16_roughness:g material16_metallic:g material16_specularlevel:g material16_height:g material16_ambientocclusion:g material16_opacity:g material15_diffuse:c material15_basecolor:c Input_124:c material15_specular:c material15_emissive:c material15_glossiness:g material15_roughness:g material15_metallic:g material15_specularlevel:g material15_height:g material15_ambientocclusion:g material15_opacity:g material14_diffuse:c material14_basecolor:c Input_126:c material14_specular:c material14_emissive:c material14_glossiness:g material14_roughness:g material14_metallic:g material14_specularlevel:g material14_height:g material14_ambientocclusion:g material14_opacity:g material13_diffuse:c material13_basecolor:c material13_normal:c material13_specular:c material13_emissive:c material13_glossiness:g material13_roughness:g material13_metallic:g material13_specularlevel:g material13_height:g material13_ambientocclusion:g material13_opacity:g material12_diffuse:c material12_basecolor:c material12_normal:c material12_specular:c material12_emissive:c material12_glossiness:g material12_roughness:g material12_metallic:g material12_specularlevel:g material12_height:g material12_ambientocclusion:g material12_opacity:g material11_diffuse:c material11_basecolor:c material11_normal:c material11_specular:c material11_emissive:c material11_glossiness:g material11_roughness:g material11_metallic:g material11_specularlevel:g material11_height:g material11_ambientocclusion:g material11_opacity:g material10_diffuse:c material10_basecolor:c material10_normal:c material10_specular:c material10_emissive:c material10_glossiness:g material10_roughness:g material10_metallic:g material10_specularlevel:g material10_height:g material10_ambientocclusion:g material10_opacity:g material9_diffuse:c material9_basecolor:c material9_normal:c material9_specular:c material9_emissive:c material9_glossiness:g material9_roughness:g material9_metallic:g material9_specularlevel:g material9_height:g material9_ambientocclusion:g material9_opacity:g material8_diffuse:c material8_basecolor:c material8_normal:c material8_specular:c material8_emissive:c material8_glossiness:g material8_roughness:g material8_metallic:g material8_specularlevel:g material8_height:g material8_ambientocclusion:g material8_opacity:g material7_diffuse:c material7_basecolor:c material7_normal:c material7_specular:c material7_emissive:c material7_glossiness:g material7_roughness:g material7_metallic:g material7_specularlevel:g material7_height:g material7_ambientocclusion:g material7_opacity:g material6_diffuse:c material6_basecolor:c material6_normal:c material6_specular:c material6_emissive:c material6_glossiness:g material6_roughness:g material6_metallic:g material6_specularlevel:g material6_height:g material6_ambientocclusion:g material6_opacity:g material5_diffuse:c material5_basecolor:c material5_normal:c material5_specular:c material5_emissive:c material5_glossiness:g material5_roughness:g material5_metallic:g material5_specularlevel:g material5_height:g material5_ambientocclusion:g material5_opacity:g material4_diffuse:c material4_basecolor:c material4_normal:c material4_specular:c material4_emissive:c material4_glossiness:g material4_roughness:g material4_metallic:g material4_specularlevel:g material4_height:g material4_ambientocclusion:g material4_opacity:g material3_diffuse:c material3_basecolor:c material3_normal:c material3_specular:c material3_emissive:c material3_glossiness:g material3_roughness:g material3_metallic:g material3_specularlevel:g material3_height:g material3_ambientocclusion:g material3_opacity:g material2_diffuse:c material2_basecolor:c material2_normal:c material2_specular:c material2_emissive:c material2_glossiness:g material2_roughness:g material2_metallic:g material2_specularlevel:g material2_height:g material2_ambientocclusion:g material2_opacity:g material1_diffuse:c material1_basecolor:c material1_normal:c material1_specular:c material1_emissive:c material1_glossiness:g material1_roughness:g material1_metallic:g material1_specularlevel:g material1_height:g material1_ambientocclusion:g material1_opacity:g Input_160:c	Diffuse:c[baseColor] basecolor:c[emissive] Normal:c[] Specular:c[] Emissive:c[] Glossiness:g[roughness] Roughness:g[metallic] Metallic:g[ambientOcclusion] specularlevel:g[opacity] AmbientOcclusion:g[height] Height:g[] opacity:g[]	1	1	
+l_multi_switch	Filter/Blending	blend_switch.sbs#multi_switch	default	input_1:c input_2:c input_3:c input_4:c input_5:c input_6:c input_7:c input_8:c input_9:c input_10:c input_11:c input_12:c input_13:c input_14:c input_15:c input_16:c input_17:c input_18:c input_19:c input_20:c	output:c[baseColor]	1	1	
+l_multi_switch_grayscale	Filter/Blending	blend_switch.sbs#multi_switch_grayscale	default	input_1:g input_2:g input_3:g input_4:g input_5:g input_6:g input_7:g input_8:g input_9:g input_10:g input_11:g input_12:g input_13:g input_14:g input_15:g input_16:g input_17:g input_18:g input_19:g input_20:g	output:g[roughness]	1	1	
+l_multiangle_to_albedo	Material Filter/Scan Processing	multiangle_to_albedo.sbs#multiangle_to_albedo	default	input_1:c input_2:c input_3:c input_4:c input_5:c input_6:c input_7:c input_8:c	albedo:c[baseColor]	1	1	
+l_multiangle_to_normal	Material Filter/Scan Processing	multiangle_to_normal.sbs#multiangle_to_normal	default	input_1:c input_2:c input_3:c input_4:c input_5:c input_6:c input_7:c input_8:c	normal:c[baseColor]	1	1	
+l_nadir_extract	3D View/HDRI Tools	panorama_nadir_extract.sbs#nadir_extract	default	input:c	output:c[baseColor]	1	1	
+l_noise_upscale_1	Filter/Transformation	noise_upscale_1.sbs#noise_upscale_1	default	Source:g	Noise_ResolutionX2:g[roughness]	1	1	
+l_noise_upscale_2	Filter/Transformation	noise_upscale_2.sbs#noise_upscale_2	default	Source:g	Noise_ResolutionX2_2:g[roughness]	1	1	
+l_noise_upscale_3	Filter/Transformation	noise_upscale_3.sbs#noise_upscale_3	default	Source:g Mask:g	Noise_ResolutionX2_3:g[roughness]	1	1	
+l_non_square_transform	Filter/Transformation	non_square_transform.sbs#non_square_transform	default	input:c	output:c[baseColor]	1	1	
+l_non_square_transform_greyscale	Filter/Transformation	non_square_transform.sbs#non_square_transform_greyscale	default	input:g	output:g[roughness]	1	1	
+l_non_uniform_blur	Filter/Blur	non_uniform_blur.sbs#non_uniform_blur	default	Source:c Effect:g	Non_Uniform_Blur:c[baseColor]	1	1	
+l_non_uniform_blur_grayscale	Filter/Blur	non_uniform_blur.sbs#non_uniform_blur_grayscale	default	Source:g Effect:g	Non_Uniform_Blur:g[roughness]	1	1	
+l_non_uniform_directional_warp_color	Filter/Effect	non_uniform_directional_warp.sbs#non_uniform_directional_warp_color	default	input:c intensity_input:g warp_angle_input:g	output:c[baseColor]	1	1	
+l_non_uniform_directional_warp_grayscale	Filter/Effect	non_uniform_directional_warp.sbs#non_uniform_directional_warp_grayscale	default	input:g intensity_input:g warp_angle_input:g	output:g[roughness]	1	1	
+l_non_uniform_rotation_color	Filter/Transformation	non_uniform_rotation.sbs#non_uniform_rotation_color	default	input:c rotation_map:g rotation_pivot_map:c	output:c[baseColor]	1	1	
+l_non_uniform_rotation_grayscale	Filter/Transformation	non_uniform_rotation.sbs#non_uniform_rotation_grayscale	default	input:g rotation_map:g rotation_pivot_map:c	output:g[roughness]	1	1	
+l_normal_blend	Filter/Normal Map	normal_blend.sbs#normal_blend	default	NormalFG:c NormalBG:c Mask:g	Normal_Blend:c[baseColor]	1	1	
+l_normal_color	Generator/Color	normal_color.sbs#normal_color	default		Normal_Color:c[baseColor]	1	1	
+l_normal_combine	Filter/Normal Map	normal_combine.sbs#normal_combine	default	Input_1:c Input:c	normal:c[baseColor]	1	1	
+l_normal_intensity	Filter/Normal Map	normal_intensity.sbs#normal_intensity	default	input:c	output:c[baseColor]	1	1	
+l_normal_invert	Filter/Normal Map	normal_invert.sbs#normal_invert	default	Normal:c	normal:c[baseColor]	1	1	
+l_normal_normalise	Filter/Normal Map	normal_normalise.sbs#normal_normalise	default	Normal:c	Normalise:c[baseColor]	1	1	
+l_normal_sobel_2	Filter/Normal Map	normal_sobel.sbs#normal_sobel_2	default	input:g	output:c[baseColor]	1	1	
+l_normal_to_height	Filter/Normal Map	normal_to_height_2.sbs#normal_to_height	default	Input:c	height:g[roughness]	1	1	
+l_normal_to_height_hq	Filter/Normal Map	normal_to_height_hq.sbs#normal_to_height_hq	default	normal:c	height:g[roughness]	1	1	
+l_normal_transform	Filter/Normal Map	normal_transform.sbs#normal_transform	default	input:c	output:c[baseColor]	1	1	
+l_normal_uncombine	Filter/Normal Map	normal_uncombine.sbs#normal_uncombine	default	normal:c height:g	normal:c[baseColor]	1	1	
+l_normal_vector_rotation	Filter/Normal Map	normal_vector_rotation.sbs#normal_vector_rotation	default	Normal:c rotation_map:g	Normal:c[baseColor]	1	1	
+l_painted_metal_weathering	Mesh Adaptive/Weathering	painted_metal_weathering_material.sbs#painted_metal_weathering	default	Diffuse:c basecolor_1:c Normal_High_Poly_1:c Specular:c Input:g Input_1:g Input_2:g Height:g Input_3:g Normal_Wold_Space:c AO:g Input_12:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] Specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] height:g[opacity] ambient_occlusion:g[height]	1	1	
+l_panorama_3d_position	3D View/HDRI Tools	panorama_position.sbs#panorama_3d_position	default		output:c[baseColor]	1	1	
+l_panorama_gradient_2_points	3D View/HDRI Tools	panorama_gradients.sbs#panorama_gradient_2_points	default		output:c[baseColor]	1	1	
+l_panorama_gradient_linear	3D View/HDRI Tools	panorama_gradients.sbs#panorama_gradient_linear	default		output:c[baseColor]	1	1	
+l_panorama_line_light	3D View/HDRI Tools	panorama_shape.sbs#panorama_line_light	default	background_image_input:c shape_image_input:c pattern_image_input:g	output:c[baseColor]	1	1	
+l_panorama_nadir_patch	3D View/HDRI Tools	panorama_nadir_patch.sbs#panorama_nadir_patch	default	input:c mask_input:g	output:c[baseColor]	1	1	
+l_panorama_physical_sun_sky	3D View/HDRI Tools	panorama_physical_sun_sky.sbs#panorama_physical_sun_sky	default		output:c[baseColor]	1	1	
+l_panorama_plane_light	3D View/HDRI Tools	panorama_shape.sbs#panorama_plane_light	default	background_image_input:c shape_image_input:c pattern_image_input:g	output:c[baseColor]	1	1	
+l_panorama_rotation	3D View/HDRI Tools	panorama_rotation.sbs#panorama_rotation	default	input:c	output:c[baseColor]	1	1	
+l_panorama_shape	Generator/Pattern	panorama_shape.sbs#panorama_shape	default	input:c	output:c[baseColor]	1	1	
+l_panorama_shape_2	3D View/HDRI Tools	panorama_shape.sbs#panorama_shape_2	default	background_image_input:c shape_image_input:c	output:c[baseColor]	1	1	
+l_panorama_sphere_light	3D View/HDRI Tools	panorama_shape.sbs#panorama_sphere_light	default	background_image_input:c sphere_image_input:c	output:c[baseColor]	1	1	
+l_panorama_straighten_horizon	3D View/HDRI Tools	panorama_straighten_horizon.sbs#panorama_straighten_horizon	default	input:c	output:c[baseColor]	1	1	
+l_path_to_spline	Splines & Paths/Splines	paths_tools.sbs#path_to_spline	default	paths:c	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_paths_polygon	Splines & Paths/Paths	paths_tools.sbs#paths_polygon	default		paths:c[baseColor]	1	1	
+l_paths_trace	Splines & Paths/Paths	paths_tools.sbs#paths_trace	default	paths:c background:c	tracing:c[baseColor]	1	1	
+l_paths_warp	Splines & Paths/Paths	paths_tools.sbs#paths_warp	default	paths:c gradient:g	paths:c[baseColor]	1	1	
+l_pbr_albedo_safe_color	Material Filter/PBR Utilities	pbr_albedo_safe_color.sbs#pbr_albedo_safe_color	default	basecolor_diffuse:c metallic:g	input:c[baseColor]	1	1	
+l_pbr_base_material	Material Filter/PBR Utilities	pbr_base_material.sbs#pbr_base_material	default	diffuse_input:c basecolor_input:c normal_input:c specular_input:c glossiness_input:g roughness_input:g metallic_input:g height_input:g ambientOcclusion_input:g grunge_input:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] height:g[opacity] ambientOcclusion:g[height]	1	1	
+l_pbr_basecolor_metallic_validate_2	Material Filter/PBR Utilities	pbr_basecolor_metallic_validate.sbs#pbr_basecolor_metallic_validate_2	default	baseColor:c metallic:g	baseColor:c[baseColor]	1	1	
+l_pbr_dielectric_F0	Material Filter/PBR Utilities	pbr_dielectric_F0.sbs#pbr_dielectric_F0	default		specular:c[baseColor]	1	1	
+l_pbr_metal_reflectance	Material Filter/PBR Utilities	pbr_metal_reflectance.sbs#pbr_metal_reflectance	default		output:c[baseColor]	1	1	
+l_perlin_noise	Generator/Noise	noise_perlin_noise_v2.sbs#perlin_noise	default		output:g[roughness]	1	1	
+l_plasma	Generator/Noise	noise_plasma.sbs#plasma	default		output:g[roughness]	1	1	
+l_point_list	Splines & Paths/Splines	spline_tools.sbs#point_list	default	preview:g point_list_input:c	preview:g[roughness] point_list:c[baseColor]	1	1	
+l_polar_to_cartesian	Filter/Transformation	cartesian_polar_transformation.sbs#polar_to_cartesian	default	input:c	output:c[baseColor]	1	1	
+l_polar_to_cartesian_grayscale	Filter/Transformation	cartesian_polar_transformation.sbs#polar_to_cartesian_grayscale	default	input:g	output:g[roughness]	1	1	
+l_polygon_1	Generator/Pattern	pattern_polygon_1.sbs#polygon_1	default		output:g[roughness]	1	1	
+l_polygon_2	Generator/Pattern	pattern_polygon_2.sbs#polygon_2	default		output:g[roughness]	1	1	
+l_pow	Filter/Adjustments	pow.sbs#pow	default	input:c	output:c[baseColor]	1	1	
+l_pow_grayscale	Filter/Adjustments	pow.sbs#pow_grayscale	default	input:g	output:g[roughness]	1	1	
+l_premult_to_straight	Filter/Channels	pre_multiply_straight.sbs#premult_to_straight	default	input:c	output:c[baseColor]	1	1	
+l_quad_transform	Filter/Transformation	quad_transform.sbs#quad_transform	default	input:c	output:c[baseColor]	1	1	
+l_quad_transform_grayscale	Filter/Transformation	quad_transform.sbs#quad_transform_grayscale	default	input:g	output:g[roughness]	1	1	
+l_quad_transform_path	Splines & Paths/Paths	paths_tools.sbs#quad_transform_path	default	paths:c	paths:c[baseColor]	1	1	
+l_quantize	Filter/Adjustments	quantize.sbs#quantize	default	Input:c	Quantize:c[baseColor]	1	1	
+l_quantize_color	Filter/Adjustments	quantize_color.sbs#quantize_color	default	input:c	output:c[baseColor] id:g[roughness] palette:c[emissive]	1	1	
+l_quantize_grayscale	Filter/Adjustments	quantize_2.sbs#quantize_grayscale	default	input:g curve_input:g	output:g[roughness]	1	1	
+l_radial_blur	Filter/Blur	radial_blur.sbs#radial_blur	default	input:c	output:c[baseColor]	1	1	
+l_radial_blur_grayscale	Filter/Blur	radial_blur.sbs#radial_blur_grayscale	default	input:g	output:g[roughness]	1	1	
+l_reaction_diffusion	Filter/Effect	reaction_diffusion.sbs#reaction_diffusion	default	input:g	Output:g[roughness]	1	1	
+l_replace_color	Filter/Adjustments	replace_color.sbs#replace_color	default	Input:c	ToTargetColor:c[baseColor]	1	1	
+l_replace_color_range	Filter/Adjustments	replace_color.sbs#replace_color_range	default	Input:c	ToTargetColorRange:c[baseColor]	1	1	
+l_rgb_a_merge	Filter/Channels	rgb-a_merge.sbs#rgb-a_merge	default	RGB:c A:g	RGB-A_Merge:c[baseColor]	1	1	
+l_rgb_a_split	Filter/Channels	rgb-a_split.sbs#rgb-a_split	default	RGBA:c	RGB:c[baseColor] A:g[roughness]	1	1	
+l_rgba_merge	Filter/Channels	rgba_merge.sbs#rgba_merge	default	R:g G:g B:g A:g	RGBA_Merge:c[baseColor]	1	1	
+l_rgba_split	Filter/Channels	rgba_split.sbs#rgba_split	default	RGBA:c	R:g[roughness] G:g[metallic] B:g[ambientOcclusion] A:g[opacity]	1	1	
+l_rock_weathering	Mesh Adaptive/Weathering	rock_weathering_material.sbs#rock_weathering	default	Diffuse:c basecolor_1:c Input:c Specular:c Input_1:g Input_3:g Input_4:g Height:g Input_2:g AO:g Curvature:g Normal_Wold_Space:c Input_12:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] height:g[opacity] ambient_occlusion:g[height]	1	1	
+l_rt_ao	Filter/Effect	rt_ao_v2.sbs#rt_ao	default	input:g	output:g[roughness]	1	1	
+l_rt_bent_normal	Filter/Normal Map	rt_bent_normal_v2.sbs#rt_bent_normal	default	input:g	output:c[baseColor]	1	1	
+l_rt_caustics_color	Generator/Noise	rt_caustics.sbs#rt_caustics_color	default	input:g	output:c[baseColor]	1	1	
+l_rt_caustics_grayscale	Generator/Noise	rt_caustics.sbs#rt_caustics_grayscale	default	input:g	output:g[roughness]	1	1	
+l_rt_irradiance	Filter/Effect	rt_irradiance.sbs#rt_irradiance	default	basecolor:c metallic:g height:g emissive:c environment:c	output:c[baseColor] raw_irradiance:c[emissive]	1	1	
+l_rt_shadows	Filter/Effect	rt_shadows_v2.sbs#rt_shadows	default	input:g	output:g[roughness]	1	1	
+l_rust_weathering	Mesh Adaptive/Weathering	rust_weathering_material.sbs#rust_weathering	default	diffuse_1:c basecolor_1:c normal_1:c specular_1:c glossiness_1:g roughness_1:g metallic_1:g height_1:g ambientOcclusion_1:g ambientOcclusion:g curvature:g position:c mask_1:g	Diffuse:c[baseColor] basecolor:c[emissive] Normal:c[] Specular:c[] Glossiness:g[roughness] Roughness:g[metallic] Metallic:g[ambientOcclusion] Height:g[opacity] ambient_occlusion:g[height]	1	1	
+l_safe_transform	Filter/Transformation	safe_transform.sbs#safe_transform	default	input:c	output:c[baseColor]	1	1	
+l_safe_transform_grayscale	Filter/Transformation	safe_transform.sbs#safe_transform_grayscale	default	input:g	output:g[roughness]	1	1	
+l_scatter_on_spline_color	Splines & Paths/Splines	spline_tools.sbs#scatter_on_spline_color	default	spline_coords:c spline_data:c background:c pattern_input_1:c pattern_input_2:c pattern_input_3:c pattern_input_4:c pattern_input_5:c pattern_input_6:c pattern_input_7:c pattern_input_8:c scale_map:g color_map:c mask_map:g	output:c[baseColor]	1	1	
+l_scatter_on_spline_grayscale	Splines & Paths/Splines	spline_tools.sbs#scatter_on_spline_grayscale	default	spline_coords:c spline_data:c background:g pattern_input_1:g pattern_input_2:g pattern_input_3:g pattern_input_4:g pattern_input_5:g pattern_input_6:g pattern_input_7:g pattern_input_8:g scale_map:g height_map:g mask_map:g	output:g[roughness]	1	1	
+l_scatter_splines_on_splines	Splines & Paths/Splines	spline_tools.sbs#scatter_splines_on_splines	default	spline_coords:c spline_data:c preview:g custom_spline_coords:c custom_spline_data:c scale_map:g rotation_map:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_scratches_generator	Generator/Pattern	pattern_scratches_generator.sbs#scratches_generator	default		output:g[roughness]	1	1	
+l_scratches_generator_normal	Generator/Pattern	pattern_scratches_generator.sbs#scratches_generator_normal	default		normal:c[baseColor] mask:g[roughness]	1	1	
+l_select_path	Splines & Paths/Paths	paths_tools.sbs#select_path	default	paths:c	paths:c[baseColor]	1	1	
+l_shadows	Filter/Effect	shadows.sbs#shadows	default	Input:g	shadows:g[roughness]	1	1	
+l_shape	Generator/Pattern	pattern_shape.sbs#shape	default		output:g[roughness]	1	1	
+l_shape_drop_shadow_color	Filter/Effect	shape_shadow.sbs#shape_drop_shadow_color	default	input:c	output:c[baseColor] mask:g[roughness]	1	1	
+l_shape_drop_shadow_grayscale	Filter/Effect	shape_shadow.sbs#shape_drop_shadow_grayscale	default	input:g	output:c[baseColor] mask:g[roughness]	1	1	
+l_shape_extrude_2	Generator/Pattern	shape_extrude.sbs#shape_extrude_2	default	extrude_shape_input:g profile_gradient:g profile_mask:g	output:g[roughness]	1	1	
+l_shape_glow_color	Filter/Effect	shape_glow.sbs#shape_glow_color	default	input:c	output:c[baseColor] mask:g[roughness]	1	1	
+l_shape_glow_grayscale	Filter/Effect	shape_glow.sbs#shape_glow_grayscale	default	input:g	output:c[baseColor] mask:g[roughness]	1	1	
+l_shape_mapper	Generator/Pattern	shape_mapper.sbs#shape_mapper	default	input:g	output:g[roughness]	1	1	
+l_shape_splatter	Generator/Pattern	shape_splatter.sbs#shape_splatter	default	background_height:g splatter_data_1:c pattern_1:g pattern_2:g pattern_3:g pattern_4:g pattern_5:g pattern_6:g pattern_7:g pattern_8:g pattern_distribution_map:g shape_scale_map:g shape_rotation_map:g height_offset_map:g height_scale_map:g mask_random_map:g vector_map:c	height:g[roughness] splatter_data_1:c[baseColor] splatter_data_2:c[emissive]	1	1	
+l_shape_splatter_blend	Generator/Pattern	shape_splatter.sbs#shape_splatter_blend	default	background_color:g pattern_1:g pattern_2:g pattern_3:g pattern_4:g pattern_5:g pattern_6:g pattern_7:g pattern_8:g color_input:g splatter_data_1:c splatter_data_2:c	output:g[roughness]	1	1	
+l_shape_splatter_blend_color	Generator/Pattern	shape_splatter.sbs#shape_splatter_blend_color	default	background_color:c pattern_1:c pattern_2:c pattern_3:c pattern_4:c pattern_5:c pattern_6:c pattern_7:c pattern_8:c color_input:c splatter_data_1:c splatter_data_2:c	output:c[baseColor]	1	1	
+l_shape_splatter_data_extract	Generator/Pattern	shape_splatter.sbs#shape_splatter_data_extract	default	splatter_data_1:c splatter_data_2:c	position:c[baseColor] uv_shape_space:c[emissive] uv_texture_space:c[] bounding_box_size:c[] shape_index:c[] pattern_id:g[roughness] shape_angle:g[metallic]	1	1	
+l_shape_splatter_mapper_color	Generator/Pattern	shape_splatter_v2_companion.sbs#shape_splatter_mapper_color	default	grid_atlas_input:c pattern_input_1:c pattern_input_2:c pattern_input_3:c pattern_input_4:c pattern_input_5:c pattern_input_6:c pattern_input_7:c pattern_input_8:c background_input:c color_input:c normal:c shape_splatter_uvw:c shape_splatter_data_1:c shape_splatter_data_2:c shape_splatter_data_3:c shape_splatter_data_4:c	output:c[baseColor]	1	1	
+l_shape_splatter_mapper_grayscale	Generator/Pattern	shape_splatter_v2_companion.sbs#shape_splatter_mapper_grayscale	default	grid_atlas_input:g pattern_input_1:g pattern_input_2:g pattern_input_3:g pattern_input_4:g pattern_input_5:g pattern_input_6:g pattern_input_7:g pattern_input_8:g background_input:g color_input:g normal:c shape_splatter_uvw:c shape_splatter_data_1:c shape_splatter_data_2:c shape_splatter_data_3:c shape_splatter_data_4:c	output:g[roughness]	1	1	
+l_shape_splatter_to_mask__shape_splatter	Generator/Pattern	shape_splatter.sbs#shape_splatter_to_mask	default	splatter_data_1:c	position:g[roughness]	1	1	
+l_shape_splatter_to_mask__shape_splatter_v2_companion	Generator/Pattern	shape_splatter_v2_companion.sbs#shape_splatter_to_mask	default	shape_splatter_uvw:c	position:g[roughness]	1	1	
+l_shape_splatter_v2	Generator/Pattern	shape_splatter_v2.sbs#shape_splatter_v2	default	background_height:g density_map:g height_offset_map:g height_scale_map:g shape_scale_map:g shape_rotation_map:g vector_map:c mask_map:g pattern_input_1:g pattern_input_2:g pattern_input_3:g pattern_input_4:g pattern_input_5:g pattern_input_6:g pattern_input_7:g pattern_input_8:g grid_atlas_height:g grid_atlas_normal:c	height:g[roughness] sdf_color:c[baseColor] sdf_metalness:g[metallic] sdf_roughness:g[ambientOcclusion] normal:c[emissive] shape_splatter_uvw:c[] shape_splatter_data_1:c[] shape_splatter_data_2:c[] shape_splatter_data_3:c[] shape_splatter_data_4:c[]	1	1	
+l_shape_stroke_color	Filter/Effect	shape_stroke.sbs#shape_stroke_color	default	input:c	output:c[baseColor] mask:g[roughness]	1	1	
+l_shape_stroke_grayscale	Filter/Effect	shape_stroke.sbs#shape_stroke_grayscale	default	input:g	output:c[baseColor] mask:g[roughness]	1	1	
+l_skew	Filter/Transformation	skew.sbs#skew	default	Source:c	Skew:c[baseColor]	1	1	
+l_skew_grayscale	Filter/Transformation	skew.sbs#skew_grayscale	default	Source:g	Skew:g[roughness]	1	1	
+l_slope_blur	Filter/Blur	slope_blur.sbs#slope_blur	default	Source:c Effect:g	Slope_Blur:c[baseColor]	1	1	
+l_slope_blur_grayscale_2	Filter/Blur	slope_blur.sbs#slope_blur_grayscale_2	default	Source:g Effect:g	Slope_Blur:g[roughness]	1	1	
+l_smart_auto_tile	Material Filter/Scan Processing	smart_auto_tile.sbs#smart_auto_tile	default	baseColor:c normal:c height:g mask:g	baseColor:c[baseColor] normal:c[emissive] height:g[roughness] pattern:c[]	1	1	
+l_snow_cover	Material Filter/Effect	me_snow_cover.sbs#snow_cover	default	diffuse:c basecolor:c normal:c specular:g glossiness:g roughness:g metallic:g height:g ambient_occlusion:g mask:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:g[roughness] glossiness:g[metallic] roughness:g[ambientOcclusion] metallic:g[opacity] height:g[height] ambient_occlusion:g[]	1	1	
+l_splatter	Generator/Pattern	splatter.sbs#splatter	default	Source:g	Splatter_Grayscale:g[roughness]	1	1	
+l_splatter_circular	Generator/Pattern	pattern_splatter_circular.sbs#splatter_circular	default	pattern_input_1:g pattern_input_2:g pattern_input_3:g pattern_input_4:g pattern_input_5:g pattern_input_6:g background:g	Splatter_Circular:g[roughness]	1	1	
+l_splatter_circular_color	Generator/Pattern	pattern_splatter_circular.sbs#splatter_circular_color	default	pattern_input_1:c pattern_input_2:c pattern_input_3:c pattern_input_4:c pattern_input_5:c pattern_input_6:c background:c	Splatter_Circular:c[baseColor]	1	1	
+l_splatter_color	Generator/Pattern	splatter_color.sbs#splatter_color	default	Source:c Source_alpha:g	Splatter:c[baseColor]	1	1	
+l_spline_2dtransform	Splines & Paths/Splines	spline_tools.sbs#spline_2dtransform	default	spline_coords:c spline_data:c preview:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_append	Splines & Paths/Splines	spline_tools.sbs#spline_append	default	spline_coords_1:c spline_data_1:c preview_1:g preview_2:g spline_coords_2:c spline_data_2:c	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_bridge_2_splines	Splines & Paths/Splines	spline_tools.sbs#spline_bridge_2_splines	default	spline_coords_1:c spline_data_1:c preview_1:g spline_coords_2:c spline_data_2:c preview_2:g start_tangent_length_curve:g start_tangent_rotation_curve:g end_tangent_length_curve:g end_tangent_rotation_curve:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_bridge_list_v2	Splines & Paths/Splines	spline_tools.sbs#spline_bridge_list_v2	default	spline_coords:c spline_data:c preview:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_bridge_mapper_color	Splines & Paths/Splines	spline_tools.sbs#spline_bridge_mapper_color	default	background:g spline_coords:c spline_data:c color_map:c	color:c[baseColor] height:g[roughness] uv:c[emissive] mask:g[metallic]	1	1	
+l_spline_bridge_mapper_grayscale	Splines & Paths/Splines	spline_tools.sbs#spline_bridge_mapper_grayscale	default	background:g spline_coords:c spline_data:c color_map:g	color:g[roughness] height:g[metallic] uv:c[baseColor] mask:g[ambientOcclusion]	1	1	
+l_spline_circle	Splines & Paths/Splines	spline_tools.sbs#spline_circle	default	spline_coords:c spline_data:c preview:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_cubic	Splines & Paths/Splines	spline_tools.sbs#spline_cubic	default	spline_coords:c spline_data:c preview:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_fill	Splines & Paths/Splines	spline_tools.sbs#spline_fill	default	preview:g spline_coords:c spline_data:c	output:g[roughness]	1	1	
+l_spline_flow_mapper	Splines & Paths/Splines	spline_tools.sbs#spline_flow_mapper	default	spline_coords:c spline_data:c background:g attenuation_profile_curve:g	output:c[baseColor]	1	1	
+l_spline_mapper_color	Splines & Paths/Splines	spline_tools.sbs#spline_mapper_color	default	background:g spline_coords:c spline_data:c color_map:c height_map:g twist_curve:g	color:c[baseColor] height:g[roughness] uv:c[emissive] id:g[metallic]	1	1	
+l_spline_mapper_grayscale	Splines & Paths/Splines	spline_tools.sbs#spline_mapper_grayscale	default	background:g spline_coords:c spline_data:c color_map:g height_map:g twist_curve:g	color:g[roughness] height:g[metallic] uv:c[baseColor] id:g[ambientOcclusion]	1	1	
+l_spline_merge_list	Splines & Paths/Splines	spline_tools.sbs#spline_merge_list	default	spline_coords:c spline_data:c preview:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_poly_quadratic	Splines & Paths/Splines	spline_tools.sbs#spline_poly_quadratic	default	spline_coords:c spline_data:c preview:g points_preview:g point_list_input:c	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_quadratic	Splines & Paths/Splines	spline_tools.sbs#spline_quadratic	default	spline_coords:c spline_data:c preview:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_render	Splines & Paths/Splines	spline_tools.sbs#spline_render	default	spline_coords:c spline_data:c background:g	output:g[roughness]	1	1	
+l_spline_sample_height	Splines & Paths/Splines	spline_tools.sbs#spline_sample_height	default	spline_coords:c spline_data:c preview:g height_map:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_sample_thickness	Splines & Paths/Splines	spline_tools.sbs#spline_sample_thickness	default	spline_coords:c spline_data:c preview:g thickness_map:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_select	Splines & Paths/Splines	spline_tools.sbs#spline_select	default	spline_coords:c spline_data:c preview:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spline_warp	Splines & Paths/Splines	spline_tools.sbs#spline_warp	default	spline_coords:c spline_data:c preview:g intensity_map:g vector_map:c attenuation_curve:g	spline_coords:c[baseColor] spline_data:c[emissive] preview:g[roughness]	1	1	
+l_spot_emboss	/Effect	spot_emboss.sbs#spot_emboss	default	Source:c Height:g	Spot_Emboss:c[baseColor]	1	1	
+l_srgb_to_acescg	Filter/Adjustments	color_space_conversion.sbs#srgb_to_acescg	default	input:c	output:c[baseColor]	1	1	
+l_srgb_to_linear_srgb	Filter/Adjustments	color_space_conversion.sbs#srgb_to_linear_srgb	default	input:c	output:c[baseColor]	1	1	
+l_srgb_to_linear_srgb_grayscale	Filter/Adjustments	color_space_conversion.sbs#srgb_to_linear_srgb_grayscale	default	input:g	output:g[roughness]	1	1	
+l_star	Generator/Pattern	pattern_star.sbs#star	default		output:g[roughness]	1	1	
+l_starburst	Generator/Pattern	starburst.sbs#starburst	default		Starburst:g[roughness]	1	1	
+l_straight_to_premult	Filter/Channels	pre_multiply_straight.sbs#straight_to_premult	default	input:c	output:c[baseColor]	1	1	
+l_stripes	Generator/Pattern	pattern_stripes.sbs#stripes	default		Stripes:g[roughness]	1	1	
+l_summed_area_table	Filter/Effect	summed_area_table_2.sbs#summed_area_table	default	input:g	output:g[roughness]	1	1	
+l_swirl	Filter/Effect	swirl.sbs#swirl	default	input:c	output:c[baseColor]	1	1	
+l_swirl_grayscale	Filter/Effect	swirl.sbs#swirl_grayscale	default	input:g	output:g[roughness]	1	1	
+l_switch	Filter/Blending	blend_switch.sbs#switch	default	input_1:c input_2:c	output:c[baseColor]	1	1	
+l_switch_grayscale	Filter/Blending	blend_switch.sbs#switch_grayscale	default	input_1:g input_2:g	output:g[roughness]	1	1	
+l_symmetry	Filter/Transformation	symmetry.sbs#symmetry	default	Source:c	Symmetry:c[baseColor]	1	1	
+l_symmetry_slice	Filter/Transformation	symmetry_slice.sbs#symmetry_slice	default	Source:c	Symmetry_Slice:c[baseColor]	1	1	
+l_threshold	Filter/Adjustments	threshold.sbs#threshold	default	input:g	output:g[roughness]	1	1	
+l_tile_generator	Generator/Pattern	pattern_tile_generator.sbs#tile_generator	default	pattern_input_1:g pattern_input_2:g pattern_input_3:g pattern_input_4:g pattern_input_5:g pattern_input_6:g background:g	output:g[roughness]	1	1	
+l_tile_generator_color	Generator/Pattern	pattern_tile_generator.sbs#tile_generator_color	default	pattern_input_1:c pattern_input_2:c pattern_input_3:c pattern_input_4:c pattern_input_5:c pattern_input_6:c background:c	output:c[baseColor]	1	1	
+l_tile_random	Generator/Pattern	pattern_tile_random.sbs#tile_random	default	pattern_input:g background_input:g	output:g[roughness]	1	1	
+l_tile_random_2	Generator/Pattern	pattern_tile_random_2.sbs#tile_random_2	default	random_size_map:g random_slant_map:g round_corners_radius_map:g bevel_distance_map:g mask_map:g	output:g[roughness] flood_fill_data1:c[baseColor]	1	1	
+l_tile_random_color	Generator/Pattern	pattern_tile_random.sbs#tile_random_color	default	pattern_input:c background_input:c	output:c[baseColor]	1	1	
+l_tile_sampler	Generator/Pattern	pattern_tile_sampler.sbs#tile_sampler	default	pattern_input:g pattern_input_2:g pattern_input_3:g pattern_input_4:g pattern_input_5:g pattern_input_6:g scale_map_input:g displacement_map_input:g rotation_map_input:g vector_map_input:c color_map_input:g mask_map_input:g pattern_distribution_map_input:g background_input:g	output:g[roughness]	1	1	
+l_tile_sampler_color	Generator/Pattern	pattern_tile_sampler.sbs#tile_sampler_color	default	pattern_input:c pattern_input_2:c pattern_input_3:c pattern_input_4:c pattern_input_5:c pattern_input_6:c scale_map_input:g displacement_map_input:g rotation_map_input:g vector_map_input:c color_map_input:c mask_map_input:g pattern_distribution_map_input:g background_input:c	output:c[baseColor]	1	1	
+l_tileable_material_to_mesh_material	Material Filters/Mesh Adaptive	tileable_material_to_mesh_material.sbs#tileable_material_to_mesh_material	default	Diffuse:c Specular:c Normal_WS:c AO:g Curvature:g	Diffuse:c[baseColor] Specular:c[emissive]	1	1	
+l_trapezoid_transform	Filter/Transformation	trapezoid_transform.sbs#trapezoid_transform	default	input:c	output:c[baseColor]	1	1	
+l_trapezoid_transform_grayscale	Filter/Transformation	trapezoid_transform.sbs#trapezoid_transform_grayscale	default	input:g	output:g[roughness]	1	1	
+l_triangle_grid_color	Generator/Pattern	pattern_triangle_grid.sbs#triangle_grid_color	default	height:g vector_map:c color_input:c	output:c[baseColor]	1	1	
+l_triangle_grid_grayscale	Generator/Pattern	pattern_triangle_grid.sbs#triangle_grid_grayscale	default	height:g vector_map:c color_input:g	output:g[roughness]	1	1	
+l_triplanar_3	Mesh Adaptive/Utilities	triplanar.sbs#triplanar_3	default	position:c ws_normal:c input_x:c input_y:c input_z:c	output:c[baseColor]	1	1	
+l_triplanar_grayscale_3	Mesh Adaptive/Utilities	triplanar.sbs#triplanar_grayscale_3	default	position:c ws_normal:c input_x:g input_y:g input_z:g	output:g[roughness]	1	1	
+l_uber_emboss	Filter/Effect	uber_emboss.sbs#uber_emboss	default	Source:c Height:g	Uber_Emboss:c[baseColor]	1	1	
+l_uv_mapper_color	Splines & Paths/Splines	uv_mapper.sbs#uv_mapper_color	default	uv:c input:c	output:c[baseColor]	1	1	
+l_uv_mapper_grayscale	Splines & Paths/Splines	uv_mapper.sbs#uv_mapper_grayscale	default	uv:c input:g	output:g[roughness]	1	1	
+l_vector_morph	Filter/Effect	vector_morph.sbs#vector_morph	default	input:c vector_field:c	output:c[baseColor]	1	1	
+l_vector_morph_grayscale	Filter/Effect	vector_morph.sbs#vector_morph_grayscale	default	input:g vector_field:c	output:g[roughness]	1	1	
+l_vector_warp	Filter/Effect	vector_warp.sbs#vector_warp	default	input:c vector_map:c	output:c[baseColor]	1	1	
+l_vector_warp_grayscale	Filter/Effect	vector_warp.sbs#vector_warp_grayscale	default	input:g vector_map:c	output:g[roughness]	1	1	
+l_vertex_processor	Splines & Paths/Paths	paths_tools.sbs#vertex_processor	default	paths:c input_1:c input_2:g input_3:c input_4:g input_5:c input_6:g input_7:c input_8:g	paths:c[baseColor]	1	1	
+l_vertex_processor_simple	Splines & Paths/Paths	paths_tools.sbs#vertex_processor_simple	default	paths:c input_1:c input_2:g input_3:c input_4:g	paths:c[baseColor]	1	1	
+l_view_color_palette	Filter/Adjustments	quantize_color.sbs#view_color_palette	default	palette:c input:c	output:c[baseColor]	1	1	
+l_voronoi	Generator/Noise	noise_voronoi.sbs#voronoi	default		output:g[roughness]	1	1	
+l_voronoi_fractal	Generator/Noise	noise_voronoi.sbs#voronoi_fractal	default		output:g[roughness]	1	1	
+l_water_level	Material Filter/Effect	me_water_level.sbs#water_level	default	diffuse:c basecolor:c normal:c specular:c glossiness:g roughness:g metallic:g height:g ambient_occlusion:g mask:g	diffuse:c[baseColor] basecolor:c[emissive] normal:c[] specular:c[] glossiness:g[roughness] roughness:g[metallic] metallic:g[ambientOcclusion] height:g[opacity] ambient_occlusion:g[height] mask:g[]	1	1	
+l_waveform_01_v2	Generator/Noise	waveform_01_v2.sbs#waveform_01_v2	default		Waveform:g[roughness]	1	1	
+l_weave_1	Generator/Pattern	pattern_weave_1.sbs#weave_1	default		output:g[roughness]	1	1	
+l_weave_2	Generator/Pattern	pattern_weave_2.sbs#weave_2	default		output:g[roughness]	1	1	
+l_weave_generator	Generator/Pattern	pattern_weave_generator.sbs#weave_generator	default		Height:g[roughness] Opacity:g[metallic] Mask_1:g[ambientOcclusion] Mask_2:g[opacity]	1	1	
+l_white_noise_v2	Generator/Noise	white_noise_v2.sbs#white_noise_v2	default		output:g[roughness]	1	1	

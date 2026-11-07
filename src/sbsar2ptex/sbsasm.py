@@ -20,14 +20,17 @@ reads it, whose uid is their offset. The node word's x is the size, log2
 height << 4 | log2 width, and its flags >> 8 the format (RAW_FORMATS).
 
 Trailer (the file's last 16 bytes): u32 node count, offset of the node
-table, offset of the output map, offset of the defaults block.
+table, offset of the output map, offset of the defaults block (0: absent).
 
-Node table: an offset per node, to its node word. Output map: per graph
-output, in the XML's order, (u32 format, u32 node index). Defaults block: the
-graph inputs' default values, in uid order (as the uid table), images taking
-no space. Then the uid table: u16 output count, u16 input count, the output
-uids, then (u32 type, u32 uid) per input, sorted by uid, $randomseed and
-$outputsize among them; it ends at the trailer.
+docs/sbsasm-container.md: node table, output map, nodes, defaults, uid
+table (one old cook puts its nodes first). Node table: an offset per node,
+to its node word. Output map: per graph output, in the XML's order, (u32
+format, u32 node index), up to the next section. Defaults block: the graph
+inputs' default values, in uid order (as the uid table), images taking no
+space in versions 2-6 and 16 bytes in 8-9. Then the uid table: u16 output
+count, u16 input count, the output uids, then (u32 type, u32 uid) per input,
+sorted by uid, $randomseed and $outputsize among them; it ends at the
+trailer, and is found by a backward search.
 
 Node: the node word ``flags << 16 | x << 8 | op`` (op: the atomic filter,
 see OPS; x is often 0x88 but not always, meaning unknown), then fields
@@ -60,6 +63,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from dataclasses import field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -361,7 +365,21 @@ def fixed_size(node: "Node") -> tuple[int, int] | None:
 
 
 TYPE_SIZES = {0: 4, 1: 8, 2: 12, 3: 16, 4: 4, 5: 0, 8: 8, 9: 12, 10: 16}
-"""Bytes a graph input of each type takes in the defaults block."""
+"""Bytes a graph input of each type takes in the defaults block (an image's
+in versions 2 to 6; see default_size)."""
+IMAGE_TYPE = 5
+IMAGE_DEFAULT_VERSION = 8
+"""From this cook version on an image input's default takes 16 bytes, its
+default color as four f32 (docs/sbsasm-container.md section 4; version 7
+was never seen)."""
+IMAGE_DEFAULT_SIZE = 16
+
+
+def default_size(kind: int, version: int) -> int | None:
+    """Return the bytes a ``kind`` input's default takes; None for an unknown type."""
+    if kind == IMAGE_TYPE and version >= IMAGE_DEFAULT_VERSION:
+        return IMAGE_DEFAULT_SIZE
+    return TYPE_SIZES.get(kind)
 
 
 def pp_inputs(word: int) -> int:
@@ -515,41 +533,28 @@ class Asm:
         self.count, table, outputs, defaults = struct.unpack_from(
             "<4I", data, len(data) - 16
         )
-        # A graph without (non-image) inputs may have no defaults block
-        # (offset 0, as in old cooks): its nodes end at the node table.
+        # docs/sbsasm-container.md. The sections: header, image data, node
+        # table, output map, nodes, defaults (absent: trailer word 3 is 0),
+        # uid table, trailer; one old cook puts the nodes first.
+        self.end = len(data) - 16
+        """The trailer's file position."""
         self.table, self.outputs_at = table + BASE, outputs + BASE
-        self.defaults_at = defaults + BASE if defaults else self.table
+        self.defaults_at: int | None = defaults + BASE if defaults else None
+        """The defaults block's file position; None when it is absent (it
+        would be empty, which is not the same as no inputs)."""
+        self.starts = [self.u32(self.table + 4 * i) + BASE for i in range(self.count)]
+        """Each node's file position, by node index."""
         self.bitmaps: list[tuple[int, int]] = []
-        at = 0x38
-        while at < self.table and data[at + 4 : at + 8].startswith(MAGICS):
+        at = DATA_START
+        first = min([self.table, *self.starts])
+        while at < first and data[at + 4 : at + 8].startswith(MAGICS):
             self.bitmaps.append((at + 4, self.u32(at)))
             at = (at + 4 + self.u32(at) + 3) & ~3
-        # The uid table ends at the trailer, and the defaults before it are
-        # its inputs' (a default can look like a table that ends there).
-        end = len(data) - 16
-
-        def table_at(at: int) -> bool:
-            n_out, n_in = struct.unpack_from("<HH", data, at)
-            if at + 4 + 4 * n_out + 8 * n_in != end:
-                return False
-            if not defaults:
-                return n_in == 0
-            pairs = at + 4 + 4 * n_out
-            kinds = [self.u32(pairs + 8 * i) for i in range(n_in)]
-            if any(k not in TYPE_SIZES for k in kinds):
-                return True  # (sizes unknown: take it)
-            return sum(TYPE_SIZES[k] for k in kinds) == at - self.defaults_at
-
-        # (after the defaults; without them, after the outputs: earlier bytes,
-        # a bitmap's, can look like a table that ends at the trailer)
-        first = self.defaults_at if defaults else self.outputs_at
-        at = next((a for a in range(first, end, 4) if table_at(a)), None)
-        if at is None:
-            msg = "no uid table before the trailer"
-            raise ValueError(msg)
-        n_out, n_in = struct.unpack_from("<HH", data, at)
-        self.output_uids = [self.u32(at + 4 + 4 * i) for i in range(n_out)]
-        pairs = at + 4 + 4 * n_out
+        self.uid_at = self._find_uid_table()
+        """The uid table's file position."""
+        n_out, n_in = struct.unpack_from("<HH", data, self.uid_at)
+        self.output_uids = [self.u32(self.uid_at + 4 + 4 * i) for i in range(n_out)]
+        pairs = self.uid_at + 4 + 4 * n_out
         self.inputs = [
             (self.u32(pairs + 8 * i + 4), self.u32(pairs + 8 * i)) for i in range(n_in)
         ]
@@ -559,14 +564,80 @@ class Asm:
             for i in range(n_out)
         ]
         self.defaults: dict[int, list[float | int]] = {}
-        at = self.defaults_at
+        """Each input's default, by uid, read from the defaults block in uid
+        order; an image's (versions 8 and 9) its default color, four f32.
+        Images in versions 2 to 6 take no bytes and have none."""
+        at = self.defaults_at if self.defaults_at is not None else self.uid_at
         for uid, kind in self.inputs:
-            size = TYPE_SIZES.get(kind)
-            if size is None:
-                break
-            fmt = "<" + ("f" if kind < 4 else "i") * (size // 4)  # noqa: PLR2004
+            size = default_size(kind, self.version)
+            if not size:
+                continue
+            fmt = "<" + ("f" if kind < 4 or kind == IMAGE_TYPE else "i") * (size // 4)  # noqa: PLR2004
             self.defaults[uid] = list(struct.unpack_from(fmt, data, at))
             at += size
+
+    def _output_count(self) -> int | None:
+        """Return the output map's entry count K, when a node or the defaults follow it.
+
+        The map runs, unpadded, up to the next section (section 3); None in
+        the old layout without a defaults block, where it ends at the uid
+        table (Asm._find_uid_table).
+        """
+        after = [s for s in self.starts if s > self.outputs_at]
+        if self.defaults_at is not None and self.defaults_at > self.outputs_at:
+            after.append(self.defaults_at)
+        if not after:
+            return None
+        return (min(after) - self.outputs_at) // 8
+
+    def _find_uid_table(self) -> int:
+        """Return the uid table's file position (section 5).
+
+        A backward search from the trailer: the candidate nearest it whose
+        header reads (K, m), whose types are known, whose uids strictly
+        increase and whose inputs' default sizes fill the defaults block
+        exactly (or none, absent). A forward search is unsafe: defaults can
+        read as a header that also ends at the trailer.
+        """
+        end = self.end
+        k = self._output_count()
+        m = 0
+        while True:
+            n_out = k
+            if n_out is None:
+                # Old layout, no defaults: the map ends where the table
+                # starts, so end - 4 - 8m = outputs_at + 12 n_out.
+                n_out, odd = divmod(end - 4 - 8 * m - self.outputs_at, 12)
+                if n_out < 0:
+                    break
+                if odd:
+                    m += 1
+                    continue
+            at = end - 4 - 4 * n_out - 8 * m
+            if at <= self.outputs_at:
+                break
+            if self._table_valid(at, n_out, m):
+                return at
+            m += 1
+        msg = "no uid table"
+        raise ValueError(msg)
+
+    def _table_valid(self, at: int, n_out: int, n_in: int) -> bool:
+        """Whether a uid table with these counts can start at ``at``."""
+        if at % 4 or struct.unpack_from("<HH", self.d, at) != (n_out, n_in):
+            return False
+        pairs = at + 4 + 4 * n_out
+        kinds = [self.u32(pairs + 8 * i) for i in range(n_in)]
+        uids = [self.u32(pairs + 8 * i + 4) for i in range(n_in)]
+        sizes = [default_size(kind, self.version) for kind in kinds]
+        if None in sizes:
+            return False
+        if any(a >= b for a, b in pairwise(uids)):
+            return False
+        total = sum(s for s in sizes if s is not None)
+        if self.defaults_at is None:
+            return total == 0
+        return total == at - self.defaults_at
 
     def raw_image(self, node: "Node") -> RawImage | None:
         """Return the raw image input ``node`` reads, if it reads one.
@@ -639,16 +710,26 @@ class Asm:
 
     def nodes(self) -> list[Node]:
         """Every node, its fields read by its op's layout."""
-        starts = [self.u32(self.table + 4 * i) + BASE for i in range(self.count)]
-        bounds = sorted(starts)
-        nxt = dict(zip(bounds, [*bounds[1:], self.defaults_at], strict=True))
         known = {uid for uid, _ in self.inputs}
-        found = [self._node(i, s, nxt[s], known) for i, s in enumerate(starts)]
+        found = [
+            self._node(i, s, self.node_end(s), known) for i, s in enumerate(self.starts)
+        ]
         for node in found:
             if node.op in TEXT_OPS and len(node.fields) == 4:  # noqa: PLR2004
                 node.text = text_record(self.d, node.fields[2])
                 node.font = font_record(self.d, node.fields[3])
         return found
+
+    def node_end(self, start: int) -> int:
+        """Return where the node at file position ``start`` ends (section 6).
+
+        At the next larger start among the nodes, the node table, the output
+        map, the defaults block (if present) and the uid table.
+        """
+        bounds = [*self.starts, self.table, self.outputs_at, self.uid_at]
+        if self.defaults_at is not None:
+            bounds.append(self.defaults_at)
+        return min((b for b in bounds if b > start), default=self.end)
 
     def _node(self, index: int, start: int, end: int, known: set[int]) -> Node:
         node = Node(index, start, end)

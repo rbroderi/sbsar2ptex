@@ -93,8 +93,11 @@ def cook(
     data = bytearray(end + 16)
     data[:4] = b"SBAM"
     struct.pack_into("<H", data, 6, 9)
-    struct.pack_into("<I", data, 0x40, AT)  # the node table
-    struct.pack_into("<II", data, 0x44, 0xC0, 0)  # the outputs
+    # The node table, then the output map, which runs up to the node
+    # (docs/sbsasm-container.md section 3: K from the section extent).
+    table, outputs = node_at - 12, node_at - 8
+    struct.pack_into("<I", data, table, AT)
+    struct.pack_into("<II", data, outputs, 0xC0, 0)
     if text is not None:
         struct.pack_into(f"<{1 + len(text)}I", data, T_AT + BASE, len(text), *text)
     if font is not None:
@@ -105,7 +108,7 @@ def cook(
     struct.pack_into("<iii", data, defaults, 0, 6, 6)
     struct.pack_into("<HHI", data, uids, 1, 2, 0x1234)
     struct.pack_into("<4I", data, uids + 8, 4, SEED_UID, 8, SIZE_UID)
-    struct.pack_into("<4I", data, end, 1, 0x40 - BASE, 0x44 - BASE, defaults - BASE)
+    struct.pack_into("<4I", data, end, 1, table - BASE, outputs - BASE, defaults - BASE)
     (node,) = Asm(bytes(data)).nodes()
     return node
 

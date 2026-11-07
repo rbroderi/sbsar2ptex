@@ -1,0 +1,165 @@
+node	category	package	variant	inputs	outputs	cooked_ok	rendered_ok	error
+a_bitmap_c_default_coded	Atomic	atomic:bitmap	c/default/coded		output:c[baseColor]	1	1	
+a_bitmap_c_default_noise	Atomic	atomic:bitmap	c/default/noise		output:c[baseColor]	1	1	
+a_bitmap_g_default_coded	Atomic	atomic:bitmap	g/default/coded		output:g[roughness]	1	1	
+a_bitmap_g_default_noise	Atomic	atomic:bitmap	g/default/noise		output:g[roughness]	1	1	
+a_blend_c_default_coded	Atomic	atomic:blend	c/default/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_default_noise	Atomic	atomic:blend	c/default/noise	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m01_add_coded	Atomic	atomic:blend	c/m01_add/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m02_subtract_coded	Atomic	atomic:blend	c/m02_subtract/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m03_multiply_coded	Atomic	atomic:blend	c/m03_multiply/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m04_addsub_coded	Atomic	atomic:blend	c/m04_addsub/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m05_max_coded	Atomic	atomic:blend	c/m05_max/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m06_min_coded	Atomic	atomic:blend	c/m06_min/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m07_switch_coded	Atomic	atomic:blend	c/m07_switch/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m08_divide_coded	Atomic	atomic:blend	c/m08_divide/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m09_overlay_coded	Atomic	atomic:blend	c/m09_overlay/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m10_screen_coded	Atomic	atomic:blend	c/m10_screen/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_m11_softlight_coded	Atomic	atomic:blend	c/m11_softlight/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_c_opacity037_coded	Atomic	atomic:blend	c/opacity037/coded	source:c destination:c opacity:g	output:c[baseColor]	1	1	
+a_blend_g_default_coded	Atomic	atomic:blend	g/default/coded	source:g destination:g opacity:g	output:g[roughness]	1	1	
+a_blend_g_default_noise	Atomic	atomic:blend	g/default/noise	source:g destination:g opacity:g	output:g[roughness]	1	1	
+a_blend_g_m01_add_coded	Atomic	atomic:blend	g/m01_add/coded	source:g destination:g opacity:g	output:g[roughness]	1	1	
+a_blend_g_m02_subtract_coded	Atomic	atomic:blend	g/m02_subtract/coded	source:g destination:g opacity:g	output:g[roughness]	1	1	
+a_blend_g_m03_multiply_coded	Atomic	atomic:blend	g/m03_multiply/coded	source:g destination:g opacity:g	output:g[roughness]	1	1	
+a_blend_g_m08_divide_coded	Atomic	atomic:blend	g/m08_divide/coded	source:g destination:g opacity:g	output:g[roughness]	1	1	
+a_blend_g_m09_overlay_coded	Atomic	atomic:blend	g/m09_overlay/coded	source:g destination:g opacity:g	output:g[roughness]	1	1	
+a_blend_g_opacity037_coded	Atomic	atomic:blend	g/opacity037/coded	source:g destination:g opacity:g	output:g[roughness]	1	1	
+a_blur_c_default_coded	Atomic	atomic:blur	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_blur_c_default_noise	Atomic	atomic:blur	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_blur_c_i2_5_coded	Atomic	atomic:blur	c/i2_5/coded	input1:c	output:c[baseColor]	1	1	
+a_blur_c_i40_coded	Atomic	atomic:blur	c/i40/coded	input1:c	output:c[baseColor]	1	1	
+a_blur_g_default_coded	Atomic	atomic:blur	g/default/coded	input1:g	output:g[roughness]	1	1	
+a_blur_g_default_noise	Atomic	atomic:blur	g/default/noise	input1:g	output:g[roughness]	1	1	
+a_blur_g_i2_5_coded	Atomic	atomic:blur	g/i2_5/coded	input1:g	output:g[roughness]	1	1	
+a_blur_g_i40_coded	Atomic	atomic:blur	g/i40/coded	input1:g	output:g[roughness]	1	1	
+a_curve_c_default_coded	Atomic	atomic:curve	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_curve_c_default_noise	Atomic	atomic:curve	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_curve_c_s_curve_coded	Atomic	atomic:curve	c/s_curve/coded	input1:c	output:c[baseColor]	1	1	
+a_curve_g_default_coded	Atomic	atomic:curve	g/default/coded	input1:g	output:g[roughness]	1	1	
+a_curve_g_default_noise	Atomic	atomic:curve	g/default/noise	input1:g	output:g[roughness]	1	1	
+a_curve_g_s_curve_coded	Atomic	atomic:curve	g/s_curve/coded	input1:g	output:g[roughness]	1	1	
+a_directionalwarp_c_a03_i20_coded	Atomic	atomic:directionalwarp	c/a03_i20/coded	input1:c inputintensity:g	output:c[baseColor]	1	1	
+a_directionalwarp_c_default_coded	Atomic	atomic:directionalwarp	c/default/coded	input1:c inputintensity:g	output:c[baseColor]	1	1	
+a_directionalwarp_c_default_noise	Atomic	atomic:directionalwarp	c/default/noise	input1:c inputintensity:g	output:c[baseColor]	1	1	
+a_directionalwarp_g_a03_i20_coded	Atomic	atomic:directionalwarp	g/a03_i20/coded	input1:g inputintensity:g	output:g[roughness]	1	1	
+a_directionalwarp_g_default_coded	Atomic	atomic:directionalwarp	g/default/coded	input1:g inputintensity:g	output:g[roughness]	1	1	
+a_directionalwarp_g_default_noise	Atomic	atomic:directionalwarp	g/default/noise	input1:g inputintensity:g	output:g[roughness]	1	1	
+a_dirmotionblur_c_a0125_i20_coded	Atomic	atomic:dirmotionblur	c/a0125_i20/coded	input1:c	output:c[baseColor]	1	1	
+a_dirmotionblur_c_default_coded	Atomic	atomic:dirmotionblur	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_dirmotionblur_c_default_noise	Atomic	atomic:dirmotionblur	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_dirmotionblur_g_a0125_i20_coded	Atomic	atomic:dirmotionblur	g/a0125_i20/coded	input1:g	output:g[roughness]	1	1	
+a_dirmotionblur_g_default_coded	Atomic	atomic:dirmotionblur	g/default/coded	input1:g	output:g[roughness]	1	1	
+a_dirmotionblur_g_default_noise	Atomic	atomic:dirmotionblur	g/default/noise	input1:g	output:g[roughness]	1	1	
+a_distance_c_combine_coded	Atomic	atomic:distance	c/combine/coded	mask:g source:c	output:c[baseColor]	1	1	
+a_distance_c_d50_coded	Atomic	atomic:distance	c/d50/coded	mask:g source:c	output:c[baseColor]	1	1	
+a_distance_c_default_coded	Atomic	atomic:distance	c/default/coded	mask:g source:c	output:c[baseColor]	1	1	
+a_distance_c_default_noise	Atomic	atomic:distance	c/default/noise	mask:g source:c	output:c[baseColor]	1	1	
+a_distance_g_combine_coded	Atomic	atomic:distance	g/combine/coded	mask:g source:g	output:g[roughness]	1	1	
+a_distance_g_d50_coded	Atomic	atomic:distance	g/d50/coded	mask:g source:g	output:g[roughness]	1	1	
+a_distance_g_default_coded	Atomic	atomic:distance	g/default/coded	mask:g source:g	output:g[roughness]	1	1	
+a_distance_g_default_noise	Atomic	atomic:distance	g/default/noise	mask:g source:g	output:g[roughness]	1	1	
+a_dyngradient_c_default_coded	Atomic	atomic:dyngradient	c/default/coded	input1:g input2:c	output:c[baseColor]	1	1	
+a_dyngradient_c_default_noise	Atomic	atomic:dyngradient	c/default/noise	input1:g input2:c	output:c[baseColor]	1	1	
+a_dyngradient_c_vertical_coded	Atomic	atomic:dyngradient	c/vertical/coded	input1:g input2:c	output:c[baseColor]	1	1	
+a_dyngradient_g_default_coded	Atomic	atomic:dyngradient	g/default/coded	input1:g input2:g	output:g[roughness]	1	1	
+a_dyngradient_g_default_noise	Atomic	atomic:dyngradient	g/default/noise	input1:g input2:g	output:g[roughness]	1	1	
+a_dyngradient_g_vertical_coded	Atomic	atomic:dyngradient	g/vertical/coded	input1:g input2:g	output:g[roughness]	1	1	
+a_emboss_c_default_coded	Atomic	atomic:emboss	c/default/coded	input1:c inputgradient:g	output:c[baseColor]	1	1	
+a_emboss_c_default_noise	Atomic	atomic:emboss	c/default/noise	input1:c inputgradient:g	output:c[baseColor]	1	1	
+a_emboss_c_i20_a03_coded	Atomic	atomic:emboss	c/i20_a03/coded	input1:c inputgradient:g	output:c[baseColor]	1	1	
+a_emboss_g_default_coded	Atomic	atomic:emboss	g/default/coded	input1:g inputgradient:g	output:g[roughness]	1	1	
+a_emboss_g_default_noise	Atomic	atomic:emboss	g/default/noise	input1:g inputgradient:g	output:g[roughness]	1	1	
+a_emboss_g_i20_a03_coded	Atomic	atomic:emboss	g/i20_a03/coded	input1:g inputgradient:g	output:g[roughness]	1	1	
+a_fxmaps_c_default_coded	Atomic	atomic:fxmaps	c/default/coded	inputpattern:c	output:c[baseColor]	1	1	
+a_fxmaps_c_default_noise	Atomic	atomic:fxmaps	c/default/noise	inputpattern:c	output:c[baseColor]	1	1	
+a_fxmaps_c_image_coded	Atomic	atomic:fxmaps	c/image/coded	inputpattern:c	output:c[baseColor]	1	1	
+a_fxmaps_c_quad_rot_coded	Atomic	atomic:fxmaps	c/quad_rot/coded	inputpattern:c	output:c[baseColor]	1	1	
+a_fxmaps_g_default_coded	Atomic	atomic:fxmaps	g/default/coded	inputpattern:g	output:g[roughness]	1	1	
+a_fxmaps_g_default_noise	Atomic	atomic:fxmaps	g/default/noise	inputpattern:g	output:g[roughness]	1	1	
+a_fxmaps_g_image_coded	Atomic	atomic:fxmaps	g/image/coded	inputpattern:g	output:g[roughness]	1	1	
+a_fxmaps_g_quad_rot_coded	Atomic	atomic:fxmaps	g/quad_rot/coded	inputpattern:g	output:g[roughness]	1	1	
+a_gradient_g_default_coded	Atomic	atomic:gradient	g/default/coded	input1:g	output:c[baseColor]	1	1	
+a_gradient_g_default_noise	Atomic	atomic:gradient	g/default/noise	input1:g	output:c[baseColor]	1	1	
+a_gradient_g_keys4_coded	Atomic	atomic:gradient	g/keys4/coded	input1:g	output:c[baseColor]	1	1	
+a_grayscaleconversion_c_default_coded	Atomic	atomic:grayscaleconversion	c/default/coded	input1:c	output:g[roughness]	1	1	
+a_grayscaleconversion_c_default_noise	Atomic	atomic:grayscaleconversion	c/default/noise	input1:c	output:g[roughness]	1	1	
+a_grayscaleconversion_c_weights_coded	Atomic	atomic:grayscaleconversion	c/weights/coded	input1:c	output:g[roughness]	1	1	
+a_hsl_c_default_coded	Atomic	atomic:hsl	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_hsl_c_default_noise	Atomic	atomic:hsl	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_hsl_c_hue02_coded	Atomic	atomic:hsl	c/hue02/coded	input1:c	output:c[baseColor]	1	1	
+a_hsl_c_lum065_coded	Atomic	atomic:hsl	c/lum065/coded	input1:c	output:c[baseColor]	1	1	
+a_hsl_c_sat08_coded	Atomic	atomic:hsl	c/sat08/coded	input1:c	output:c[baseColor]	1	1	
+a_levels_c_default_coded	Atomic	atomic:levels	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_levels_c_default_noise	Atomic	atomic:levels	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_levels_c_in02_08_coded	Atomic	atomic:levels	c/in02_08/coded	input1:c	output:c[baseColor]	1	1	
+a_levels_c_mid03_coded	Atomic	atomic:levels	c/mid03/coded	input1:c	output:c[baseColor]	1	1	
+a_levels_c_out01_09_coded	Atomic	atomic:levels	c/out01_09/coded	input1:c	output:c[baseColor]	1	1	
+a_levels_g_default_coded	Atomic	atomic:levels	g/default/coded	input1:g	output:g[roughness]	1	1	
+a_levels_g_default_noise	Atomic	atomic:levels	g/default/noise	input1:g	output:g[roughness]	1	1	
+a_levels_g_in02_08_coded	Atomic	atomic:levels	g/in02_08/coded	input1:g	output:g[roughness]	1	1	
+a_levels_g_mid03_coded	Atomic	atomic:levels	g/mid03/coded	input1:g	output:g[roughness]	1	1	
+a_levels_g_out01_09_coded	Atomic	atomic:levels	g/out01_09/coded	input1:g	output:g[roughness]	1	1	
+a_motionblur_c_default_coded	Atomic	atomic:motionblur	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_motionblur_c_default_noise	Atomic	atomic:motionblur	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_motionblur_g_default_coded	Atomic	atomic:motionblur	g/default/coded	input1:g	output:g[roughness]	1	1	
+a_motionblur_g_default_noise	Atomic	atomic:motionblur	g/default/noise	input1:g	output:g[roughness]	1	1	
+a_normal_g_default_coded	Atomic	atomic:normal	g/default/coded	input1:g	output:c[baseColor]	1	1	
+a_normal_g_default_noise	Atomic	atomic:normal	g/default/noise	input1:g	output:c[baseColor]	1	1	
+a_normal_g_i3_coded	Atomic	atomic:normal	g/i3/coded	input1:g	output:c[baseColor]	1	1	
+a_normal_g_inv_y_coded	Atomic	atomic:normal	g/inv_y/coded	input1:g	output:c[baseColor]	1	1	
+a_passthrough_c_default_coded	Atomic	atomic:passthrough	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_passthrough_c_default_noise	Atomic	atomic:passthrough	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_passthrough_g_default_coded	Atomic	atomic:passthrough	g/default/coded	input1:g	output:g[roughness]	1	1	
+a_passthrough_g_default_noise	Atomic	atomic:passthrough	g/default/noise	input1:g	output:g[roughness]	1	1	
+a_pixelprocessor_c_default_coded	Atomic	atomic:pixelprocessor	c/default/coded	input:c input:1:c	output:c[baseColor]	1	1	
+a_pixelprocessor_c_default_noise	Atomic	atomic:pixelprocessor	c/default/noise	input:c input:1:c	output:c[baseColor]	1	1	
+a_pixelprocessor_c_identity_coded	Atomic	atomic:pixelprocessor	c/identity/coded	input:c input:1:c	output:c[baseColor]	1	1	
+a_pixelprocessor_c_offset_mix_coded	Atomic	atomic:pixelprocessor	c/offset_mix/coded	input:c input:1:c	output:c[baseColor]	1	1	
+a_pixelprocessor_g_default_coded	Atomic	atomic:pixelprocessor	g/default/coded	input:g input:1:g	output:g[roughness]	1	1	
+a_pixelprocessor_g_default_noise	Atomic	atomic:pixelprocessor	g/default/noise	input:g input:1:g	output:g[roughness]	1	1	
+a_pixelprocessor_g_identity_coded	Atomic	atomic:pixelprocessor	g/identity/coded	input:g input:1:g	output:g[roughness]	1	1	
+a_pixelprocessor_g_offset_mix_coded	Atomic	atomic:pixelprocessor	g/offset_mix/coded	input:g input:1:g	output:g[roughness]	1	1	
+a_sharpen_c_default_coded	Atomic	atomic:sharpen	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_sharpen_c_default_noise	Atomic	atomic:sharpen	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_sharpen_c_i2_coded	Atomic	atomic:sharpen	c/i2/coded	input1:c	output:c[baseColor]	1	1	
+a_sharpen_g_default_coded	Atomic	atomic:sharpen	g/default/coded	input1:g	output:g[roughness]	1	1	
+a_sharpen_g_default_noise	Atomic	atomic:sharpen	g/default/noise	input1:g	output:g[roughness]	1	1	
+a_sharpen_g_i2_coded	Atomic	atomic:sharpen	g/i2/coded	input1:g	output:g[roughness]	1	1	
+a_shuffle_c_default_coded	Atomic	atomic:shuffle	c/default/coded	input1:c input2:c	output:c[baseColor]	1	1	
+a_shuffle_c_default_noise	Atomic	atomic:shuffle	c/default/noise	input1:c input2:c	output:c[baseColor]	1	1	
+a_shuffle_c_swap_coded	Atomic	atomic:shuffle	c/swap/coded	input1:c input2:c	output:c[baseColor]	1	1	
+a_svg_c_default_coded	Atomic	atomic:svg	c/default/coded		output:c[baseColor]	1	1	
+a_svg_c_default_noise	Atomic	atomic:svg	c/default/noise		output:c[baseColor]	1	1	
+a_svg_g_default_coded	Atomic	atomic:svg	g/default/coded		output:g[roughness]	1	1	
+a_svg_g_default_noise	Atomic	atomic:svg	g/default/noise		output:g[roughness]	1	1	
+a_text_c_default_coded	Atomic	atomic:text	c/default/coded		output:c[baseColor]	1	1	
+a_text_c_default_noise	Atomic	atomic:text	c/default/noise		output:c[baseColor]	1	1	
+a_text_g_default_coded	Atomic	atomic:text	g/default/coded		output:g[roughness]	1	1	
+a_text_g_default_noise	Atomic	atomic:text	g/default/noise		output:g[roughness]	1	1	
+a_transformation_c_default_coded	Atomic	atomic:transformation	c/default/coded	input1:c	output:c[baseColor]	1	1	
+a_transformation_c_default_noise	Atomic	atomic:transformation	c/default/noise	input1:c	output:c[baseColor]	1	1	
+a_transformation_c_halfpx_nearest_coded	Atomic	atomic:transformation	c/halfpx_nearest/coded	input1:c	output:c[baseColor]	1	1	
+a_transformation_c_offset_coded	Atomic	atomic:transformation	c/offset/coded	input1:c	output:c[baseColor]	1	1	
+a_transformation_c_rot30_coded	Atomic	atomic:transformation	c/rot30/coded	input1:c	output:c[baseColor]	1	1	
+a_transformation_c_scale2_notile_coded	Atomic	atomic:transformation	c/scale2_notile/coded	input1:c	output:c[baseColor]	1	1	
+a_transformation_g_default_coded	Atomic	atomic:transformation	g/default/coded	input1:g	output:g[roughness]	1	1	
+a_transformation_g_default_noise	Atomic	atomic:transformation	g/default/noise	input1:g	output:g[roughness]	1	1	
+a_transformation_g_halfpx_nearest_coded	Atomic	atomic:transformation	g/halfpx_nearest/coded	input1:g	output:g[roughness]	1	1	
+a_transformation_g_offset_coded	Atomic	atomic:transformation	g/offset/coded	input1:g	output:g[roughness]	1	1	
+a_transformation_g_rot30_coded	Atomic	atomic:transformation	g/rot30/coded	input1:g	output:g[roughness]	1	1	
+a_transformation_g_scale2_notile_coded	Atomic	atomic:transformation	g/scale2_notile/coded	input1:g	output:g[roughness]	1	1	
+a_uniform_c_color_coded	Atomic	atomic:uniform	c/color/coded		output:c[baseColor]	1	1	
+a_uniform_c_default_coded	Atomic	atomic:uniform	c/default/coded		output:c[baseColor]	1	1	
+a_uniform_c_default_noise	Atomic	atomic:uniform	c/default/noise		output:c[baseColor]	1	1	
+a_uniform_g_color_coded	Atomic	atomic:uniform	g/color/coded		output:g[roughness]	1	1	
+a_uniform_g_default_coded	Atomic	atomic:uniform	g/default/coded		output:g[roughness]	1	1	
+a_uniform_g_default_noise	Atomic	atomic:uniform	g/default/noise		output:g[roughness]	1	1	
+a_warp_c_default_coded	Atomic	atomic:warp	c/default/coded	input1:c inputgradient:g	output:c[baseColor]	1	1	
+a_warp_c_default_noise	Atomic	atomic:warp	c/default/noise	input1:c inputgradient:g	output:c[baseColor]	1	1	
+a_warp_c_i10_coded	Atomic	atomic:warp	c/i10/coded	input1:c inputgradient:g	output:c[baseColor]	1	1	
+a_warp_c_i50_coded	Atomic	atomic:warp	c/i50/coded	input1:c inputgradient:g	output:c[baseColor]	1	1	
+a_warp_g_default_coded	Atomic	atomic:warp	g/default/coded	input1:g inputgradient:g	output:g[roughness]	1	1	
+a_warp_g_default_noise	Atomic	atomic:warp	g/default/noise	input1:g inputgradient:g	output:g[roughness]	1	1	
+a_warp_g_i10_coded	Atomic	atomic:warp	g/i10/coded	input1:g inputgradient:g	output:g[roughness]	1	1	
+a_warp_g_i50_coded	Atomic	atomic:warp	g/i50/coded	input1:g inputgradient:g	output:g[roughness]	1	1	

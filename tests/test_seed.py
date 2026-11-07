@@ -58,13 +58,16 @@ def cook(words: list[int], *, seed: int = 0, size: int = 6, version: int = 9) ->
     data = bytearray(end + 16)
     data[:4] = b"SBAM"
     struct.pack_into("<H", data, 6, version)
-    struct.pack_into("<I", data, 0x40, AT)  # the node table
-    struct.pack_into("<II", data, 0x44, 0xC0, 0)  # the outputs
+    # The node table, then the output map, which runs up to the node
+    # (docs/sbsasm-container.md section 3: K from the section extent).
+    table, outputs = node_at - 12, node_at - 8
+    struct.pack_into("<I", data, table, AT)
+    struct.pack_into("<II", data, outputs, 0xC0, 0)
     struct.pack_into(f"<{len(words)}I", data, node_at, *words)
     struct.pack_into("<iii", data, defaults, seed, size, size)
     struct.pack_into("<HHI", data, uids, 1, 2, 0x1234)
     struct.pack_into("<4I", data, uids + 8, 4, SEED_UID, 8, SIZE_UID)
-    struct.pack_into("<4I", data, end, 1, 0x40 - BASE, 0x44 - BASE, defaults - BASE)
+    struct.pack_into("<4I", data, end, 1, table - BASE, outputs - BASE, defaults - BASE)
     (node,) = Asm(bytes(data)).nodes()
     return node
 
